@@ -9,17 +9,17 @@
 
 ## P0 后端骨架与台账
 
-- [ ] **T1 后端骨架与依赖**
+- [x] **T1 后端骨架与依赖**
   - Acceptance：`backend/.venv` 可用；`requirements.txt` 固定版本；FastAPI 能起来并返回 200；`/openapi.json` 可访问（它是前后端契约源）
   - Verify：`pip install -r requirements.txt` 后 `uvicorn app.main:app --port 8000`，打开 `http://127.0.0.1:8000/docs` 与实际接口一致
   - Files：`backend/requirements.txt`、`backend/app/main.py`、`.gitignore`
 
-- [ ] **T2 建库与 schema**
-  - Acceptance：`backend/sql/schema.sql` 覆盖这些表——`profile_item`（长期档案）、`ledger_event`（台账流水）、`learning_request`（每轮输入）、`candidate`（候选）、`plan`、`plan_node`（两级节点）、`report`（报告）、`proposal`（LLM 提案）、`notification_log`（触达记录）、`llm_provider`（提供商配置）、`llm_call`（调用记账）；`python -m app.db init` 可重复执行不报错
+- [x] **T2 建库与 schema**
+  - Acceptance：`backend/sql/schema.sql` 覆盖这些表——`profile_item`（长期档案）、`ledger_event`（台账流水）、`learning_request`（每轮输入）、`candidate`（候选）、`plan`、`plan_node`（两级节点）、`report`（报告）、`proposal`（LLM 提案）、`notification_log`（触达记录）、`llm_provider`（提供商配置）、`llm_call`（调用记账）、`task_model_map`（任务类型 → provider + 模型）；`python -m app.db init` 可重复执行不报错
   - Verify：删掉 `data/cadence.db` 重新 init，`sqlite3 data/cadence.db ".tables"` 表齐全
   - Files：`backend/sql/schema.sql`、`backend/app/db.py`
 
-- [ ] **T3 状态台账 `ledger.py`**
+- [x] **T3 状态台账 `ledger.py`**
   - Acceptance：提供 `supersede` / `void` / `log_event` 与「取当前有效值」的查询；旧值只标记不删除；四类对象（档案、候选、会话决策、计划节点）都走同一入口
   - Verify：单测覆盖「取代后旧值不可见、但仍在流水里」「作废带 reason」「空值 / 重复取代不炸」
   - Files：`backend/app/ledger.py`、`backend/tests/test_ledger.py`

@@ -1,7 +1,9 @@
-# 学习决策与跟进 Agent · SPEC v0.3
+# 学习决策与跟进 Agent · SPEC v0.5
 
-项目目录 `D:\cadence`　|　状态：待 review　|　范围：v0 试水
+项目目录 `D:\cadence`　|　状态：**规格已定，开工实现 T1**　|　范围：v0 试水
 
+**v0.5 变更**：U2 定为档 2、「按任务指定模型」定为做、项目名暂用 `cadence`；未决项只剩一条且不阻塞开工。
+**v0.4 变更**：Markdown 导出定为要做；新增 `docs/U2-触达详解.md` 与第 18 节「已定决策速查」。
 **v0.3 变更**：LLM 调用纪律定稿（**不设预算上限**，改为调用记账 + 循环保护）；新增「多家 API 提供商管理」。
 **v0.2 变更**：技术形态改为**前后端分离**——Next.js 前端 + FastAPI 后端（v0.1 原为 FastAPI + Jinja2 单体）。
 
@@ -155,7 +157,7 @@
 
 - 数据模型：`llm_provider`（名称、基址、密钥、默认模型、是否默认、是否启用）+ `llm_call`（调用记账）。
 - 前端一个管理页：增删改、测试连通性、设为默认；密钥输入框**只写不读**，列表里只显示掩码。
-- **提议（待你确认）**：支持「按任务指定模型」——四问判断、候选生成、阶段拆分、对话压缩可各自指定 provider 与模型，默认走默认 provider。这样轻活（压缩、汇总）走便宜模型、重活（判断、拆分）走强模型，是接入多家最实际的收益。
+- **按任务指定模型（已定：做）**：四问判断、候选生成、阶段拆分、对话压缩可各自指定 provider 与模型，默认走默认 provider。轻活（压缩、汇总）走便宜模型、重活（判断、拆分）走强模型，这是接入多家最实际的收益。数据模型上加一张 `task_model_map`（任务类型 → provider + 模型）。
 
 **Ask first**：这份契约一旦开工就属于「改契约」范畴，改动要同步前后端。
 
@@ -217,16 +219,15 @@ data/cadence.db       运行时数据库（不进版本库）
 **后端**：台账写入是全系统唯一入口，所有状态变更都从这里过，因此它必须能一眼看懂「为什么变」：
 
 ```python
-def supersede(entity_type: str, entity_id: int, new_value: str, reason: str, actor: str) -> None:
-    """作废旧值并写入新值。
+def supersede(conn, entity_type, entity_id, new_values: dict, reason: str, actor: str = "user") -> int:
+    """用新值取代旧值：旧行标记 superseded，新行成为当前有效值。
 
-    旧值不删除，只标记 superseded —— 台账的价值就在能回答「上周为什么这么定」。
+    旧值不删除 —— 台账的价值就在能回答「上周为什么这么定」。
+    没显式改动的新字段从旧行继承（如 category），免得取代一次就丢字段。
     """
-    old = fetch_active(entity_type, entity_id)
-    mark_superseded(old.id)
-    insert_active(entity_type, entity_id, new_value, actor)
-    log_event(entity_type, entity_id, "supersede", old.value, new_value, reason, actor)
 ```
+
+配套约定：缺理由、对已作废的记录做变更，一律抛 `LedgerError` 明确报错，**不静默忽略**——静默会让台账出现「看起来成功、其实没写」的假象。
 
 约定：函数小而单一；SQL 集中放 `sql/` 或对应模块，不散落在路由里；注释写「为什么」，不写「做了什么」。
 
@@ -246,12 +247,13 @@ def supersede(entity_type: str, entity_id: int, new_value: str, reason: str, act
 - **Ask first**：加依赖（pip 或 npm）；改表结构；改 API 契约；把「找」的 provider 换成联网档。
 - **Never**：把 API key 提交进仓库；让 LLM 直接写库；前端直连数据库或 LLM；前端自己持久化业务状态；为了让测试变绿而删测试。
 
-## 17. Open Questions（仍未决定）
+## 17. Open Questions
 
-1. **U2 通道最终档位**：详解见 `docs/U2-触达详解.md`。在「先本地」的前提下，**档 2**（本地定时 + 邮件提醒、邮件不带链接、含开机补发）是唯一自洽选项，等你点头。
-2. **项目名**：现在按目录名 `cadence` 称呼，要不要正式起个名字。
-3. **是否支持「按任务指定模型」**（第 11 节的提议）：轻活走便宜模型、重活走强模型。我建议做。
-4. **你说的「第 2 条」没写完**：原文留空，等你补上要加的需求。
+只剩一条，且**不阻塞开工**：
+
+1. **你留空的那条需求**：你写过「2、」后面是空的，我无法替你补。默认不做，你想起时随时补上。
+
+原先的另外三条已按推荐落定，见第 18 节第 16–18 条。
 
 ## 18. 已定决策速查
 
@@ -272,3 +274,6 @@ def supersede(entity_type: str, entity_id: int, new_value: str, reason: str, act
 | 13 | 认证 | **上线前必须加**（至少一个 token）；本地开发不做 | 本表 |
 | 14 | 项目结构 | `backend/` + `frontend/` + `docs/` + `tasks/` | 第 13 节 |
 | 15 | Markdown 导出 | **要做**：四个只读人读文件（计划-当前 / 决策台账 / 档案-当前 / 周检查点按周）；单向导出、永不回写；放 P4，默认导到 `exports/` | 本表 |
+| 16 | 触达通道 U2 | **档 2**：Windows 任务计划定时 + 邮件三问提醒（本地页面手机打不开，邮件不带链接）+ 开机补发；未回应按三级降频 | `docs/U2-触达详解.md` |
+| 17 | 按任务指定模型 | **做**：四类任务可各自指定 provider 与模型，默认走默认 provider | 第 11 节 |
+| 18 | 项目名 | 暂用 `cadence`（目录名），随时可改 | 本表 |
