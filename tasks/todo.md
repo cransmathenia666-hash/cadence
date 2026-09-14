@@ -1,9 +1,10 @@
-# 任务清单 v0.3
+# 任务清单 v0.4
 
 配套：`docs/SPEC.md` · `tasks/plan.md`
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.4 变更**：P4 新增 T17 Markdown 导出；验收任务顺延为 T18。
 **v0.3 变更**：P3 开头插入 LLM provider 管理与调用记账两个任务（T10、T11），后续任务顺延编号。
 
 ## P0 后端骨架与台账
@@ -96,9 +97,14 @@
   - Verify：`--dry-run` 输出人工核对；补发逻辑用固定时间桩单测
   - Files：`backend/app/jobs/weekly_checkpoint.py`、`backend/tests/test_weekly.py`
 
+- [ ] **T17 Markdown 导出**
+  - Acceptance：单向导出四个只读文件到 `exports/`——`计划-当前.md`、`决策台账.md`、`档案-当前.md`、`周检查点-YYYY-WW.md`；**永不回写数据库**；与每周兜底推送同一时刻自动导出，页面上另有手动导出按钮
+  - Verify：手动触发导出，四个文件内容与数据库一致；手工改 md 后重新导出会被覆盖（以此证明是单向的）
+  - Files：`backend/app/export.py`、`backend/tests/test_export.py`
+
 ## P5 验收
 
-- [ ] **T17 两周试用与成功标准走查**
+- [ ] **T18 两周试用与成功标准走查**
   - Acceptance：SPEC 第 9 节成功标准 1–5 逐条通过，或记录未通过项与原因
   - Verify：完成一次真实闭环（找 → 认同 → 计划 → 执行 → 报告 → 推进），并留存走查记录
   - Files：`docs/试用记录.md`

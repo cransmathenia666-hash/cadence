@@ -40,11 +40,11 @@ Next.js 脚手架 + 依契约写 `lib/api.ts` + 计划表页面 + 报告提交�
 
 验证：provider 管理页能新增一家并测通连通性、记账有记录；再走一遍成功标准 2 和 3。
 
-### P4 触达兜底
+### P4 触达兜底与导出
 
-`notify` 接口 + 邮件实现 + 空实现；周检查点 job；接 Windows 任务计划程序。
+`notify` 接口 + 邮件实现 + 空实现；周检查点 job；接 Windows 任务计划程序；Markdown 单向导出（四个只读人读文件，与兜底推送同一时刻触发）。
 
-验证：`python -m app.jobs.weekly_checkpoint --dry-run` 输出的三问内容正确。
+验证：`python -m app.jobs.weekly_checkpoint --dry-run` 输出的三问内容正确；导出的四个文件与数据库一致，且手工改 md 后重新导出会被覆盖（以此证明单向）。
 
 ### P5 试用验收
 
