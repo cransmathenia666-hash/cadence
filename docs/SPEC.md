@@ -1,6 +1,8 @@
-# 学习决策与跟进 Agent · SPEC v0.1
+# 学习决策与跟进 Agent · SPEC v0.2
 
 项目目录 `D:\cadence`　|　状态：待 review　|　范围：v0 试水
+
+**v0.2 变更**：技术形态改为**前后端分离**——Next.js 前端 + FastAPI 后端（v0.1 原为 FastAPI + Jinja2 单体）。改动涉及第 10–17 节。
 
 本文把你手绘的结构图（`无标题-2026-09-14-2037.excalidraw` 的未删除层）与后续讨论收敛成可执行的规格。凡是标 `待定` 的，都是还需要你拍板的项。
 
@@ -12,7 +14,7 @@
 - **User**：你自己，单用户。
 - **Why now**：你在学 Web 全栈，能学的选项比能投入的时间宽，缺的是取舍依据和「学了怎么用」。
 - **Success**：见第 9 节。
-- **Constraint**：预算敏感、低运维；技术贴着你在学的 FastAPI + SQL + Git 走，不引入新体系；档案质量取决于你愿不愿意裁定 agent 的更新提案。
+- **Constraint**：预算敏感、低运维；档案质量取决于你愿不愿意裁定 agent 的更新提案。
 - **Out of scope**：通用聊天助手；学习过程追踪（时长、视频进度、笔记、打卡、番茄钟）；题库 / 背单词；未经你认同自动进入执行；无档案依据的泛化推荐。
 
 ## 2. 边界：方向层 vs 学习过程层
@@ -59,7 +61,7 @@
 
 **5.1 长期档案（长期数据底座）**——五类：生活习惯·睡眠/运动/作息；生活记录·日程/课程/近况；当前状态·精力/时间/压力；短期目标+当下痛点；长期主线·职业方向。
 
-**5.2 每轮输入**——两种形态：当前一轮的问题（对应用户走 A 入口）；想要判断的资料 / 项目（对应 B 入口）。
+**5.2 每轮输入**——两种形态：当前一轮的问题（对应 A 入口）；想要判断的资料 / 项目（对应 B 入口）。
 
 ## 6. 计划表（U1 定为方案 C）
 
@@ -95,57 +97,103 @@
 2. 输入「我不知道该学什么」，得到 3–5 条候选，每条带「为什么对你有用」与建议深度，且有排序和一句「建议先从哪条开始」；重复提交同类请求时，**已被你否决的候选不再出现**。
 3. 输入「我发现了某个资料，要不要学」，得到四问判断，且每条答案能指回长期档案里的具体字段，而不是空泛建议。
 4. 周检查点触发时，输出必须含「当前阶段 / 本周交付物推到哪 / 落后时建议怎么调」三问；未推进时给出重排提案。
-5. 确定性逻辑（节点状态机、落后量计算、台账取代与作废）有单测且全绿。
+5. 后端确定性逻辑（节点状态机、落后量计算、台账取代与作废）有单测且全绿；前端能通过 API 完成第 1 条的全过程。
 
-## 10. 技术选型（暂定，按推荐先试水；你要改就说）
+## 10. 技术栈（v0.2：前后端分离）
 
-| 层次 | 选择 | 为什么 |
+| 层次 | 选型 | 为什么 |
 |---|---|---|
-| 存储 | SQLite（按 Postgres 兼容写法） | 单用户、单机，没有并发需求；文件即数据库，零运维。写法避开 SQLite 专有语法，将来上云换连接串即可迁移 |
-| 人读视图 | 只读导出 Markdown（可放 Obsidian） | 回答你图里「用 Obsidian 还是 SQL」：两者不是竞争关系。**SQL 是唯一真相源**，Markdown 只是导出视图，不参与状态推进 |
-| 应用 | FastAPI + Jinja2 服务端渲染 | 正对你正在学的 FastAPI；Jinja2 不引入前端构建链，少一个新体系 |
-| 决策 | LLM 只做四类活：四问判断、候选生成与初判、阶段/检查点拆分、把自由对话压成结构化提案 | 其余全部用确定性代码，省钱、可复现、可单测、能讲清 |
-| 触达 | 邮件（SMTP）+ Windows 任务计划程序 | U2 暂定档 2：零成本、手机能收到；`notify` 抽成接口，档 1/3 可替换 |
-| 找资料 | 甲档：不联网，只用模型知识 + 你的档案 | 「找」抽成 provider 接口，第二迭代再上联网核验链接 |
+| 前端 | Next.js（React + TypeScript） | 你选的前后端分离；React 负责界面，Next.js 提供路由与构建；Vercel 免费部署天然契合 |
+| 前后端通信 | HTTP + JSON，**以 FastAPI 的 OpenAPI 为契约源** | 只有一份契约，避免两边各写一套定义 |
+| 后端 | FastAPI + Uvicorn | 你既定的学习主线；类型提示自带校验 |
+| 数据库 | SQLite（按 Postgres 兼容写法），**只由后端访问** | 单用户单机、零运维；上云换连接串 |
+| 数据访问 | 后端手写 SQL（`sqlite3` 标准库） | 练 SQL，零额外依赖 |
+| LLM | 后端调用单个 LLM API + JSON 结构化输出 + schema 校验 | 只做四类活，且只落「提案」 |
+| 触达 | 后端 `smtplib` 发邮件 + Windows 任务计划程序 | 零成本、手机能收到；`notify` 抽成接口 |
+| 测试 | 后端 pytest；前端**暂不写自动化测试** | 前端靠手工走查，先跑通再谈覆盖 |
 
-**确定性优先清单**（不调模型的活）：节点状态机、落后量计算、周检查点触发判定、报告落库、台账取代与作废、通知内容组装、候选排序展示。
+**前端不引入**：状态管理库（Redux / Zustand 起步不用）、UI 组件库、ORM、Docker、向量库。
 
-## 11. Commands
+**三条铁律**（防状态分裂）：
+1. 后端是唯一真相源；前端**不持久化业务状态**，一律经 API 读写。
+2. 前端不直连数据库、不直连 LLM。
+3. 业务规则（什么算落后、什么算阶段完成）在后端算好再给前端，前端只负责展示。
 
+**确定性优先清单**（不调模型的活，全在后端）：节点状态机、落后量计算、周检查点触发判定、报告落库、台账取代与作废、通知内容组装、候选排序。
+
+## 11. API 契约（v0.2 新增）
+
+契约来源：后端 `/openapi.json`（FastAPI 自动生成）。前端据此写 `lib/api.ts`。接口清单初版：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/plan` | 当前计划、节点树、当前阶段、落后量 |
+| POST | `/api/report` | 提交报告（状态 + 一句话 + 可选产物 / 资料评价） |
+| POST | `/api/requests` | 提交每轮输入（A：不知道学什么 / B：判断某资料） |
+| GET | `/api/candidates` | 取候选清单（带初判、排序、推荐先学哪条） |
+| POST | `/api/candidates/{id}/verdict` | 采纳 / 否决某条候选（否决要留痕） |
+| GET | `/api/profile` | 取长期档案五类当前有效值 |
+| GET | `/api/proposals` | 取待裁定提案（档案变更 / 计划重排） |
+| POST | `/api/proposals/{id}/decide` | 裁定提案 |
+
+**Ask first**：这份契约一旦开工就属于「改契约」范畴，改动要同步前后端。
+
+## 12. Commands
+
+后端（`backend/`）：
 ```
 建环境      python -m venv .venv && .\.venv\Scripts\Activate.ps1
 装依赖      pip install -r requirements.txt
 初始化库    python -m app.db init
 开发        uvicorn app.main:app --reload --port 8000
+接口文档    http://127.0.0.1:8000/docs
 测试        pytest -q
 周检查点    python -m app.jobs.weekly_checkpoint --dry-run
 ```
 
-## 12. Project Structure
-
+前端（`frontend/`）：
 ```
-app/
-  main.py           FastAPI 应用与路由（页面 + 表单）
-  db.py             SQLite 连接、schema 应用
-  ledger.py         状态台账：唯一写入口，负责取代 / 作废
-  plan.py           计划与节点状态机、落后量计算
-  advisor.py        四问判断、候选生成（调 LLM，只产提案）
-  llm.py            LLM 客户端 + 结构化输出校验
-  notify.py         触达通道接口（邮箱实现 / 空实现）
-  jobs/
-    weekly_checkpoint.py
-  templates/        Jinja2 页面
-sql/schema.sql      建表语句
-tests/              pytest
-docs/SPEC.md        本文档
-tasks/plan.md       实施计划
-tasks/todo.md       任务清单
-data/cadence.db     运行时数据库（不进版本库）
+装依赖      npm install
+开发        npm run dev          （默认 http://localhost:3000）
+构建        npm run build
 ```
 
-## 13. Code Style
+开发时两个终端各起一个。首次打通的最小验证：前端一个按钮 → 后端一个接口 → 返回 JSON。
 
-台账写入是全系统唯一入口，所有状态变更都从这里过，因此它必须能一眼看懂「为什么变」：
+## 13. Project Structure
+
+```
+backend/
+  app/
+    main.py           FastAPI 应用与 API 路由
+    db.py             SQLite 连接、schema 应用
+    ledger.py         状态台账：唯一写入口，负责取代 / 作废
+    plan.py           计划与节点状态机、落后量计算
+    advisor.py        四问判断、候选生成（调 LLM，只产提案）
+    llm.py            LLM 客户端 + 结构化输出校验
+    notify.py         触达通道接口（邮箱实现 / 空实现）
+    jobs/
+      weekly_checkpoint.py
+  sql/schema.sql      建表语句
+  tests/              pytest
+  requirements.txt
+frontend/
+  app/                Next.js App Router 页面
+  components/         展示组件
+  lib/api.ts          依 OpenAPI 契约写的 API 客户端
+  package.json
+docs/
+  SPEC.md             本文档
+  API.md              （可选）契约快照，便于对照
+tasks/
+  plan.md             实施计划
+  todo.md             任务清单
+data/cadence.db       运行时数据库（不进版本库）
+```
+
+## 14. Code Style
+
+**后端**：台账写入是全系统唯一入口，所有状态变更都从这里过，因此它必须能一眼看懂「为什么变」：
 
 ```python
 def supersede(entity_type: str, entity_id: int, new_value: str, reason: str, actor: str) -> None:
@@ -161,23 +209,29 @@ def supersede(entity_type: str, entity_id: int, new_value: str, reason: str, act
 
 约定：函数小而单一；SQL 集中放 `sql/` 或对应模块，不散落在路由里；注释写「为什么」，不写「做了什么」。
 
-## 14. Testing Strategy
+**前端**：组件只负责展示与调用 API，**不内联业务规则**——「什么算落后」「什么算阶段完成」必须由后端算好返回。组件文件用 TypeScript，接口类型来自 `lib/api.ts`。
 
-- 框架 pytest，测试放 `tests/`。
+## 15. Testing Strategy
+
+- 后端用 pytest，测试放 `backend/tests/`。
 - **必须测**：节点状态机（合法与非法迁移）、落后量计算、台账取代 / 作废、周检查点触发条件、候选去重（已否决不再出现）。
-- **不测**：LLM 输出质量。LLM 用假的 provider 打桩，只验证「输出被 schema 校验 + 落成提案」这条链路。
+- **不测**：LLM 输出质量。LLM 用假的 provider 打桩，只验证「输出过 schema 校验 + 落成提案」这条链路。
+- **前端**：暂不写自动化测试，靠 `npm run dev` 手工走查；待交互稳定后再考虑加一个端到端验证。
 - 不追求覆盖率数字，追求「核心状态机没有未测分支」。
 
-## 15. Boundaries
+## 16. Boundaries
 
-- **Always**：状态变更必须经 `ledger.py`；LLM 输出先过 schema 校验；提交前跑 `pytest -q`；密钥放 `.env` 并确保被 gitignore。
-- **Ask first**：加依赖；改表结构；把「找」的 provider 换成联网档；动 `sql/schema.sql`。
-- **Never**：把 API key 提交进仓库；让 LLM 直接写库；为了让测试变绿而删测试。
+- **Always**：状态变更必须经 `backend/app/ledger.py`；LLM 输出先过 schema 校验；业务规则在后端算；提交前跑 `pytest -q`；密钥放 `.env` 并确保被 gitignore。
+- **Ask first**：加依赖（pip 或 npm）；改表结构；改 API 契约；把「找」的 provider 换成联网档。
+- **Never**：把 API key 提交进仓库；让 LLM 直接写库；前端直连数据库或 LLM；前端自己持久化业务状态；为了让测试变绿而删测试。
 
-## 16. Open Questions
+## 17. Open Questions
 
 1. **U2 通道最终档位**：暂定档 2（本地定时 + 邮件）。要改成档 1（仅本地通知）或档 3（云端常驻）吗？
-2. **LLM provider 与预算上限**：用哪个模型、每次调用与每周的额度上限是多少。
+2. **LLM provider 与预算上限**：用哪个模型、每次调用与每周的额度上限。
 3. **联网 provider（甲 → 乙）何时上**：上之前「找」只给路线层面的东西，不承诺具体链接。
-4. **导出 Markdown 视图是否要做**：若要，导出到哪个目录（是否就是 Obsidian 的 vault）。
+4. **Markdown 导出是否要做**：若要，导出到哪个目录（是否就是 Obsidian 的 vault）。
 5. **项目名**：现在按目录名 `cadence` 称呼，要不要正式起个名字。
+6. **认证**：本地开发不做（接口裸奔可接受），但**上线前必须加**，至少一个 token。
+7. **上线形态**（前后端分离的直接后果）：Next.js → Vercel 免费层；FastAPI → Render / Fly 免费层（会休眠）；**SQLite 不能用在云上的临时盘，届时必须换托管 Postgres**（如 Neon / Supabase 免费层）。要不要现在就按这条路走，还是先纯本地跑通再说。
+8. **前端语言**：暂定 TypeScript（Next.js 默认）。要改成 JavaScript 就说。
