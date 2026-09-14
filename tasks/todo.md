@@ -1,8 +1,10 @@
-# 任务清单 v0.2
+# 任务清单 v0.3
 
 配套：`docs/SPEC.md` · `tasks/plan.md`
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
+
+**v0.3 变更**：P3 开头插入 LLM provider 管理与调用记账两个任务（T10、T11），后续任务顺延编号。
 
 ## P0 后端骨架与台账
 
@@ -12,7 +14,7 @@
   - Files：`backend/requirements.txt`、`backend/app/main.py`、`.gitignore`
 
 - [ ] **T2 建库与 schema**
-  - Acceptance：`backend/sql/schema.sql` 覆盖这些表——`profile_item`（长期档案）、`ledger_event`（台账流水）、`learning_request`（每轮输入）、`candidate`（候选）、`plan`、`plan_node`（两级节点）、`report`（报告）、`proposal`（LLM 提案）、`notification_log`（触达记录）；`python -m app.db init` 可重复执行不报错
+  - Acceptance：`backend/sql/schema.sql` 覆盖这些表——`profile_item`（长期档案）、`ledger_event`（台账流水）、`learning_request`（每轮输入）、`candidate`（候选）、`plan`、`plan_node`（两级节点）、`report`（报告）、`proposal`（LLM 提案）、`notification_log`（触达记录）、`llm_provider`（提供商配置）、`llm_call`（调用记账）；`python -m app.db init` 可重复执行不报错
   - Verify：删掉 `data/cadence.db` 重新 init，`sqlite3 data/cadence.db ".tables"` 表齐全
   - Files：`backend/sql/schema.sql`、`backend/app/db.py`
 
@@ -57,36 +59,46 @@
 
 ## P3 决策入口
 
-- [ ] **T10 四问判断链路（LLM 提案）**
+- [ ] **T10 LLM provider 管理与调用记账（后端）**
+  - Acceptance：`llm_provider` 表 CRUD 与「设为默认 / 启用停用」；`POST /api/providers/{id}/test` 发最小请求测连通性；`llm_call` 每次调用落一行记账（provider、模型、输入/输出 tokens、耗时、成功与否）；**同一操作内最多 3 次模型调用**，超出即中止报错；密钥**只写不读**，列表只返回掩码
+  - Verify：单测覆盖密钥不回传明文、掩码格式、记账落行、循环保护在第 4 次调用时中止；用假 provider 打桩，不打真实接口
+  - Files：`backend/app/llm.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/tests/test_llm.py`
+
+- [ ] **T11 provider 管理页面（前端）**
+  - Acceptance：页面能列出已配置提供商（掩码）、新增、修改、删除、测连通性、设为默认；密钥输入框只写不读
+  - Verify：新增一家假的本地 provider，测连通性得到失败提示且不报异常；列表里密钥始终是掩码
+  - Files：`frontend/app/providers/page.tsx`、`frontend/lib/api.ts`
+
+- [ ] **T12 四问判断链路（LLM 提案）**
   - Acceptance：`POST /api/requests` 收「我发现了某个资料，要不要学」，产出四问答案，每条能指回 `profile_item` 的具体字段；LLM 输出先过 schema 校验，落成 `proposal`，**不直接写库**
-  - Verify：用假 LLM provider 跑单测，验证「合法输出→落提案」「非法输出→如实报错」两条路径
+  - Verify：用假 LLM provider 跑单测，验证「合法输出→落提案」「非法输出→重试一次后如实报错」两条路径
   - Files：`backend/app/advisor.py`、`backend/app/llm.py`、`backend/tests/test_advisor.py`
 
-- [ ] **T11 候选清单生成与去重**
+- [ ] **T13 候选清单生成与去重**
   - Acceptance：输入「我不知道该学什么」，产出 3–5 条候选，每条带「为什么对你有用」与建议深度，带排序和一句「建议先从哪条开始」；已被否决的候选不再出现；「找」走 provider 接口，当前为不联网实现
   - Verify：单测覆盖候选数量约束、排序、去重（否决过的候选被过滤）；成功标准 2 的人工走查
   - Files：`backend/app/advisor.py`、`backend/app/providers/find.py`、`backend/tests/test_candidates.py`
 
-- [ ] **T12 候选与提案的前端交互**
+- [ ] **T14 候选与提案的前端交互**
   - Acceptance：页面上能看候选、采纳或否决；能看待裁定提案并裁定（档案变更 / 计划重排）；否决结果落台账
   - Verify：否决一条候选后重新请求同类输入，该候选不再出现；裁定提案后档案与计划表按预期变化
   - Files：`frontend/app/candidates/page.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`
 
 ## P4 触达兜底
 
-- [ ] **T13 `notify` 接口与邮件实现**
+- [ ] **T15 `notify` 接口与邮件实现**
   - Acceptance：`notify` 为接口，含邮件实现与空实现（本地开发用）；内容组装包含「当前阶段 / 本周交付物推到哪 / 落后时建议怎么调」三问
   - Verify：空实现下内容组装有单测；邮件实现用 `--dry-run` 打印不发送
   - Files：`backend/app/notify.py`、`backend/tests/test_notify.py`
 
-- [ ] **T14 周检查点 job**
+- [ ] **T16 周检查点 job**
   - Acceptance：`python -m app.jobs.weekly_checkpoint --dry-run` 输出正确三问；写 `notification_log`；启动时检查 `last_sent_at` 并补发错过的检查点
   - Verify：`--dry-run` 输出人工核对；补发逻辑用固定时间桩单测
   - Files：`backend/app/jobs/weekly_checkpoint.py`、`backend/tests/test_weekly.py`
 
 ## P5 验收
 
-- [ ] **T15 两周试用与成功标准走查**
+- [ ] **T17 两周试用与成功标准走查**
   - Acceptance：SPEC 第 9 节成功标准 1–5 逐条通过，或记录未通过项与原因
   - Verify：完成一次真实闭环（找 → 认同 → 计划 → 执行 → 报告 → 推进），并留存走查记录
   - Files：`docs/试用记录.md`
