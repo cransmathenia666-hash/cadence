@@ -464,3 +464,77 @@ def test_replan_proposal_can_be_created_again_next_week(conn):
 
     assert first is not None
     assert second is not None
+
+
+# ---------- 防重复建节点（双击会造重复，见 HANDOFF 候选队列） ----------
+
+def count_nodes(conn, **where):
+    sql = "SELECT COUNT(*) FROM plan_node"
+    if where:
+        sql += " WHERE " + " AND ".join(f"{column} = ?" for column in where)
+    return conn.execute(sql, tuple(where.values())).fetchone()[0]
+
+
+def test_add_node_creates_when_title_is_new(conn):
+    """正常路径不能被误伤：标题不重复时照建。"""
+    plan_id, stage_id, _ = make_plan(conn, checkpoints=(("检查点 1", None),))
+
+    node_id = plan.add_node(conn, plan_id, "checkpoint", "检查点 2", parent_id=stage_id)
+
+    assert node_id is not None
+    assert count_nodes(conn, title="检查点 2") == 1
+
+
+def test_add_node_rejects_duplicate_open_checkpoint(conn):
+    """核心场景：同一阶段下连点两次，只建出一条。"""
+    plan_id, stage_id, _ = make_plan(conn, checkpoints=(("检查点 1", None),))
+
+    with pytest.raises(plan.DuplicateNode):
+        plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=stage_id)
+
+    assert count_nodes(conn, parent_id=stage_id) == 1
+
+
+def test_add_node_treats_surrounding_spaces_as_same_title(conn):
+    """标题前后有空格也算同一条，否则" 检查点 1"能绕过去。"""
+    plan_id, stage_id, _ = make_plan(conn, checkpoints=(("检查点 1", None),))
+
+    with pytest.raises(plan.DuplicateNode):
+        plan.add_node(conn, plan_id, "checkpoint", "  检查点 1  ", parent_id=stage_id)
+
+
+def test_add_node_rejects_duplicate_stage_title(conn):
+    """阶段同样适用：同一个计划下不该有两个还开着的同名阶段。"""
+    plan_id, _, _ = make_plan(conn)  # 已有一个阶段「阶段 2」
+
+    with pytest.raises(plan.DuplicateNode):
+        plan.add_node(conn, plan_id, "stage", "阶段 2")
+
+
+def test_same_title_in_another_stage_is_allowed(conn):
+    """另一个阶段下的同名检查点不是同一条，必须放行。"""
+    plan_id, _, _ = make_plan(conn, checkpoints=(("检查点 1", None),))
+    second_stage = plan.add_node(conn, plan_id, "stage", "阶段 3", sort_order=20)
+
+    node_id = plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=second_stage)
+
+    assert node_id is not None
+
+
+@pytest.mark.parametrize("existing_status,should_block", [
+    ("not_started", True),
+    ("in_progress", True),
+    ("stuck", True),
+    ("done", False),
+    ("skipped", False),
+])
+def test_duplicate_rule_only_blocks_unsettled(conn, existing_status, should_block):
+    """已收尾的同名节点不该挡路：那是"上一轮做完了"，重开一条是正当需求。"""
+    plan_id, stage_id, checkpoints = make_plan(conn, checkpoints=(("检查点 1", None),))
+    plan.transition_node(conn, checkpoints[0], existing_status, reason="准备前置状态")
+
+    if should_block:
+        with pytest.raises(plan.DuplicateNode):
+            plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=stage_id)
+    else:
+        assert plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=stage_id) is not None

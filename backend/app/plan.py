@@ -53,6 +53,14 @@ class PlanError(RuntimeError):
     """
 
 
+class DuplicateNode(PlanError):
+    """同一层级下已经有一条还没收尾的同名节点——多半是重复提交。
+
+    单独一个类型，是为了让接口层能把它翻译成 409（冲突），
+    而不是混在 400 里说不清到底是参数错还是状态冲突。
+    """
+
+
 def get_node(conn: sqlite3.Connection, node_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM plan_node WHERE id = ?", (node_id,)).fetchone()
 
@@ -66,6 +74,92 @@ def get_stages(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
                ORDER BY sort_order, id""",
             (plan_id,),
         ).fetchall()
+    )
+
+
+def find_open_duplicate(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    level: str,
+    title: str,
+    parent_id: int | None = None,
+) -> sqlite3.Row | None:
+    """找出同一层级下同名的、还没收尾的节点；没有就返回 None。
+
+    为什么只把"还开着"的算重复：已经完成或跳过的同名节点代表"上一轮做完了"，
+    你要重开一条同名的是正当需求；而一条还开着的同名节点，基本只可能是
+    重复提交（前端双击、请求重发），再建一条只会让计划表变脏。
+    """
+    cleaned = str(title or "").strip()
+    if not cleaned:
+        return None
+    # parent_id 对阶段而言是 NULL，而 SQL 里 NULL = NULL 不成立，所以两种情形分开写
+    if parent_id is None:
+        rows = conn.execute(
+            """SELECT * FROM plan_node
+               WHERE plan_id = ? AND parent_id IS NULL AND level = ? AND title = ?""",
+            (plan_id, level, cleaned),
+        )
+    else:
+        rows = conn.execute(
+            """SELECT * FROM plan_node
+               WHERE plan_id = ? AND parent_id = ? AND level = ? AND title = ?""",
+            (plan_id, parent_id, level, cleaned),
+        )
+    for row in rows:
+        if row["status"] not in SETTLED_STATUSES:
+            return row
+    return None
+
+
+def assert_no_open_duplicate(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    level: str,
+    title: str,
+    parent_id: int | None = None,
+) -> None:
+    """同一层级下已有未收尾的同名节点就报错——这是防双击的那道闸。"""
+    existing = find_open_duplicate(conn, plan_id, level, title, parent_id)
+    if existing is None:
+        return
+    kind = "阶段" if level == "stage" else "检查点"
+    raise DuplicateNode(
+        f"这个计划里已经有一条还没收尾的同名{kind}「{str(title).strip()}」"
+        f"（id={existing['id']}），不再重复创建"
+    )
+
+
+def add_node(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    level: str,
+    title: str,
+    parent_id: int | None = None,
+    deliverable: str | None = None,
+    due_date: str | None = None,
+    sort_order: int = 0,
+    actor: str = "user",
+) -> int:
+    """新建一个阶段或检查点。
+
+    建节点一律走这里：先挡重复再落库。放在这个模块而不是接口层，
+    是为了让规则没地方绕过——以后 P3 由提案建节点时也会经过同一道闸。
+    """
+    assert_no_open_duplicate(conn, plan_id, level, title, parent_id)
+    return ledger.create_active(
+        conn,
+        "plan_node",
+        {
+            "plan_id": plan_id,
+            "parent_id": parent_id,
+            "level": level,
+            "title": str(title).strip(),
+            "deliverable": deliverable,
+            "due_date": due_date,
+            "sort_order": sort_order,
+        },
+        actor=actor,
     )
 
 

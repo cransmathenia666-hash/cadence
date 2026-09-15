@@ -76,12 +76,14 @@ def create_plan(payload: PlanIn, conn: sqlite3.Connection = Depends(get_conn)) -
     return {"id": plan_id, "goal": goal}
 
 
-@app.post("/api/plan/nodes", status_code=201)
+@app.post("/api/plan/nodes", status_code=201,
+          responses={409: {"description": "同一层级下已有未收尾的同名节点（多半是重复提交）"}})
 def create_node(payload: NodeIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     """建一个阶段或检查点。
 
     两级结构的一致性由后端把关，不信前端：阶段不能有 parent_id，
     检查点必须有 parent_id、且指向同一个计划里的某个阶段。
+    重复提交（前端双击、请求重发）由 `plan.add_node` 挡下并返回 409。
     """
     if plan.resolve_plan(conn, payload.plan_id) is None:
         raise HTTPException(status_code=404, detail=f"计划 id={payload.plan_id} 不存在")
@@ -98,20 +100,19 @@ def create_node(payload: NodeIn, conn: sqlite3.Connection = Depends(get_conn)) -
         raise HTTPException(status_code=400, detail="阶段节点不能有 parent_id")
 
     try:
-        node_id = ledger.create_active(
+        node_id = plan.add_node(
             conn,
-            "plan_node",
-            {
-                "plan_id": payload.plan_id,
-                "parent_id": payload.parent_id,
-                "level": payload.level,
-                "title": payload.title.strip(),
-                "deliverable": payload.deliverable,
-                "due_date": payload.due_date,
-                "sort_order": payload.sort_order,
-            },
-            actor="user",
+            plan_id=payload.plan_id,
+            level=payload.level,
+            title=payload.title,
+            parent_id=payload.parent_id,
+            deliverable=payload.deliverable,
+            due_date=payload.due_date,
+            sort_order=payload.sort_order,
         )
+    except plan.DuplicateNode as error:
+        # 409：请求本身没错，是和现有状态冲突——重复提交走这一条
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ledger.LedgerError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": node_id, "level": payload.level, "title": payload.title.strip()}
