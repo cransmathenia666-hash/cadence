@@ -14,8 +14,13 @@ from collections.abc import Iterator
 from datetime import date
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db, ledger, plan
 
@@ -59,6 +64,85 @@ class ReportIn(BaseModel):
     note: str = Field(min_length=1, description="一句话说明，必填")
     artifact_url: str | None = None
     material_feedback: str | None = None
+
+
+# ---------- 错误响应：所有出口一个形状（方案 C，SPEC 第 11 节） ----------
+#
+# 为什么需要这一节：FastAPI 有两条互不相干的报错路径。请求没进门就被校验拦下时，
+# 框架自己的处理器把 `detail` 固定塞成「错误对象数组」（msg 还是英文）；而进门之后
+# 我们自己 raise 的，框架只是把 `detail` 原样照抄（所以我们塞的是中文字符串）。
+# 同一个键两种类型，前端 alert 会显示成 [object Object]。
+# 这里把两条路径都拍成同一个形状：detail 给人看（中文），errors 给程序用（字段级明细）。
+
+# 字段名 → 中文标签。没登记的字段回退用原始字段名，不做猜测。
+_FIELD_LABELS: dict[str, str] = {
+    "goal": "目标",
+    "plan_id": "计划 id",
+    "level": "层级",
+    "title": "标题",
+    "parent_id": "所属阶段",
+    "deliverable": "交付物",
+    "due_date": "到期日",
+    "sort_order": "排序号",
+    "node_id": "节点 id",
+    "status": "状态",
+    "note": "一句话说明",
+    "artifact_url": "产物链接",
+    "material_feedback": "资料评价",
+}
+
+# Pydantic 的错误类型 → 中文说明。没登记的类型回退用原始的英文 msg——
+# 宁可露出英文，也不要吞掉信息或编一个可能不对的说法。
+_TYPE_MESSAGES: dict[str, str] = {
+    "missing": "是必填的",
+    "date_from_datetime_parsing": "不是有效日期（要 YYYY-MM-DD，如 2026-09-30）",
+    "date_parsing": "不是有效日期（要 YYYY-MM-DD，如 2026-09-30）",
+    "date_from_datetime_inexact": "不是有效日期（要 YYYY-MM-DD，如 2026-09-30）",
+    "literal_error": "的取值不在允许范围内",
+    "string_too_short": "不能为空",
+    "int_parsing": "必须是整数",
+    "int_type": "必须是整数",
+    "string_type": "必须是文本",
+    "json_invalid": "请求体不是合法的 JSON",
+}
+
+
+def human_readable_errors(errors: list[dict]) -> str:
+    """把 Pydantic 的字段级错误拼成一句中文，给用户看。"""
+    parts = []
+    for error in errors:
+        # loc 形如 ["body", "due_date"]；去掉 "body" 只留字段路径
+        location = [str(item) for item in error.get("loc", ()) if item != "body"]
+        field = _FIELD_LABELS.get(location[-1], location[-1]) if location else "请求体"
+        reason = _TYPE_MESSAGES.get(str(error.get("type")), str(error.get("msg", "不合法")))
+        parts.append(f"{field}{reason}")
+    return "参数不合法：" + "；".join(parts) if parts else "参数不合法"
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """入参不合法的出口（请求还没进业务函数就被拦下的那种）。"""
+    errors = list(exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"detail": human_readable_errors(errors), "errors": jsonable_encoder(errors)},
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException) -> Response:
+    """所有 HTTPException 的出口：我们自己 raise 的 400 / 409，以及框架生成的 404 / 405。
+
+    `detail` 一律拍成字符串。正常路径下它本来就是字符串，这里的兜底是为了
+    「万一有人塞了别的类型」也不会漏出第二种形状。
+    """
+    headers = getattr(exc, "headers", None)
+    if not is_body_allowed_for_status_code(exc.status_code):
+        return Response(status_code=exc.status_code, headers=headers)
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": detail, "errors": []}, headers=headers
+    )
 
 
 @app.get("/api/health")
