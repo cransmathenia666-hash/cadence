@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from datetime import date
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -48,7 +49,7 @@ class NodeIn(BaseModel):
     title: str = Field(min_length=1)
     parent_id: int | None = Field(default=None, description="检查点必填：所属阶段")
     deliverable: str | None = Field(default=None, description="阶段用：可验证的交付物")
-    due_date: str | None = None
+    due_date: date | None = Field(default=None, description="计划完成日，写 ISO 日期（如 2026-09-30）")
     sort_order: int = 0
 
 
@@ -107,7 +108,10 @@ def create_node(payload: NodeIn, conn: sqlite3.Connection = Depends(get_conn)) -
             title=payload.title,
             parent_id=payload.parent_id,
             deliverable=payload.deliverable,
-            due_date=payload.due_date,
+            # 边界处转成 ISO 文本再往下走：库里 due_date 是 TEXT，而 Python 3.12 起
+            # sqlite3 不再自带 date 适配器，直接绑 date 对象会触发废弃警告。
+            # 校验归边界（这里是 date 类型），存储归文本，内部照旧只用 parse_date 解析。
+            due_date=None if payload.due_date is None else payload.due_date.isoformat(),
             sort_order=payload.sort_order,
         )
     except plan.DuplicateNode as error:
