@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { ApiError, getPlan, type PlanTree } from "@/lib/api";
@@ -31,6 +32,9 @@ export default function Home() {
       <h1>cadence 前端 ↔ 后端 联通验证</h1>
       <p>
         这一页确认浏览器能直接读到后端的数据。正式的界面在 T8，这里只把返回的 JSON 原样显示。
+      </p>
+      <p>
+        <Link href="/report">去提交一份报告 →</Link>
       </p>
 
       {error !== null && (

@@ -155,3 +155,44 @@ export async function getPlan(planId?: number): Promise<PlanTree> {
   const query = planId === undefined ? "" : `?plan_id=${planId}`;
   return request<PlanTree>(`/api/plan${query}`);
 }
+
+// ---------- 报告（写接口，闭环的第一段） ----------
+
+/** 你提交报告时的四选一，与后端 REPORT_STATUSES 一致。 */
+export type ReportStatus = "done" | "partial" | "stuck" | "skipped";
+
+/** 提交成功后的回执：后端把「状态从什么变成什么」一并返回，前端不必自己推断。 */
+export type ReportResult = {
+  report_id: number;
+  node_id: number;
+  report_status: ReportStatus;
+  node_status_before: NodeStatus;
+  node_status: NodeStatus;
+  /** 阶段因此收尾时，后端会产出一条推进提案，这里给它的 id。 */
+  proposal_id: number | null;
+};
+
+/**
+ * 提交一条报告：状态四选一 + 一句话（必填），产物与资料评价可选。
+ *
+ * 这是闭环的第一段——你在别处学完，回来告诉系统结果。
+ */
+export async function submitReport(input: {
+  nodeId: number;
+  status: ReportStatus;
+  note: string;
+  artifactUrl?: string;
+  materialFeedback?: string;
+}): Promise<ReportResult> {
+  return request<ReportResult>("/api/report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      node_id: input.nodeId,
+      status: input.status,
+      note: input.note,
+      artifact_url: input.artifactUrl ?? null,
+      material_feedback: input.materialFeedback ?? null,
+    }),
+  });
+}
