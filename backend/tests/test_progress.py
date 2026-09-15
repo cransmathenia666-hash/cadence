@@ -403,3 +403,64 @@ def test_weekly_replan_options_are_the_three_ways(conn):
     ]
     assert all(option["detail"] for option in status["replan_options"])
     assert "检查点 1" in status["replan_options"][0]["detail"]
+
+
+def test_no_replan_proposal_when_on_track(conn):
+    """按时推进就不打扰你。"""
+    # 故意留一个未完成的检查点：否则这条计划会先产出阶段推进提案，干扰本测试的断言
+    _, _, checkpoints = make_plan(
+        conn, checkpoints=(("检查点 1", "2026-09-30"), ("检查点 2", None)))
+    plan.submit_report(conn, checkpoints[0], "done", note="做完了", at="2026-09-16T20:00:00+08:00")
+
+    assert plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY) is None
+    assert [row["kind"] for row in ledger.fetch_active(conn, "proposal")] == []
+
+
+def test_replan_proposal_created_when_behind(conn):
+    plan_id, stage_id, _ = make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
+
+    proposal_id = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
+
+    assert proposal_id is not None
+    row = conn.execute(
+        "SELECT kind, status, payload FROM proposal WHERE id = ?", (proposal_id,)).fetchone()
+    assert row["kind"] == "plan_replan"
+    assert row["status"] == "pending"
+    payload = json.loads(row["payload"])
+    assert payload["week"] == "2026-W38"
+    assert payload["plan_id"] == plan_id
+    assert payload["stage_id"] == stage_id
+    assert payload["lag_days"] == 7
+    assert len(payload["options"]) == 3
+
+
+def test_replan_proposal_created_when_no_report_this_week(conn):
+    """没有过期节点，但本周一条报告都没有——那也是未推进。"""
+    make_plan(conn, checkpoints=(("检查点 1", "2026-09-30"),))
+
+    proposal_id = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
+
+    payload = json.loads(
+        conn.execute("SELECT payload FROM proposal WHERE id = ?", (proposal_id,)).fetchone()["payload"])
+    assert "没有报告" in payload["why"]
+
+
+def test_replan_proposal_is_not_duplicated_within_the_week(conn):
+    make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
+
+    first = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
+    second = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
+
+    assert first is not None
+    assert second is None
+    assert len(ledger.fetch_active(conn, "proposal")) == 1
+
+
+def test_replan_proposal_can_be_created_again_next_week(conn):
+    make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
+
+    first = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
+    second = plan.ensure_weekly_replan_proposal(conn, today=date(2026, 9, 27))
+
+    assert first is not None
+    assert second is not None

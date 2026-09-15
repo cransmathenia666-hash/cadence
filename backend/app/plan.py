@@ -567,3 +567,57 @@ def weekly_status(
         "replan_options": [] if behind_reason is None else _replan_options(stage, lag, progress),
     })
     return status
+
+
+def _pending_replan_for_week(conn: sqlite3.Connection, week: str) -> int | None:
+    """本周是否已经产出过重排提案——有就不再来一条，免得每周开机刷一堆。"""
+    for row in ledger.fetch_active(conn, "proposal"):
+        if row["kind"] != "plan_replan":
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("week") == week:
+            return int(row["id"])
+    return None
+
+
+def ensure_weekly_replan_proposal(
+    conn: sqlite3.Connection,
+    today: date | None = None,
+    plan_id: int | None = None,
+    actor: str = "agent",
+) -> int | None:
+    """未推进时产出重排提案：落后，或本周一条报告都没有。
+
+    产出的是**提案**，不是直接改计划——减量、顺延还是换交付物，
+    最终由你裁定（SPEC 第 8 节铁律）。同一周只产一条。
+    """
+    today = today or date.today()
+    status = weekly_status(conn, today=today, plan_id=plan_id)
+    if status["plan_id"] is None or status["behind_reason"] is None:
+        return None
+    if _pending_replan_for_week(conn, status["week"]) is not None:
+        return None
+
+    stage = status["current_stage"]
+    payload = {
+        "week": status["week"],
+        "plan_id": status["plan_id"],
+        "stage_id": None if stage is None else stage["id"],
+        "stage_title": None if stage is None else stage["title"],
+        "why": status["behind_reason"],
+        "lag_days": status["lag"]["lag_days"],
+        "options": status["replan_options"],
+    }
+    return ledger.create_active(
+        conn,
+        "proposal",
+        {
+            "kind": "plan_replan",
+            "payload": json.dumps(payload, ensure_ascii=False),
+            "reason": status["behind_reason"],
+        },
+        actor=actor,
+    )
