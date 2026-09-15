@@ -196,3 +196,55 @@ export async function submitReport(input: {
     }),
   });
 }
+
+// ---------- 建计划与建节点（写接口） ----------
+
+/** 节点层级：阶段=可验证交付物，检查点=周检查点。与后端 NodeIn.level 一致。 */
+export type NodeLevel = "stage" | "checkpoint";
+
+/** 建计划的回执。 */
+export type CreatedPlan = { id: number; goal: string };
+
+/** 建节点的回执。 */
+export type CreatedNode = { id: number; level: NodeLevel; title: string };
+
+/** 建一个计划。`goal` 是唯一必填项。 */
+export async function createPlan(goal: string): Promise<CreatedPlan> {
+  return request<CreatedPlan>("/api/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ goal }),
+  });
+}
+
+/**
+ * 建一个阶段或检查点。
+ *
+ * 两级结构的一致性（阶段不能带 parentId；检查点必须指向同一计划里的阶段）由后端把关，
+ * 这里只管把参数送过去——前端不重复实现业务规则。
+ *
+ * `dueDate` 必须是**零填充的 ISO 日期**（如 `2026-09-30`）：后端只认这种写法，
+ * `2026-9-3` 会被 `422` 拒掉。HTML 的 `input type="date"` 正好产出这个格式。
+ */
+export async function createNode(input: {
+  planId: number;
+  level: NodeLevel;
+  title: string;
+  parentId?: number | null;
+  deliverable?: string | null;
+  dueDate?: string | null;
+}): Promise<CreatedNode> {
+  return request<CreatedNode>("/api/plan/nodes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      plan_id: input.planId,
+      level: input.level,
+      title: input.title,
+      parent_id: input.parentId ?? null,
+      deliverable: input.deliverable ?? null,
+      due_date: input.dueDate ?? null,
+      sort_order: 0,
+    }),
+  });
+}

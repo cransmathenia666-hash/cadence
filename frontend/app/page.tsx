@@ -3,59 +3,49 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { PlanTreeView } from "@/components/plan-tree";
 import { ApiError, getPlan, type PlanTree } from "@/lib/api";
 
 /**
- * 切片 1 的验收视图：证明浏览器能直接读到 FastAPI 的数据。
+ * T8：计划表页面。
  *
- * 这一页**故意**只把后端返回的 JSON 原样打出来——它要验的是「两个进程真的能对话」，
- * 不是界面好不好看。正式的界面（节点树、落后量、当前阶段）在 T8 做。
- *
- * 为什么是 `"use client"`：Next.js 的页面默认在服务器上渲染，而这一页要在**浏览器**里
- * 发请求（这样才能用浏览器开发者工具的 Network 面板看到那条请求，也才走 CORS）。
- * 用到 `useState`/`useEffect` 的组件必须是客户端组件。
+ * 取数、加载态、错误态在这里管；"画成什么样"在 `components/plan-tree.tsx`。
+ * 数据全部来自 `GET /api/plan`——落后量、当前阶段、进度都是后端算好的，
+ * 前端不做任何业务计算（SPEC 第 10 节的铁律）。
  */
 export default function Home() {
   const [tree, setTree] = useState<PlanTree | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // setState 放在 .then 回调里，而不是 effect 体内同步调用——
+  // 否则会被 eslint 的 react-hooks/set-state-in-effect 拦下。
   useEffect(() => {
     getPlan()
       .then(setTree)
-      .catch((cause: unknown) => {
-        setError(cause instanceof ApiError ? cause.message : "取计划时出了意外错误");
-      });
+      .catch((cause: unknown) =>
+        setError(cause instanceof ApiError ? cause.message : "取计划时出了意外错误"),
+      );
   }, []);
 
   return (
     <main>
-      <h1>cadence 前端 ↔ 后端 联通验证</h1>
+      <h1>计划表</h1>
       <p>
-        这一页确认浏览器能直接读到后端的数据。正式的界面在 T8，这里只把返回的 JSON 原样显示。
-      </p>
-      <p>
-        <Link href="/report">去提交一份报告 →</Link>
+        <Link href="/new">建计划 / 建节点</Link>
+        {" · "}
+        <Link href="/report">提交报告</Link>
       </p>
 
       {error !== null && (
         <p role="alert">
-          <strong>取数据失败：</strong>
+          <strong>取计划失败：</strong>
           {error}
         </p>
       )}
 
       {error === null && tree === null && <p role="status">正在从后端取计划…</p>}
 
-      {tree !== null && (
-        <>
-          {tree.plan === null && (
-            <p role="status">
-              后端连上了，但库里还没有计划。先去后端的 <code>/docs</code> 建一个，再刷新这页。
-            </p>
-          )}
-          <pre>{JSON.stringify(tree, null, 2)}</pre>
-        </>
-      )}
+      {tree !== null && <PlanTreeView tree={tree} />}
     </main>
   );
 }
