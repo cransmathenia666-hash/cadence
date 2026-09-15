@@ -11,14 +11,27 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import date
 from typing import Any
 
 from . import ledger
+from .db import now_iso
 
 NODE_STATUSES = ("not_started", "in_progress", "done", "stuck", "skipped")
 
 # 终态：到了这里这个节点就不用再管了。
 SETTLED_STATUSES = ("done", "skipped")
+
+# 报告状态（你提交时的四选一）→ 节点状态。
+# 为什么要有这层映射：报告说的是「我这边怎么样了」，节点状态是系统记的账，
+# 两者不是一回事——「部分完成」落到节点上就是「进行中」。
+REPORT_STATUSES = ("done", "partial", "stuck", "skipped")
+REPORT_TO_NODE: dict[str, str] = {
+    "done": "done",
+    "partial": "in_progress",
+    "stuck": "stuck",
+    "skipped": "skipped",
+}
 
 # 合法迁移表。设计取舍：报告是你对现实的陈述，所以状态机对「往前推」很宽容
 # （没开始也能直接报完成，因为现实里你常常是先做完了才回来记），
@@ -56,6 +69,14 @@ def get_stages(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
     )
 
 
+def assert_transition(before: str, after: str) -> None:
+    """校验一次状态迁移。同状态视为合法（幂等），其余按 LEGAL_TRANSITIONS 判。"""
+    if before == after:
+        return
+    if after not in LEGAL_TRANSITIONS.get(before, set()):
+        raise PlanError(f"非法迁移：{before} → {after}")
+
+
 def transition_node(
     conn: sqlite3.Connection,
     node_id: int,
@@ -76,8 +97,7 @@ def transition_node(
     before = node["status"]
     if before == new_status:
         return before  # 幂等：重复设置同一状态不算错，也不写噪音流水
-    if new_status not in LEGAL_TRANSITIONS.get(before, set()):
-        raise PlanError(f"非法迁移：{before} → {new_status}（节点 id={node_id}）")
+    assert_transition(before, new_status)
 
     return ledger.set_status(conn, "plan_node", node_id, new_status, actor=actor, reason=reason)
 
@@ -182,3 +202,228 @@ def maybe_stage_advance_proposal(
         },
         actor=actor,
     )
+
+
+# ---------- 报告：执行世界回到系统的唯一信号 ----------
+
+def submit_report(
+    conn: sqlite3.Connection,
+    node_id: int,
+    status: str,
+    note: str,
+    artifact_url: str | None = None,
+    material_feedback: str | None = None,
+    at: str | None = None,
+) -> dict[str, Any]:
+    """收一条报告：落报告行 → 台账留痕 → 按状态机推进节点 → 必要时产出推进提案。
+
+    为什么先把能判的都判掉：非法迁移或缺一句话说明，如果写到一半才报错，
+    库里会留下「有报告、状态却没动」的假记录，比直接报错更难查。
+    `at` 是给测试用的时间桩，正常调用不用传。
+    """
+    if status not in REPORT_STATUSES:
+        raise PlanError(f"未知报告状态：{status}；可用状态：{' / '.join(REPORT_STATUSES)}")
+    if not str(note or "").strip():
+        raise PlanError("报告必须写一句话说明")
+
+    node = get_node(conn, node_id)
+    if node is None:
+        raise PlanError(f"节点 id={node_id} 不存在")
+
+    before = node["status"]
+    target = REPORT_TO_NODE[status]
+    assert_transition(before, target)
+
+    timestamp = at or now_iso()
+    cursor = conn.execute(
+        """INSERT INTO report (node_id, status, note, artifact_url, material_feedback, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (node_id, status, note, artifact_url, material_feedback, timestamp),
+    )
+    report_id = int(cursor.lastrowid)
+    ledger.log_event(conn, "report", report_id, "create", None, status, note, actor="user")
+
+    # 状态没变时 ledger.set_status 会直接返回、不提交，所以这里统一提交一次，
+    # 保证「报告行 + 台账流水」一定落盘。
+    ledger.set_status(conn, "plan_node", node_id, target, actor="user", reason=f"报告：{note}")
+    conn.commit()
+
+    # 节点收尾后看看它所属阶段是不是也收尾了；是就产出「是否进入下一阶段」提案。
+    parent = get_node(conn, int(node["parent_id"])) if node["parent_id"] is not None else None
+    if node["level"] == "stage":
+        proposal_id = maybe_stage_advance_proposal(conn, node_id)
+    elif parent is not None and parent["level"] == "stage":
+        proposal_id = maybe_stage_advance_proposal(conn, int(parent["id"]))
+    else:
+        proposal_id = None
+
+    return {
+        "report_id": report_id,
+        "node_id": node_id,
+        "report_status": status,
+        "node_status_before": before,
+        "node_status": target,
+        "proposal_id": proposal_id,
+    }
+
+
+# ---------- 落后量 ----------
+
+def parse_date(value: Any) -> date | None:
+    """把 due_date / created_at 这类文本解析成日期；解析不了就当没有这个信息。"""
+    text = str(value or "").strip()[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _completion_date(conn: sqlite3.Connection, node_id: int) -> date | None:
+    """节点「实际完成日」= 最近一条 done 报告的日期。"""
+    row = conn.execute(
+        """SELECT created_at FROM report
+           WHERE node_id = ? AND status = 'done'
+           ORDER BY created_at DESC, id DESC LIMIT 1""",
+        (node_id,),
+    ).fetchone()
+    return parse_date(row["created_at"]) if row is not None else None
+
+
+def node_lag_days(conn: sqlite3.Connection, node: sqlite3.Row, today: date) -> int | None:
+    """一个节点落后几天。None 表示无从判断（没定计划完成日，或已跳过）。
+
+    三种情况分开算，别混成一笔账：
+    - 还没做完：落后 = 今天 - 计划完成日（没到期就是 0）
+    - 已完成：落后 = 实际完成日 - 计划完成日（提前做完给负数，那是好事）
+    - 已跳过：不算落后，那是你裁定过的结果
+    """
+    due = parse_date(node["due_date"])
+    if due is None:
+        return None
+    if node["status"] == "skipped":
+        return None
+    if node["status"] == "done":
+        completion = _completion_date(conn, int(node["id"]))
+        return None if completion is None else (completion - due).days
+    return max(0, (today - due).days)
+
+
+def plan_lag(conn: sqlite3.Connection, plan_id: int, today: date) -> dict[str, Any]:
+    """计划级落后量 = 还没做完的节点里最严重的那个。
+
+    只看未完成节点：已经做完的节点即使当时晚于计划，那也只是「这次晚了几天」
+    （节点级 lag_days 看得到），不该让整个计划一直挂着「落后」的牌子——
+    「落后」要回答的是「现在有什么堵着」，不是「历史上晚过几次」。
+
+    取最大而不是取平均：落后看的是最长的那块短板。平均一下会把
+    「三天没动」和「拖了十天」混成「大概一周」，没有决策价值。
+    """
+    worst: sqlite3.Row | None = None
+    worst_lag = 0
+    for node in conn.execute(
+        "SELECT * FROM plan_node WHERE plan_id = ? ORDER BY sort_order, id", (plan_id,)
+    ):
+        if node["status"] in SETTLED_STATUSES:
+            continue
+        lag = node_lag_days(conn, node, today)
+        if lag is None or lag <= 0:
+            continue
+        if lag > worst_lag:
+            worst, worst_lag = node, lag
+    return {
+        "lag_days": worst_lag,
+        "behind": worst_lag > 0,
+        "worst": None if worst is None else {
+            "id": worst["id"],
+            "title": worst["title"],
+            "due_date": worst["due_date"],
+            "lag_days": worst_lag,
+        },
+    }
+
+
+# ---------- 计划全貌（GET /api/plan 的数据形状） ----------
+
+def stage_is_settled(conn: sqlite3.Connection, stage: sqlite3.Row) -> bool:
+    """阶段是否收尾：阶段自己到了终态，或它的检查点已经全收尾。"""
+    if stage["status"] in SETTLED_STATUSES:
+        return True
+    return stage_completion(conn, int(stage["id"]))["complete"]
+
+
+def current_stage(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row | None:
+    """当前阶段 = 第一个没收尾的阶段；全部收尾了返回 None。"""
+    for stage in get_stages(conn, plan_id):
+        if not stage_is_settled(conn, stage):
+            return stage
+    return None
+
+
+def resolve_plan(conn: sqlite3.Connection, plan_id: int | None = None) -> sqlite3.Row | None:
+    """指定了就取那个计划；没指定就取最新建的一个 active 计划。"""
+    if plan_id is not None:
+        return conn.execute("SELECT * FROM plan WHERE id = ?", (plan_id,)).fetchone()
+    actives = ledger.fetch_active(conn, "plan")
+    return actives[-1] if actives else None
+
+
+def _checkpoint_dict(conn: sqlite3.Connection, node: sqlite3.Row, today: date) -> dict[str, Any]:
+    return {
+        "id": node["id"],
+        "title": node["title"],
+        "status": node["status"],
+        "due_date": node["due_date"],
+        "sort_order": node["sort_order"],
+        "lag_days": node_lag_days(conn, node, today),
+    }
+
+
+def plan_tree(
+    conn: sqlite3.Connection, plan_id: int | None = None, today: date | None = None
+) -> dict[str, Any]:
+    """计划 + 节点树 + 当前阶段 + 落后量。前端只负责展示，不做任何业务计算。"""
+    today = today or date.today()
+    plan_row = resolve_plan(conn, plan_id)
+    if plan_row is None:
+        return {
+            "plan": None,
+            "current_stage": None,
+            "stages": [],
+            "lag": {"lag_days": 0, "behind": False, "worst": None},
+        }
+
+    stages = []
+    for stage in get_stages(conn, int(plan_row["id"])):
+        checkpoints = conn.execute(
+            "SELECT * FROM plan_node WHERE parent_id = ? ORDER BY sort_order, id", (stage["id"],)
+        ).fetchall()
+        stages.append({
+            "id": stage["id"],
+            "title": stage["title"],
+            "deliverable": stage["deliverable"],
+            "due_date": stage["due_date"],
+            "status": stage["status"],
+            "sort_order": stage["sort_order"],
+            "lag_days": node_lag_days(conn, stage, today),
+            "progress": stage_completion(conn, int(stage["id"])),
+            "checkpoints": [_checkpoint_dict(conn, cp, today) for cp in checkpoints],
+        })
+
+    current = current_stage(conn, int(plan_row["id"]))
+    return {
+        "plan": {
+            "id": plan_row["id"],
+            "goal": plan_row["goal"],
+            "status": plan_row["status"],
+            "valid_from": plan_row["valid_from"],
+        },
+        "current_stage": None if current is None else {
+            "id": current["id"],
+            "title": current["title"],
+            "deliverable": current["deliverable"],
+            "status": current["status"],
+            "progress": stage_completion(conn, int(current["id"])),
+        },
+        "lag": plan_lag(conn, int(plan_row["id"]), today),
+        "stages": stages,
+    }
