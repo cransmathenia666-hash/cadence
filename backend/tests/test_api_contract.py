@@ -14,10 +14,13 @@ from datetime import date
 import pytest
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
+from app import config
 from app.main import (
     NodeIn,
+    app,
     http_error_handler,
     human_readable_errors,
     validation_error_handler,
@@ -150,3 +153,41 @@ def test_non_string_detail_is_stringified():
     response = run(http_error_handler, HTTPException(status_code=400, detail={"weird": "shape"}))
 
     assert isinstance(body_of(response)["detail"], str)
+
+
+# ---------- 跨源（CORS）：只放行本机前端（见 tasks/plan.md 风险表） ----------
+
+def cors_kwargs() -> dict:
+    """取出已注册的 CORS 中间件配置。
+
+    断言「恰好一个」是为了防有人把中间件删掉——删了这些测试会红，
+    而不是悄悄变成「不校验」。
+    """
+    middlewares = [item for item in app.user_middleware if item.cls is CORSMiddleware]
+    assert len(middlewares) == 1, f"期望恰好一个 CORSMiddleware，实际 {len(middlewares)} 个"
+    return middlewares[0].kwargs
+
+
+def test_cors_allows_the_configured_dev_origins():
+    assert cors_kwargs()["allow_origins"] == list(config.FRONTEND_ORIGINS)
+
+
+def test_cors_never_opens_a_wildcard_origin():
+    """来源一放开，等于任何网页都能读这个后端的数据；本地开发也没理由放通配符。"""
+    origins = cors_kwargs()["allow_origins"]
+
+    assert "*" not in origins
+    # 不带端口的 localhost 会放行该主机的任意端口，比需要的宽
+    assert "http://localhost" not in origins
+    assert all(origin.startswith(("http://localhost:", "http://127.0.0.1:")) for origin in origins)
+
+
+def test_frontend_port_is_defined_in_one_place():
+    """端口集中配置：两个来源都从 config.FRONTEND_PORT 拼出来，不各写一遍。"""
+    assert config.FRONTEND_PORT == 3000
+    assert all(str(config.FRONTEND_PORT) in origin for origin in config.FRONTEND_ORIGINS)
+
+
+def test_cors_methods_are_a_whitelist_matching_the_contract():
+    """方法是白名单不是通配符——契约加方法时这条会红，提醒回来改。"""
+    assert set(cors_kwargs()["allow_methods"]) == {"GET", "POST", "PUT", "DELETE"}

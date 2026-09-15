@@ -17,17 +17,33 @@ from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import db, ledger, plan
+from . import config, db, ledger, plan
 
 app = FastAPI(
     title="cadence",
     version="0.1.0",
     description="学习决策与跟进 Agent：方向层 + 计划表 + 跟进",
+)
+
+# 跨源：开发期浏览器里的前端（Next.js，另一个端口）要能调这个后端。
+# 只放行 config.FRONTEND_ORIGINS 里那几个本机来源，不用 ["*"]——来源一旦放开，
+# 任何网页都能读这个后端的数据。
+#
+# 为什么 allow_headers 用 ["*"]：前端发 JSON 必须带 Content-Type，浏览器会先发
+# 预检请求；将来加 token 也会多一个头。来源已经收紧了，头放开没有额外风险。
+# 方法按 SPEC 第 11 节契约里真实用到的四种列出来，不用通配符——契约加方法时
+# 这里会提醒你回来改。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(config.FRONTEND_ORIGINS),
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
 )
 
 
