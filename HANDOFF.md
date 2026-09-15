@@ -41,7 +41,7 @@
 - **P2 代码已完成、待用户走查**：`frontend/app/` 下四个页面——`/` 计划表（T8）、`/new` 建计划与建节点、`/report` 提交报告。**样式完全没做**（无 CSS、无组件库，样式方案仍未决）；`sort_order` 前端固定送 0，所以新建节点的顺序按 id 排。
 - **前端写 effect 会被 eslint 拦**：`react-hooks/set-state-in-effect` 禁止在 effect 体内**同步** setState。取数要写成 `.then(回调)` 里 setState（"订阅外部系统"的形态），或用 SWR/TanStack（加依赖属 Ask first）。本会话踩过一次。
 - **写任何 `frontend/` 下的代码前，必须先读 `frontend/node_modules/next/dist/docs/` 里的对应指南**。`frontend/AGENTS.md` 由 `next dev` 自动生成并会自行重建（删了也会回来，提交它才能保持工作区干净），它明说 Next.js 16 相对训练数据有破坏性变更；已见实例：`app/layout.tsx` 用新的 `LayoutProps` 类型，而不是旧的 `children: React.ReactNode` 写法。至少读 `01-app/02-guides/upgrading/version-16.md` 与 `01-app/01-getting-started/06-fetching-data.md`。
-- npm 12 的 install-scripts 策略拦下了 `unrs-resolver` 的 postinstall；实测**不影响 lint**（exit=0），暂不处理，若将来 ESLint 报模块解析错误再回头批准。
+- **只能操作「最新建的那个有效计划」（多计划未支持，待定）**：契约里**没有列出计划的接口**，前端只能拿 `GET /api/plan` 不传参数时的"最新建的那个 active 计划"。用户 2026-09-15 决定**先只补透明度**——`/new` 与计划表现在会写明「将建在 计划 #N 里」。**是否支持多计划待定**：若要，需加一条 `GET /api/plans`（改契约，SPEC 第 16 节 Ask first）。用户库里现有 3 个计划，另两个在界面里够不着。
 - **框架生成的 `404` / `405` 文案仍是英文**（`Not Found` / `Method Not Allowed`）——形状已随方案 C 统一，只是文案没汉化；只会在手敲错 URL 时出现，前端调到不存在的端点时来自我们自己的 `raise`（中文）。
 - `POST /api/report` 仍**没有**防重复保护（连点会落两条报告）；正解是 P2 前端提交后禁用按钮，不在后端做启发式判重。
 - 台账「一列两维度」的根治方案 A（加 `record_state` 拆列 + 真库迁移）**未做**，触发条件见 SPEC 第 17 节第 2 条；走方案 A 前不要处理任何可能被 `void` 覆盖的历史行。
@@ -75,7 +75,7 @@
 | E-18 / 2026-09-15 | 官方 `create-next-app` 建 `frontend/`（Next.js 16.3.5 + React 19.2.8 + TS，`--empty` 无 Tailwind，`--disable-git`），npm 装 344 包；随后 `npm run dev` 起服务并用 HTTP 请求核对首页，另跑 `npm run lint` | 工程与依赖在仓库内（`node_modules`、`.next` 已被 `frontend/.gitignore` 排除，提交 11 个文件）；dev 服务已停、3000 端口已释放 | 通过：`next dev`（Turbopack）Ready in 311ms，`http://localhost:3000` 返回 **HTTP 200** 且页面含 `Hello world!`；`eslint` exit=0 | 基线 `d8f9e3c`；改动脚手架配置或依赖后失效。**只证明环境可跑，不证明任何前端功能** |
 | E-19 / 2026-09-15 | 加完 CORS 后一次跑三样：`pytest -q`（**119 passed**）、`python tools/smoke_p1.py`（9 步全绿）、临时库起 uvicorn 发 10 组真实请求——5 组跨源（合法 / `127.0.0.1` 写法 / 非法来源的预检与实际请求）+ 5 组带 `Origin` 的错误路径（`422`、`409`、`404`、框架生成的路由 `404`、`405`） | 临时脚本与临时库已删；`data/` 只剩 `cadence.db` | 通过：合法来源两种写法都回 `allow-origin`，**非法来源静默不放行**（无该头、预检 `400`）；**`422` 也带 `allow-origin`**，前端因此读得到那句中文；五条错误路径键集恒为 `{detail, errors}`、`detail` 恒为字符串 | **失效条件收窄**：仅当 `main.py` 的路由或错误形状、`config.py` 的 CORS 名单、`plan.py` 的返回字段、`ledger.py` 的写入语义变更时失效。只改 `tests/` 不使结论失效（重跑更新数字即可）；改无关模块不必重跑 |
 | E-21 / 2026-09-15 | 最简报告交互（T9 最小版）：`npm run lint` 与 `npx tsc --noEmit`——按 AGENTS.md 的验证纪律，前端只做这两项 | 工程内，可复跑 | 通过：两项均 exit=0。过程中 lint 拦下一次 `react-hooks/set-state-in-effect`（effect 体内同步调用了会 setState 的函数），已改为在 `.then` 回调里 setState。**浏览器手工走查未做**——按纪律归用户 | **按行为写**：仅当 `submitReport`、`/api/report` 契约或 `app/report/page.tsx` 的行为变更时失效；`lib/api.ts` 里**新增别的函数**不影响它 |
-| E-22 / 2026-09-15 | T8 计划表页面 + 建计划 / 建节点页面：`npm run lint` 与 `npx tsc --noEmit`；另用三个普通 GET 确认 `/`、`/new`、`/report` 都返回 200 且含各自标题（不是浏览器验证） | 工程内，可复跑 | 通过：lint 与 tsc 均 exit=0，三个路由 HTTP 200。**浏览器手工走查未做**——按纪律归用户 | **按行为写**：仅当这四个页面的展示行为、`createPlan` / `createNode` / `getPlan` 或对应后端契约变更时失效 |
+| E-22 / 2026-09-15 | T8 计划表页面 + 建计划 / 建节点页面：`npm run lint` 与 `npx tsc --noEmit`；另用三个普通 GET 确认 `/`、`/new`、`/report` 都返回 200 且含各自标题（不是浏览器验证） | 工程内，可复跑 | 通过：lint 与 tsc 均 exit=0，三个路由 HTTP 200。**浏览器手工走查未做**——按纪律归用户 | **按行为写**：仅当**新增页面/路由**或 lint/tsc 配置变更时失效；页面内的文案与展示调整只需重跑 lint 与 tsc（本会话后面补「将建在哪个计划」就是这样）。注意：客户端取数的文案不在首屏 HTML 里，用 GET 断言不到，别拿它当证据 |
 
 ## 6. 启动、验收与上下文
 
