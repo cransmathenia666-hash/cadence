@@ -26,17 +26,17 @@
 
 ## P1 后端闭环逻辑
 
-- [ ] **T4 计划节点状态机**
+- [x] **T4 计划节点状态机**
   - Acceptance：状态为 未开始 / 进行中 / 完成 / 卡住 / 跳过；只允许合法迁移；阶段节点在其全部周检查点完成后产出「是否进入下一阶段」的提案
   - Verify：单测覆盖合法与非法迁移、以及阶段完成时的提案产出
   - Files：`backend/app/plan.py`、`backend/tests/test_plan.py`
 
-- [ ] **T5 报告 API 与落后量**
+- [x] **T5 报告 API 与落后量**
   - Acceptance：`POST /api/report` 接收状态四选一 + 一句话（必填）+ 产物链接、资料评价（可选）；`GET /api/plan` 返回计划、节点树、当前阶段、落后量；报告落库并经台账留痕
   - Verify：`/docs` 里手工提交一条「完成」报告，`GET /api/plan` 状态与落后量正确，`ledger_event` 有流水
   - Files：`backend/app/main.py`、`backend/app/plan.py`、`backend/tests/test_progress.py`
 
-- [ ] **T6 周检查点判定**
+- [x] **T6 周检查点判定**
   - Acceptance：能判定「本周检查点是否该触发」；落后时产出重排提案（减量 / 顺延 / 换交付物）
   - Verify：单测用固定时间桩覆盖按时 / 落后 / 无报告三种情况
   - Files：`backend/app/plan.py`、`backend/tests/test_progress.py`
