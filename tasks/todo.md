@@ -41,6 +41,11 @@
   - Verify：单测用固定时间桩覆盖按时 / 落后 / 无报告三种情况
   - Files：`backend/app/plan.py`、`backend/tests/test_progress.py`
 
+- [x] **T19 建节点防重复提交（P1 补充）**
+  - Acceptance：同一层级下已有未收尾的同名节点时，再次创建返回 `409` 并说明是哪一条；已完成 / 跳过的同名节点不挡路
+  - Verify：`/docs` 里对一个新检查点连点两次 `Execute`，第二次得 409，库里只多一条
+  - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/test_progress.py`
+
 ## P2 前后端打通（第一个可验证切片）
 
 - [ ] **T7 Next.js 脚手架与 API 客户端**
