@@ -83,7 +83,9 @@ export function PlanTreeView({ tree }: { tree: PlanTree }) {
 
   return (
     <div>
-      <h2>计划：{plan.goal}</h2>
+      <h2>
+        计划 #{plan.id}：{plan.goal}
+      </h2>
       <ul>
         <li>状态：{plan.status}</li>
         <li>建于：{plan.valid_from}</li>

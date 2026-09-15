@@ -155,7 +155,20 @@ export default function NewPage() {
         {planId === null ? (
           <p role="status">还没有计划，先在上面建一个。</p>
         ) : (
-          <form onSubmit={onCreateNode}>
+          <>
+            {/*
+              必须写明目标计划是哪一个：建节点时前端只把 plan_id 送给后端，
+              而 GET /api/plan 不传参数时拿的是"最新建的那个有效计划"。
+              不写出来的话，你根本不知道节点会落进哪个计划——这是用户实际踩到的坑。
+            */}
+            <p>
+              将建在 <strong>计划 #{planId}「{tree?.plan?.goal}」</strong> 里。
+              <br />
+              <small>
+                界面目前只能操作「最新建的那个有效计划」；同时管多个计划还没做（契约里也没有「列出计划」的接口）。
+              </small>
+            </p>
+            <form onSubmit={onCreateNode}>
             <fieldset>
               <legend>层级</legend>
               <label>
@@ -237,7 +250,8 @@ export default function NewPage() {
             <button type="submit" disabled={pending}>
               {pending ? "提交中…" : "建节点"}
             </button>
-          </form>
+            </form>
+          </>
         )}
       </section>
     </main>
