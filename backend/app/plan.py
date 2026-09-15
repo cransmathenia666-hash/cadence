@@ -22,6 +22,17 @@ NODE_STATUSES = ("not_started", "in_progress", "done", "stuck", "skipped")
 # 终态：到了这里这个节点就不用再管了。
 SETTLED_STATUSES = ("done", "skipped")
 
+# 台账的生命周期终态。方案 B 之后节点不可能再变成这两个（台账层直接禁止调用），
+# 这里过滤是给历史数据、别的库、以及将来有人绕过接口写库兜底：
+# 读到它就当这条记录不存在——否则会出现「已作废的阶段仍是当前阶段」
+# 和「已作废的节点仍挡着同名重建」这两种幽灵。
+INVALID_STATUSES = ("void", "superseded")
+
+
+def not_invalid(column: str = "status") -> str:
+    """排除台账生命周期终态的 SQL 片段。值只来自上面的常量，所以拼接是安全的。"""
+    return f"{column} NOT IN ({', '.join(repr(value) for value in INVALID_STATUSES)})"
+
 # 报告状态（你提交时的四选一）→ 节点状态。
 # 为什么要有这层映射：报告说的是「我这边怎么样了」，节点状态是系统记的账，
 # 两者不是一回事——「部分完成」落到节点上就是「进行中」。
@@ -62,15 +73,17 @@ class DuplicateNode(PlanError):
 
 
 def get_node(conn: sqlite3.Connection, node_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM plan_node WHERE id = ?", (node_id,)).fetchone()
+    return conn.execute(
+        f"SELECT * FROM plan_node WHERE id = ? AND {not_invalid()}", (node_id,)
+    ).fetchone()
 
 
 def get_stages(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
     """计划下的阶段，按计划里的顺序。"""
     return list(
         conn.execute(
-            """SELECT * FROM plan_node
-               WHERE plan_id = ? AND level = 'stage'
+            f"""SELECT * FROM plan_node
+               WHERE plan_id = ? AND level = 'stage' AND {not_invalid()}
                ORDER BY sort_order, id""",
             (plan_id,),
         ).fetchall()
@@ -96,14 +109,16 @@ def find_open_duplicate(
     # parent_id 对阶段而言是 NULL，而 SQL 里 NULL = NULL 不成立，所以两种情形分开写
     if parent_id is None:
         rows = conn.execute(
-            """SELECT * FROM plan_node
-               WHERE plan_id = ? AND parent_id IS NULL AND level = ? AND title = ?""",
+            f"""SELECT * FROM plan_node
+               WHERE plan_id = ? AND parent_id IS NULL AND level = ? AND title = ?
+                 AND {not_invalid()}""",
             (plan_id, level, cleaned),
         )
     else:
         rows = conn.execute(
-            """SELECT * FROM plan_node
-               WHERE plan_id = ? AND parent_id = ? AND level = ? AND title = ?""",
+            f"""SELECT * FROM plan_node
+               WHERE plan_id = ? AND parent_id = ? AND level = ? AND title = ?
+                 AND {not_invalid()}""",
             (plan_id, parent_id, level, cleaned),
         )
     for row in rows:
@@ -202,8 +217,8 @@ def stage_completion(conn: sqlite3.Connection, stage_id: int) -> dict[str, Any]:
     「收尾」= 完成或跳过。跳过是你裁定过的结果，不该把阶段永远卡在那里。
     """
     nodes = conn.execute(
-        """SELECT id, title, status FROM plan_node
-           WHERE parent_id = ? ORDER BY sort_order, id""",
+        f"""SELECT id, title, status FROM plan_node
+           WHERE parent_id = ? AND {not_invalid()} ORDER BY sort_order, id""",
         (stage_id,),
     ).fetchall()
     settled = [node for node in nodes if node["status"] in SETTLED_STATUSES]
@@ -415,7 +430,8 @@ def plan_lag(conn: sqlite3.Connection, plan_id: int, today: date) -> dict[str, A
     worst: sqlite3.Row | None = None
     worst_lag = 0
     for node in conn.execute(
-        "SELECT * FROM plan_node WHERE plan_id = ? ORDER BY sort_order, id", (plan_id,)
+        f"SELECT * FROM plan_node WHERE plan_id = ? AND {not_invalid()} ORDER BY sort_order, id",
+        (plan_id,),
     ):
         if node["status"] in SETTLED_STATUSES:
             continue
@@ -489,7 +505,9 @@ def plan_tree(
     stages = []
     for stage in get_stages(conn, int(plan_row["id"])):
         checkpoints = conn.execute(
-            "SELECT * FROM plan_node WHERE parent_id = ? ORDER BY sort_order, id", (stage["id"],)
+            f"""SELECT * FROM plan_node
+               WHERE parent_id = ? AND {not_invalid()} ORDER BY sort_order, id""",
+            (stage["id"],),
         ).fetchall()
         stages.append({
             "id": stage["id"],
@@ -550,9 +568,9 @@ def reports_between(
     SQLite 的日期函数不认这种格式，自己解析更可靠（与落后量用的是同一套 parse_date）。
     """
     rows = conn.execute(
-        """SELECT report.* FROM report
+        f"""SELECT report.* FROM report
            JOIN plan_node ON plan_node.id = report.node_id
-           WHERE plan_node.plan_id = ?
+           WHERE plan_node.plan_id = ? AND plan_node.{not_invalid()}
            ORDER BY report.created_at, report.id""",
         (plan_id,),
     ).fetchall()

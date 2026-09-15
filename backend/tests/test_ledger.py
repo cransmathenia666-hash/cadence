@@ -122,3 +122,45 @@ def test_set_status_is_idempotent(conn):
 def test_unknown_entity_type_raises(conn):
     with pytest.raises(ledger.LedgerError):
         ledger.create_active(conn, "没注册的类型", {"content": "x"}, actor="user")
+
+
+# ---------- 台账语义归属（方案 B）：带业务状态机的实体不许用生命周期操作 ----------
+
+# 各类记录的最小合法字段，用途只有一个：验证台账拒绝往它们的状态列里写生命周期值。
+_NEW_RECORD: dict[str, dict[str, object]] = {
+    "plan_node": {"plan_id": 1, "level": "checkpoint", "title": "接上 SQLite 读写"},
+    "candidate": {"request_id": 1, "title": "FastAPI 官方教程"},
+    "proposal": {"kind": "plan_replan", "payload": "{}"},
+}
+
+
+@pytest.mark.parametrize("entity_type", sorted(_NEW_RECORD))
+def test_lifecycle_ops_are_refused_for_stateful_entities(conn, entity_type):
+    """节点 / 候选 / 提案的「不再算数」由业务终态表达，不走台账的作废与取代。
+
+    为什么必须挡住：它们的 status 列被业务查询当作「是否还开着」来读，
+    写进 void / superseded 会造出「已作废却仍占着当前阶段、仍挡着同名重建」的幽灵。
+    """
+    entity_id = ledger.create_active(conn, entity_type, _NEW_RECORD[entity_type], actor="user")
+
+    with pytest.raises(ledger.LedgerError, match="不支持"):
+        ledger.void(conn, entity_type, entity_id, reason="想作废", actor="user")
+    with pytest.raises(ledger.LedgerError, match="不支持"):
+        ledger.supersede(
+            conn, entity_type, entity_id, _NEW_RECORD[entity_type], reason="想取代", actor="user")
+
+    # 被拒之后记录必须原样还在、状态没被写脏，流水里也不该多出半截事件
+    row = conn.execute(f"SELECT status FROM {entity_type} WHERE id = ?", (entity_id,)).fetchone()
+    assert row["status"] == ledger.SPECS[entity_type].active_status
+    assert [e["change_type"] for e in ledger.history(conn, entity_type, entity_id)] == ["create"]
+
+
+def test_plan_keeps_lifecycle_ops(conn):
+    """计划是唯一的例外：它没有表达否决的业务终态（closed 是「做完了」，不是「否决了」），
+    所以「被新计划取代」只能由台账表达。"""
+    old_id = ledger.create_active(conn, "plan", {"goal": "旧计划：先把 Python 学完"}, actor="user")
+
+    new_id = ledger.supersede(conn, "plan", old_id, {"goal": "新计划"}, reason="重排", actor="user")
+
+    assert [row["goal"] for row in ledger.fetch_active(conn, "plan")] == ["新计划"]
+    assert new_id != old_id

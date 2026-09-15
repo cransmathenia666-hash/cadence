@@ -29,16 +29,50 @@ class EntitySpec:
     value_column: str | None
     status_column: str = "status"
     active_status: str = "active"
+    # 台账的「作废 / 取代」是否适用于这类记录。
+    # 带业务状态机的实体为 False：它那一列装的是业务状态本身，
+    # 「不再算数」应该由它自己的业务终态表达，台账不许往里写生命周期值。
+    supports_lifecycle: bool = True
 
 
 # 表名只来自这张固定注册表、不接受外部输入，因此下面拼接的表名是安全的。
+#
+# supports_lifecycle 这条分界线（方案 B）的判据是「它有没有一个表达否决的业务终态」：
+# 节点有 skipped、候选和提案有 rejected，计划没有（closed 是「做完了」，不是「否决了」）。
+# 对前四者，台账写进去的 superseded / void 会被业务查询当成「还没收尾」，
+# 造出「已作废却仍占着当前阶段 / 仍挡着同名重建」的幽灵记录；对计划则没有这个问题，
+# 因为计划的读取一律经 fetch_active，被取代的计划自然消失。
 SPECS: dict[str, EntitySpec] = {
     "profile_item": EntitySpec(table="profile_item", value_column="content"),
-    "candidate": EntitySpec(table="candidate", value_column="title", active_status="proposed"),
-    "proposal": EntitySpec(table="proposal", value_column="payload", active_status="pending"),
+    "candidate": EntitySpec(
+        table="candidate", value_column="title", active_status="proposed",
+        supports_lifecycle=False,
+    ),
+    "proposal": EntitySpec(
+        table="proposal", value_column="payload", active_status="pending",
+        supports_lifecycle=False,
+    ),
     "plan": EntitySpec(table="plan", value_column="goal"),
-    "plan_node": EntitySpec(table="plan_node", value_column="title", active_status="not_started"),
+    "plan_node": EntitySpec(
+        table="plan_node", value_column="title", active_status="not_started",
+        supports_lifecycle=False,
+    ),
 }
+
+# 被禁掉生命周期操作时，告诉你「那该用什么」——只报错不给替代方案等于把人堵死。
+_LIFECYCLE_HINT: dict[str, str] = {
+    "plan_node": "节点用 skipped 表达「这件事不算数」",
+    "candidate": "候选用 rejected 表达否决",
+    "proposal": "提案用 rejected 表达否决",
+}
+
+
+def _reject_lifecycle(entity_type: str, action: str) -> LedgerError:
+    hint = _LIFECYCLE_HINT.get(entity_type, "改用它自己的业务终态")
+    return LedgerError(
+        f"{entity_type} 不支持{action}：它那一列装的是业务状态，"
+        f"写进 superseded / void 会造出「已作废却仍算未收尾」的幽灵记录；{hint}"
+    )
 
 
 def _spec(entity_type: str) -> EntitySpec:
@@ -124,6 +158,8 @@ def supersede(
 ) -> int:
     """用新值取代旧值：旧行标记 superseded，新行成为当前有效值。"""
     spec = _spec(entity_type)
+    if not spec.supports_lifecycle:
+        raise _reject_lifecycle(entity_type, "取代")
     old = _row(conn, spec, entity_id)
     if old is None:
         raise LedgerError(f"{entity_type} id={entity_id} 不存在")
@@ -166,6 +202,8 @@ def void(
 ) -> None:
     """作废一条当前有效记录（信息过期、决定被推翻等）。"""
     spec = _spec(entity_type)
+    if not spec.supports_lifecycle:
+        raise _reject_lifecycle(entity_type, "作废")
     old = _row(conn, spec, entity_id)
     if old is None:
         raise LedgerError(f"{entity_type} id={entity_id} 不存在")

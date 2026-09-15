@@ -538,3 +538,46 @@ def test_duplicate_rule_only_blocks_unsettled(conn, existing_status, should_bloc
             plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=stage_id)
     else:
         assert plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=stage_id) is not None
+
+
+# ---------- 台账生命周期终态的兜底（方案 B）：幽灵记录必须看不见 ----------
+
+def void_row(conn, node_id):
+    """绕过台账直接把状态改成 void——模拟方案 B 之前（或被别的程序）写下的历史数据。
+
+    现在台账层已经禁止对节点调 void，所以只能这样造出幽灵来验证兜底有效。
+    """
+    conn.execute("UPDATE plan_node SET status = 'void' WHERE id = ?", (node_id,))
+    conn.commit()
+
+
+def test_legacy_voided_node_is_invisible(conn):
+    """已作废的节点一律当作不存在：取不到、不占位、不算落后。"""
+    plan_id, stage_id, checkpoints = make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
+    void_row(conn, checkpoints[0])
+
+    assert plan.get_node(conn, checkpoints[0]) is None
+    # 关键：幽灵节点不能继续霸着这个标题，否则你再也建不出同名的一条
+    assert plan.add_node(conn, plan_id, "checkpoint", "检查点 1", parent_id=stage_id) is not None
+    assert plan.plan_lag(conn, plan_id, TODAY)["lag_days"] == 0
+
+
+def test_legacy_voided_stage_is_not_current_stage(conn):
+    """已作废的阶段不能继续当「当前阶段」，否则这条计划永远推不动。"""
+    plan_id, stage_id, _ = make_plan(conn)
+    void_row(conn, stage_id)
+
+    assert plan.get_stages(conn, plan_id) == []
+    assert plan.current_stage(conn, plan_id) is None
+
+
+def test_legacy_voided_checkpoint_does_not_count_as_settled(conn):
+    """作废的检查点要从「阶段进度」的分母里消失，不能靠充数把阶段做完。"""
+    _, stage_id, checkpoints = make_plan(conn, checkpoints=(("检查点 1", None), ("检查点 2", None)))
+    plan.submit_report(conn, checkpoints[0], "done", note="做完了")
+    void_row(conn, checkpoints[1])
+
+    completion = plan.stage_completion(conn, stage_id)
+
+    assert completion["total"] == 1
+    assert completion["complete"] is True
