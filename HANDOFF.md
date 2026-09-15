@@ -19,7 +19,7 @@
 | 端到端闭环（脚本可复跑） | 通过 | 本轮 E-19 | E-09 已失效；现由 E-19 覆盖 |
 | 端到端闭环（用户亲手在 `/docs` 走通） | 通过 | 沿用 E-05，本轮由 E-19 端到端复现 | 用户库数据可随时复查 |
 | `backend/tools/` 两个自查脚本 | 通过 | 沿用 E-08，本轮重跑结果逐项一致 | 脚本自身或 `plan.py` 变更后失效 |
-| 前端 `frontend/`（T7：API 层 + 联通页） | 通过 | 本轮 E-18、E-20 | 脚手架、依赖、`lib/api.ts` 或 `app/page.tsx` 改动后失效；**T8 计划表页面与 T9 报告表单未做** |
+| 前端 `frontend/`（T7 + T9 最简交互） | 通过 | 本轮 E-18、E-20、E-21（前端只验 lint 与 tsc） | 前端文件改动后失效；**T8 计划表页面未做**；报告表单只有最小可用版、无样式 |
 | SPEC 第 9 节真实使用验收 | 未验证 | 成功标准 1、5 的后端部分已由 E-05、E-19 覆盖；2、3、4 与前端部分未做 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
@@ -38,7 +38,8 @@
 
 候选队列（不影响当前目标）：
 
-- **P2 剩下切片 2、3**：T8 计划表页面、T9 报告表单都还没动。T7 已完成（`frontend/lib/api.ts` + `app/page.tsx` 联通页，见 E-20）。
+- **P2 只剩 T8**：计划表页面还没做（首页仍是 JSON 直显）。T9 的最小交互已做（`frontend/app/report/page.tsx`，见 E-21），但**没有样式**、也没做禁用按钮之外的体验打磨。
+- **前端写 effect 会被 eslint 拦**：`react-hooks/set-state-in-effect` 禁止在 effect 体内**同步** setState。取数要写成 `.then(回调)` 里 setState（"订阅外部系统"的形态），或用 SWR/TanStack（加依赖属 Ask first）。本会话踩过一次。
 - **写任何 `frontend/` 下的代码前，必须先读 `frontend/node_modules/next/dist/docs/` 里的对应指南**。`frontend/AGENTS.md` 由 `next dev` 自动生成并会自行重建（删了也会回来，提交它才能保持工作区干净），它明说 Next.js 16 相对训练数据有破坏性变更；已见实例：`app/layout.tsx` 用新的 `LayoutProps` 类型，而不是旧的 `children: React.ReactNode` 写法。至少读 `01-app/02-guides/upgrading/version-16.md` 与 `01-app/01-getting-started/06-fetching-data.md`。
 - npm 12 的 install-scripts 策略拦下了 `unrs-resolver` 的 postinstall；实测**不影响 lint**（exit=0），暂不处理，若将来 ESLint 报模块解析错误再回头批准。
 - **框架生成的 `404` / `405` 文案仍是英文**（`Not Found` / `Method Not Allowed`）——形状已随方案 C 统一，只是文案没汉化；只会在手敲错 URL 时出现，前端调到不存在的端点时来自我们自己的 `raise`（中文）。
@@ -65,8 +66,6 @@
 
 ## 5. 证据记录
 
-**维护纪律（为下一个 Agent 省 token，务必照做）**：本文件**每轮结束只更新一次**，且**只做定点编辑、不要整份重写**——整份重写会把全部内容重复计入上下文，本会话曾因此白烧约三万字符。失效条件按**具体模块 + 具体行为**写，不要写成「碰了某个目录就全废」：那样会逼出一次没必要的全量复验（本会话 CORS 那轮就多花了一整轮）。
-
 | 编号/日期 | 来源、操作与环境 | 留存/访问 | 结论 | 适用范围/失效条件 |
 |---|---|---|---|---|
 | E-01～E-04、E-06、E-07、E-09～E-12、E-14～E-17 / 2026-09-14～15 | 已失效的旧证据（P0 台账 10 passed、早期接口探活、P1 78 / 103 / 115 passed、临时库闭环与 due_date 校验、T19 五种连发、smoke 9 步、用户在 `/docs` 亲手得到的 422、五条错误路径形状） | 命令与脚本仍在仓库内，可复跑 | 均已失效：`ledger.py`、`plan.py`、`main.py`、`config.py` 与接口契约接连改动，触发了它们各自的失效条件 | 不要引用；对应结论现由 E-19 覆盖（E-14 里用户看到的 `422` 是**改动前的数组形状**，新形状须重看） |
@@ -76,6 +75,7 @@
 | E-18 / 2026-09-15 | 官方 `create-next-app` 建 `frontend/`（Next.js 16.3.5 + React 19.2.8 + TS，`--empty` 无 Tailwind，`--disable-git`），npm 装 344 包；随后 `npm run dev` 起服务并用 HTTP 请求核对首页，另跑 `npm run lint` | 工程与依赖在仓库内（`node_modules`、`.next` 已被 `frontend/.gitignore` 排除，提交 11 个文件）；dev 服务已停、3000 端口已释放 | 通过：`next dev`（Turbopack）Ready in 311ms，`http://localhost:3000` 返回 **HTTP 200** 且页面含 `Hello world!`；`eslint` exit=0 | 基线 `d8f9e3c`；改动脚手架配置或依赖后失效。**只证明环境可跑，不证明任何前端功能** |
 | E-19 / 2026-09-15 | 加完 CORS 后一次跑三样：`pytest -q`（**119 passed**）、`python tools/smoke_p1.py`（9 步全绿）、临时库起 uvicorn 发 10 组真实请求——5 组跨源（合法 / `127.0.0.1` 写法 / 非法来源的预检与实际请求）+ 5 组带 `Origin` 的错误路径（`422`、`409`、`404`、框架生成的路由 `404`、`405`） | 临时脚本与临时库已删；`data/` 只剩 `cadence.db` | 通过：合法来源两种写法都回 `allow-origin`，**非法来源静默不放行**（无该头、预检 `400`）；**`422` 也带 `allow-origin`**，前端因此读得到那句中文；五条错误路径键集恒为 `{detail, errors}`、`detail` 恒为字符串 | **失效条件收窄**：仅当 `main.py` 的路由或错误形状、`config.py` 的 CORS 名单、`plan.py` 的返回字段、`ledger.py` 的写入语义变更时失效。只改 `tests/` 不使结论失效（重跑更新数字即可）；改无关模块不必重跑 |
 | E-20 / 2026-09-15 | 切片 1 验证：`npm run lint` 与 `npx tsc --noEmit`；用 Node 直接执行 `frontend/lib/api.ts` 打真实后端（取数 / 取不存在的计划 / 地址指向死端口）；用**无头 Chrome 真实浏览器**打开 `http://localhost:3000/` 并抓取渲染后的 DOM | 临时脚本、临时 Chrome 配置目录均已删，无残留 | 通过：lint 与 tsc 均 exit=0；取数拿到库里真实数据（计划 3 与阶段 4）、取不存在的计划抛 `ApiError`（status 404、中文 detail）、断网给出可读提示；**浏览器端跨源请求由浏览器判定并放行**，DOM 里出现真实数据、未停在加载态、无错误块 | 基线 `29b9157`；`lib/api.ts`、`app/page.tsx`、后端契约或 CORS 名单变更后失效 |
+| E-21 / 2026-09-15 | 最简报告交互（T9 最小版）：`npm run lint` 与 `npx tsc --noEmit`——按 AGENTS.md 的验证纪律，前端只做这两项 | 工程内，可复跑 | 通过：两项均 exit=0。过程中 lint 拦下一次 `react-hooks/set-state-in-effect`（effect 体内同步调用了会 setState 的函数），已改为在 `.then` 回调里 setState。**浏览器手工走查未做**——按纪律归用户 | 本次提交；`lib/api.ts`、`app/report/page.tsx` 或 `/api/report` 契约变更后失效 |
 
 ## 6. 启动、验收与上下文
 
@@ -117,4 +117,4 @@ npm run lint       # ESLint，当前 exit=0
 6. **写 `frontend/` 下的代码前先读它自带的官方文档**（`frontend/node_modules/next/dist/docs/`）。Next.js 16 相对训练数据有破坏性变更，`frontend/AGENTS.md` 把「先读指南再写代码」写成了强制要求；凭记忆写很可能撞上这个版本已经换掉的 API。
 7. **停服务别只杀父进程**：`job_kill` 只杀 PowerShell 外壳，`uvicorn` 与 `next dev` 都会留下子进程占着 8000 / 3000 端口（本会话两种都踩过）；按第 6 节的办法找 PID 再停。
 8. 遵守项目 AGENTS.md 的教学协议：讲代码先给全景，分清现状与蓝图，每条知识配一个用户能亲手执行的动作，并让用户复述。
-9. 每次提交 ≤200 行有效改动；加依赖与改契约属 Ask first；不因工作区缺少外部附件而推断附件从未提供，不把历史阻塞写回当前阻塞；不删除分支、工作树或用户数据，除非用户明确授权（`data/cadence.db` 里有用户真实档案与手工验收数据，不得清库）。
+9. 每次提交 ≤200 行有效改动；加依赖与改契约属 Ask first；不因工作区缺少外部附件而推断附件从未提供，不把历史阻塞写回当前阻塞；不删除分支、工作树或用户数据，除非用户明确授权（`data/cadence.db` 里有用户真实档案与手工验收数据，不得清库）。**本文件每轮只更新一次、只做定点编辑，不整份重写**——整份重写会把全文重复计入上下文，本会话曾因此白烧约三万字符。
