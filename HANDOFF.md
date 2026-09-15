@@ -4,8 +4,8 @@
 > 仓库根目录：`D:\cadence`
 > 主工作树：`D:\cadence`｜`master`｜后端代码基线 `fe4a5b8`、前端脚手架 `d8f9e3c`｜无远端｜未提交改动仅剩用户三件（见第 3 节）
 > 其他工作树：无
-> 当前唯一目标：P1（后端闭环）+ 四处 P1 补充**已完成**；**P2 的 T7 已完成前半**（前端环境就绪 + 后端 CORS），只差 `frontend/lib/api.ts`。下一步待用户指定
-> 下一条动作：用户跑 `pytest -q`（预期 `119 passed`）与 `tools\smoke_p1.py`（预期 9 步全绿），并到 `/docs` 用 `due_date = 2026-14-15` 建节点看 `detail` 是否已是中文一句话；之后写 `frontend/lib/api.ts` 即完成 T7
+> 当前唯一目标：P1（后端闭环）+ 四处 P1 补充**已完成**；**P2 进行中**：T7 已完成（环境 + CORS + API 层 + 联通验证页），T8 计划表页面与 T9 报告表单未做。用户已批准三个切片全做，取数架构已定为**浏览器直连**
+> 下一条动作：接着做切片 2（T8 计划表页面），再做切片 3（T9 报告表单）；P1 的三步验收仍待用户亲手回报
 
 ## 1. 当前状态
 
@@ -19,7 +19,7 @@
 | 端到端闭环（脚本可复跑） | 通过 | 本轮 E-19 | E-09 已失效；现由 E-19 覆盖 |
 | 端到端闭环（用户亲手在 `/docs` 走通） | 通过 | 沿用 E-05，本轮由 E-19 端到端复现 | 用户库数据可随时复查 |
 | `backend/tools/` 两个自查脚本 | 通过 | 沿用 E-08，本轮重跑结果逐项一致 | 脚本自身或 `plan.py` 变更后失效 |
-| 前端 `frontend/`（仅环境） | 通过 | 本轮 E-18 | 脚手架、依赖或配置改动后失效；**业务代码未写**——T7 只剩 `lib/api.ts` |
+| 前端 `frontend/`（T7：API 层 + 联通页） | 通过 | 本轮 E-18、E-20 | 脚手架、依赖、`lib/api.ts` 或 `app/page.tsx` 改动后失效；**T8 计划表页面与 T9 报告表单未做** |
 | SPEC 第 9 节真实使用验收 | 未验证 | 成功标准 1、5 的后端部分已由 E-05、E-19 覆盖；2、3、4 与前端部分未做 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
@@ -28,7 +28,7 @@
 
 **本轮补的三件事（都已完成）：** T20 把「台账生命周期」与「业务状态」的归属划清——台账的作废 / 取代只对 `profile_item` 与 `plan` 开放，节点 / 候选 / 提案用业务终态（`skipped` / `rejected`）表达「不再算数」，并对历史幽灵记录兜底过滤；T21 把建节点的 `due_date` 收成真日期类型，非法日期在边界返回 `422`；方案 C 把全部错误出口收成一个形状，`detail` 恒为中文一句话、`errors` 恒为数组。
 
-**本轮不做 / 下一步：** 本轮没做前端业务代码（T8/T9）、LLM 与 provider 管理（P3）、触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）。按用户指示先不写前端业务代码，**T7 现在只剩一件**：写 `frontend/lib/api.ts`（先做 `getPlan()`，错误按方案 C 的形状处理）；再往后 T8 计划表页面、T9 报告提交表单。
+**本轮不做 / 下一步：** LLM 与 provider 管理（P3）、触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）都不在本轮。P2 的取数架构已定为**浏览器直连**（用户选的方案甲，见 SPEC 第 18 节第 26 条），T7 的切片 1 已完成并通过**真实浏览器**验证（E-20）。接着做切片 2（T8 计划表页面）与切片 3（T9 报告表单），每片各自验证、各自提交。
 
 **前端环境（本轮建好）：** `frontend/` 是官方 `create-next-app` 生成的最小工程——Next.js 16.3.5 + React 19.2.8 + TypeScript 5，App Router 且带 `--empty`（无示例内容），**不启用 Tailwind**（样式留到 T8），并用 `--disable-git` 避免嵌套 git 仓库。`npm run dev` 起得来、`npm run lint` 通过（E-18）。
 
@@ -38,7 +38,7 @@
 
 候选队列（不影响当前目标）：
 
-- **T7 只剩一件事**：`frontend/lib/api.ts` 未写（后端 CORS 已随 `fe4a5b8` 落地）。用户明确「先配环境、只做 CORS」，所以写前端代码等他发话。
+- **P2 剩下切片 2、3**：T8 计划表页面、T9 报告表单都还没动。T7 已完成（`frontend/lib/api.ts` + `app/page.tsx` 联通页，见 E-20）。
 - **写任何 `frontend/` 下的代码前，必须先读 `frontend/node_modules/next/dist/docs/` 里的对应指南**。`frontend/AGENTS.md` 由 `next dev` 自动生成并会自行重建（删了也会回来，提交它才能保持工作区干净），它明说 Next.js 16 相对训练数据有破坏性变更；已见实例：`app/layout.tsx` 用新的 `LayoutProps` 类型，而不是旧的 `children: React.ReactNode` 写法。至少读 `01-app/02-guides/upgrading/version-16.md` 与 `01-app/01-getting-started/06-fetching-data.md`。
 - npm 12 的 install-scripts 策略拦下了 `unrs-resolver` 的 postinstall；实测**不影响 lint**（exit=0），暂不处理，若将来 ESLint 报模块解析错误再回头批准。
 - **框架生成的 `404` / `405` 文案仍是英文**（`Not Found` / `Method Not Allowed`）——形状已随方案 C 统一，只是文案没汉化；只会在手敲错 URL 时出现，前端调到不存在的端点时来自我们自己的 `raise`（中文）。
@@ -56,9 +56,10 @@
 - **台账的作废 / 取代只对 `profile_item` 与 `plan` 开放**（SPEC 第 18 节第 22 条）。节点 / 候选 / 提案用业务终态：节点 `skipped`、候选与提案 `rejected`。判据是「它有没有表达否决的业务终态」——`plan` 没有（`closed` 是完成，不是否决），所以它是例外。
 - 业务规则集中在 `backend/app/plan.py`（状态机、落后量、阶段判定、周检查点判定、防重复）；接口层只翻译 HTTP 状态码。状态码口径：参数不合法 `422`、与现状冲突 `409`、业务规则拒绝 `400`。
 - 错误响应统一为 `{"detail": 中文一句话, "errors": 数组}`（SPEC 第 18 节第 24 条）；前端只按这一种形状处理。
+- **P2 取数架构：浏览器直连**（SPEC 第 18 节第 26 条）。前端页面用客户端组件，`lib/api.ts` 在**浏览器**里 fetch 后端，因此**受 CORS 名单约束**（后端那层不是摆设）。不采用 Next 16 文档主推的服务端取数 + Server Action 路线，理由与代价见 SPEC 第 10 节。
 - 前端不得持久化业务状态，不得直连数据库或 LLM；业务规则在后端算完再给前端。
 - LLM 只产出结构化提案，写入必须经用户裁定。
-- 已定决策共 25 条见 `docs/SPEC.md` 第 18 节；除用户明确要求，不重新讨论。
+- 已定决策共 26 条见 `docs/SPEC.md` 第 18 节；除用户明确要求，不重新讨论。
 - `无标题-2026-09-14-2037.excalidraw` 是用户手绘的原始设计图，只读，不得删除或改写。
 - 台账拆列（方案 A）仅在 SPEC 第 17 节第 2 条的三个触发条件满足时才重新打开。
 
@@ -72,6 +73,7 @@
 | E-13 / 2026-09-15 | 处置 Agent 误建的 `plan_node #7`：`plan.transition_node(7, "skipped", actor="agent")`，随后 `tools/show_db.py` 复核 | 用户库内留流水，可复查 | 通过：状态 `not_started → skipped`（理由「契约探测误建」写入台账）；计划 1 的「当前阶段」回到 `无`；计划 2、3 的树与 E-08 逐项一致，报告与提案未受影响 | 用户库数据可随时复查 |
 | E-18 / 2026-09-15 | 官方 `create-next-app` 建 `frontend/`（Next.js 16.3.5 + React 19.2.8 + TS，`--empty` 无 Tailwind，`--disable-git`），npm 装 344 包；随后 `npm run dev` 起服务并用 HTTP 请求核对首页，另跑 `npm run lint` | 工程与依赖在仓库内（`node_modules`、`.next` 已被 `frontend/.gitignore` 排除，提交 11 个文件）；dev 服务已停、3000 端口已释放 | 通过：`next dev`（Turbopack）Ready in 311ms，`http://localhost:3000` 返回 **HTTP 200** 且页面含 `Hello world!`；`eslint` exit=0 | 基线 `d8f9e3c`；改动脚手架配置或依赖后失效。**只证明环境可跑，不证明任何前端功能** |
 | E-19 / 2026-09-15 | 加完 CORS 后一次跑三样：`pytest -q`（**119 passed**）、`python tools/smoke_p1.py`（9 步全绿）、临时库起 uvicorn 发 10 组真实请求——5 组跨源（合法 / `127.0.0.1` 写法 / 非法来源的预检与实际请求）+ 5 组带 `Origin` 的错误路径（`422`、`409`、`404`、框架生成的路由 `404`、`405`） | 临时脚本与临时库已删；`data/` 只剩 `cadence.db` | 通过：合法来源两种写法都回 `allow-origin`，**非法来源静默不放行**（无该头、预检 `400`）；**`422` 也带 `allow-origin`**，前端因此读得到那句中文；五条错误路径键集恒为 `{detail, errors}`、`detail` 恒为字符串 | 基线 `fe4a5b8`；`plan.py`、`main.py`、`config.py`、`tests/` 或接口契约变更后失效 |
+| E-20 / 2026-09-15 | 切片 1 验证：`npm run lint` 与 `npx tsc --noEmit`；用 Node 直接执行 `frontend/lib/api.ts` 打真实后端（取数 / 取不存在的计划 / 地址指向死端口）；用**无头 Chrome 真实浏览器**打开 `http://localhost:3000/` 并抓取渲染后的 DOM | 临时脚本、临时 Chrome 配置目录均已删，无残留 | 通过：lint 与 tsc 均 exit=0；取数拿到库里真实数据（计划 3 与阶段 4）、取不存在的计划抛 `ApiError`（status 404、中文 detail）、断网给出可读提示；**浏览器端跨源请求由浏览器判定并放行**，DOM 里出现真实数据、未停在加载态、无错误块 | 基线 `29b9157`；`lib/api.ts`、`app/page.tsx`、后端契约或 CORS 名单变更后失效 |
 
 ## 6. 启动、验收与上下文
 
