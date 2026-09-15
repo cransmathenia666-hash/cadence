@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from . import ledger
@@ -427,3 +427,143 @@ def plan_tree(
         "lag": plan_lag(conn, int(plan_row["id"]), today),
         "stages": stages,
     }
+
+
+# ---------- 周检查点判定 ----------
+
+def week_bounds(day: date) -> tuple[date, date]:
+    """所在自然周的范围（周一 ~ 周日）。
+
+    为什么以周一为界：ISO 周和后面 Markdown 导出的周文件名都从周一开始，
+    三处口径统一，省得以后对不上账。
+    """
+    start = day - timedelta(days=day.weekday())
+    return start, start + timedelta(days=6)
+
+
+def week_key(day: date) -> str:
+    """周标识，形如 `2026-W38`——与导出文件名 `周检查点-YYYY-WW.md` 同一套写法。"""
+    iso = day.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def reports_between(
+    conn: sqlite3.Connection, plan_id: int, start: date, end: date
+) -> list[sqlite3.Row]:
+    """某个计划在 [start, end] 之间收到的报告。
+
+    为什么在 Python 里筛日期而不是写进 SQL：`created_at` 是带时区的文本，
+    SQLite 的日期函数不认这种格式，自己解析更可靠（与落后量用的是同一套 parse_date）。
+    """
+    rows = conn.execute(
+        """SELECT report.* FROM report
+           JOIN plan_node ON plan_node.id = report.node_id
+           WHERE plan_node.plan_id = ?
+           ORDER BY report.created_at, report.id""",
+        (plan_id,),
+    ).fetchall()
+    return [
+        row for row in rows
+        if (day := parse_date(row["created_at"])) is not None and start <= day <= end
+    ]
+
+
+def _weekly_already_asked(conn: sqlite3.Connection, start: date, end: date) -> bool:
+    """本周是否已经问过——按触达记录判，避免兜底提醒变成每周刷屏。"""
+    for row in conn.execute("SELECT sent_at FROM notification_log WHERE kind = 'weekly_checkpoint'"):
+        day = parse_date(row["sent_at"])
+        if day is not None and start <= day <= end:
+            return True
+    return False
+
+
+def _replan_options(
+    stage: sqlite3.Row | None, lag: dict[str, Any], progress: dict[str, Any] | None
+) -> list[dict[str, str]]:
+    """SPEC 第 6 节的三个出路：减量 / 顺延 / 换交付物。
+
+    给的是**选项**不是决定：为什么这么调、调多少，最终由你裁定（第 8 节铁律）。
+    """
+    if lag["behind"]:
+        target = lag["worst"]["title"]
+        postpone_days = lag["worst"]["lag_days"]
+    else:
+        open_titles = (progress or {}).get("open_titles") or []
+        target = open_titles[0] if open_titles else "当前阶段"
+        postpone_days = 7  # 没有过期节点时按「往后挪一周」给建议
+    deliverable = "当前目标"
+    if stage is not None:
+        deliverable = stage["deliverable"] or stage["title"]
+    return [
+        {"kind": "reduce_scope", "label": "减量",
+         "detail": f"把「{target}」的范围缩到这一周做得完的量"},
+        {"kind": "postpone", "label": "顺延",
+         "detail": f"把「{target}」的计划完成日往后推 {postpone_days} 天，重新对一次现实"},
+        {"kind": "swap_deliverable", "label": "换交付物",
+         "detail": f"给这一阶段换一个同样能证明「{deliverable}」的交付物"},
+    ]
+
+
+def weekly_status(
+    conn: sqlite3.Connection, today: date | None = None, plan_id: int | None = None
+) -> dict[str, Any]:
+    """本周检查点的判定结果：该不该问、以及问的时候要用的原料。
+
+    这里只做判定和备料，不负责把三问写成邮件——那是 P4 触达的活（T15/T16）。
+    """
+    today = today or date.today()
+    start, end = week_bounds(today)
+    status: dict[str, Any] = {
+        "due": False,
+        "week": week_key(today),
+        "week_start": start.isoformat(),
+        "week_end": end.isoformat(),
+        "plan_id": None,
+        "current_stage": None,
+        "stage_progress": None,
+        "reports_this_week": [],
+        "pushed": False,
+        "behind": False,
+        "behind_reason": None,
+        "lag": {"lag_days": 0, "behind": False, "worst": None},
+        "replan_options": [],
+    }
+
+    plan_row = resolve_plan(conn, plan_id)
+    if plan_row is None:
+        status["behind_reason"] = "还没有计划，暂时没什么可检查的"
+        return status
+
+    target_plan_id = int(plan_row["id"])
+    lag = plan_lag(conn, target_plan_id, today)
+    reports = reports_between(conn, target_plan_id, start, end)
+    stage = current_stage(conn, target_plan_id)
+    progress = None if stage is None else stage_completion(conn, int(stage["id"]))
+
+    if lag["behind"]:
+        behind_reason = (
+            f"「{lag['worst']['title']}」到期 {lag['worst']['due_date']}，"
+            f"落后 {lag['lag_days']} 天还没做完"
+        )
+    elif not reports:
+        behind_reason = "本周没有报告，看不出这周推到哪了"
+    else:
+        behind_reason = None
+
+    status.update({
+        "due": not _weekly_already_asked(conn, start, end),
+        "plan_id": target_plan_id,
+        "current_stage": None if stage is None else {
+            "id": stage["id"],
+            "title": stage["title"],
+            "deliverable": stage["deliverable"],
+        },
+        "stage_progress": progress,
+        "reports_this_week": [dict(row) for row in reports],
+        "pushed": bool(reports),
+        "behind": lag["behind"],
+        "behind_reason": behind_reason,
+        "lag": lag,
+        "replan_options": [] if behind_reason is None else _replan_options(stage, lag, progress),
+    })
+    return status

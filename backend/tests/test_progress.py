@@ -293,3 +293,113 @@ def test_current_stage_skips_settled_stages(conn):
     tree = plan.plan_tree(conn, plan_id=plan_id, today=TODAY)
 
     assert tree["current_stage"]["id"] == second
+
+
+# ---------- T6：周检查点判定 ----------
+
+TODAY_IS_SUNDAY = date(2026, 9, 20)  # 2026-09-20 是周日，本周 = 09-14 ~ 09-20
+
+
+def log_weekly_sent(conn, at, kind="weekly_checkpoint"):
+    """模拟触达环节已经问过一次（P4 才会真的发信，这里只造记录）。"""
+    conn.execute(
+        """INSERT INTO notification_log (channel, kind, subject, body, ok, sent_at)
+           VALUES ('none', ?, '三问', '', 1, ?)""",
+        (kind, at))
+    conn.commit()
+
+
+def test_week_bounds_start_on_monday(conn):
+    start, end = plan.week_bounds(TODAY_IS_SUNDAY)
+
+    assert (start, end) == (date(2026, 9, 14), date(2026, 9, 20))
+    assert plan.week_key(TODAY_IS_SUNDAY) == "2026-W38"
+
+
+def test_weekly_not_due_without_plan(conn):
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert status["due"] is False
+    assert status["plan_id"] is None
+
+
+def test_weekly_due_when_plan_exists(conn):
+    plan_id, _, _ = make_plan(conn)
+
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert status["due"] is True
+    assert status["plan_id"] == plan_id
+    assert status["week"] == "2026-W38"
+
+
+def test_weekly_not_due_when_already_asked_this_week(conn):
+    """同一周只问一次——兜底提醒变成每周刷屏就没意义了。"""
+    make_plan(conn)
+    log_weekly_sent(conn, "2026-09-16T09:00:00+08:00")
+
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert status["due"] is False
+
+
+def test_weekly_due_again_next_week(conn):
+    make_plan(conn)
+    log_weekly_sent(conn, "2026-09-16T09:00:00+08:00")
+
+    status = plan.weekly_status(conn, today=date(2026, 9, 22))  # 下一周的周二
+
+    assert status["due"] is True
+    assert status["week"] == "2026-W39"
+
+
+def test_weekly_on_track_when_reported_this_week(conn):
+    """按时：本周有报告、没有过期未完成的节点。"""
+    plan_id, stage_id, checkpoints = make_plan(
+        conn, checkpoints=(("检查点 1", "2026-09-30"), ("检查点 2", None)))
+    plan.submit_report(conn, checkpoints[0], "done", note="做完了", at="2026-09-16T20:00:00+08:00")
+
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert status["due"] is True
+    assert status["behind"] is False
+    assert status["behind_reason"] is None
+    assert [r["note"] for r in status["reports_this_week"]] == ["做完了"]
+    assert status["current_stage"]["id"] == stage_id
+    assert status["stage_progress"]["done"] == 1
+
+
+def test_weekly_marks_behind_when_node_overdue(conn):
+    """落后：有过期还没做完的节点。"""
+    _, stage_id, _ = make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
+
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert status["behind"] is True
+    assert "落后" in status["behind_reason"]
+    assert status["lag"]["lag_days"] == 7
+
+
+def test_weekly_marks_no_report_when_nothing_this_week(conn):
+    """无报告：本周一条都没提，哪怕没有过期节点也算未推进。"""
+    make_plan(conn, checkpoints=(("检查点 1", "2026-09-30"),))
+
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert status["behind"] is False
+    assert status["reports_this_week"] == []
+    assert status["pushed"] is False
+    assert "没有报告" in status["behind_reason"]
+
+
+def test_weekly_replan_options_are_the_three_ways(conn):
+    """SPEC 第 6 节：未推进时给减量 / 顺延 / 换交付物三条路。"""
+    make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
+
+    status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
+
+    assert [option["kind"] for option in status["replan_options"]] == [
+        "reduce_scope", "postpone", "swap_deliverable"
+    ]
+    assert all(option["detail"] for option in status["replan_options"])
+    assert "检查点 1" in status["replan_options"][0]["detail"]
