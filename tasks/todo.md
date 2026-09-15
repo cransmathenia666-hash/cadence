@@ -1,9 +1,10 @@
-# 任务清单 v0.4
+# 任务清单 v0.5
 
 配套：`docs/SPEC.md` · `tasks/plan.md`
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.5 变更**：P1 补充 T20（台账语义归属，方案 B）与 T21（建节点入参校验），均为已完成的后端修补。
 **v0.4 变更**：P4 新增 T17 Markdown 导出；验收任务顺延为 T18。
 **v0.3 变更**：P3 开头插入 LLM provider 管理与调用记账两个任务（T10、T11），后续任务顺延编号。
 
@@ -45,6 +46,16 @@
   - Acceptance：同一层级下已有未收尾的同名节点时，再次创建返回 `409` 并说明是哪一条；已完成 / 跳过的同名节点不挡路
   - Verify：`/docs` 里对一个新检查点连点两次 `Execute`，第二次得 409，库里只多一条
   - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/test_progress.py`
+
+- [x] **T20 台账语义归属（P1 补充，方案 B）**
+  - Acceptance：台账的「作废 / 取代」只对 `profile_item` 与 `plan` 开放；节点 / 候选 / 提案调用时明确报错并给出替代动作（`skipped` / `rejected`）。`plan_node` 侧的读取把 `void` / `superseded` 当不存在（不可见、不占位、不进阶段进度分母）
+  - Verify：`pytest -q`（拒绝路径 + 幽灵兜底共 7 条）；用绕过台账的 `UPDATE` 造一个 `void` 节点，确认它不再当当前阶段、不挡同名重建、不算落后
+  - Files：`backend/app/ledger.py`、`backend/app/plan.py`、`backend/tests/test_ledger.py`、`backend/tests/test_progress.py`
+
+- [x] **T21 建节点入参校验（P1 补充）**
+  - Acceptance：`POST /api/plan/nodes` 的 `due_date` 只接受零填充 ISO 日期，`2026-13-01` / `2026/09/30` / `2026-9-3` 一律 `422`；库里仍存 TEXT
+  - Verify：单测直接测请求模型（不引入 httpx）；临时库发真实请求，非法日期 422、合法日期 201 且落库为 `'2026-09-30'`
+  - Files：`backend/app/main.py`、`backend/tests/test_api_contract.py`
 
 ## P2 前后端打通（第一个可验证切片）
 
