@@ -23,7 +23,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, db, ledger, plan
+from . import config, db, ledger, llm, plan
 
 app = FastAPI(
     title="cadence",
@@ -247,3 +247,116 @@ def get_plan(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_
     if plan_id is not None and tree["plan"] is None:
         raise HTTPException(status_code=404, detail=f"计划 id={plan_id} 不存在")
     return tree
+
+
+# ---------- LLM 提供商与调用记账（T10） ----------
+#
+# 铁律（SPEC 第 10 节第 4 条）：密钥**只写不读**——进来的 api_key 只往库里落，
+# 出去的任何响应里只有掩码。所以下面所有返回值都走 `llm.public_provider`，
+# 不要把 `llm.get_provider` 拿到的原始行直接返回。
+
+class ProviderIn(BaseModel):
+    name: str = Field(min_length=1, description="给这家起的名字，全库唯一")
+    base_url: str | None = Field(default=None, description="形如 https://api.example.com/v1")
+    api_key: str | None = Field(default=None, description="只写不读：接口永不回传明文")
+    default_model: str | None = None
+    set_as_default: bool = False
+
+
+class ProviderPatch(BaseModel):
+    """改一家 provider。字段都可选，只改传了的。
+
+    `api_key` 不传（或传空串）表示**不改密钥**——界面只拿得到掩码，回填不了明文，
+    若把"没传"当成"清空"，改个名字就会顺手把钥匙擦掉。
+    """
+
+    name: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    default_model: str | None = None
+    enabled: bool | None = None
+    set_as_default: bool = False
+
+
+def _require_provider(conn: sqlite3.Connection, provider_id: int) -> None:
+    if llm.get_provider(conn, provider_id) is None:
+        raise HTTPException(status_code=404, detail=f"provider id={provider_id} 不存在")
+
+
+@app.get("/api/providers")
+def get_providers(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """列出已配置的提供商。**只回掩码**，明文密钥永不出库。"""
+    return {"providers": llm.list_providers(conn)}
+
+
+@app.post("/api/providers", status_code=201,
+          responses={409: {"description": "已经有一家同名 provider"}})
+def post_provider(payload: ProviderIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """新增一家提供商。密钥只往库里写，响应里只有掩码。"""
+    try:
+        provider_id = llm.create_provider(
+            conn,
+            name=payload.name,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            default_model=payload.default_model,
+        )
+        if payload.set_as_default:
+            llm.update_provider(conn, provider_id, set_as_default=True)
+    except llm.DuplicateProvider as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return llm.public_provider(llm.get_provider(conn, provider_id))  # type: ignore[arg-type]
+
+
+@app.put("/api/providers/{provider_id}")
+def put_provider(
+    provider_id: int, payload: ProviderPatch, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """改一家提供商：改字段、启用停用、设为默认。"""
+    _require_provider(conn, provider_id)
+    try:
+        llm.update_provider(
+            conn,
+            provider_id,
+            name=payload.name,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            default_model=payload.default_model,
+            enabled=payload.enabled,
+            set_as_default=payload.set_as_default,
+        )
+    except llm.DuplicateProvider as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return llm.public_provider(llm.get_provider(conn, provider_id))  # type: ignore[arg-type]
+
+
+@app.delete("/api/providers/{provider_id}")
+def delete_provider(provider_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """删一家提供商。**它的调用记账不删**——账是历史，得留着。"""
+    _require_provider(conn, provider_id)
+    llm.delete_provider(conn, provider_id)
+    return {"id": provider_id, "deleted": True}
+
+
+@app.post("/api/providers/{provider_id}/test")
+def test_provider(provider_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """发一个最小请求测连通性。
+
+    **失败也返回 200**：「通不通」是它的返回值，不是 HTTP 层错误。配错 base_url
+    或密钥失效是常事，前端要的是「结果 + 原因」，而不是一个异常。
+    """
+    _require_provider(conn, provider_id)
+    return llm.test_provider(conn, provider_id)
+
+
+@app.get("/api/llm-calls")
+def get_llm_calls(limit: int = 50, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """调用记账：最近流水 + 按周汇总。
+
+    为什么不设预算上限就必须有这个：不设上限的前提是「看得见花了多少」。
+    """
+    return {"calls": llm.list_calls(conn, limit=limit), "by_week": llm.call_summary_by_week(conn)}

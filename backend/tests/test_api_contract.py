@@ -17,7 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
-from app import config
+from app import config, db, llm, main
 from app.main import (
     NodeIn,
     app,
@@ -25,6 +25,15 @@ from app.main import (
     human_readable_errors,
     validation_error_handler,
 )
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    path = tmp_path / "test.db"
+    db.init(path)
+    connection = db.connect(path)
+    yield connection
+    connection.close()
 
 
 # ---------- 建节点的 due_date 收成真日期 ----------
@@ -191,3 +200,100 @@ def test_frontend_port_is_defined_in_one_place():
 def test_cors_methods_are_a_whitelist_matching_the_contract():
     """方法是白名单不是通配符——契约加方法时这条会红，提醒回来改。"""
     assert set(cors_kwargs()["allow_methods"]) == {"GET", "POST", "PUT", "DELETE"}
+
+
+# ---------- LLM 提供商接口（T10）：密钥只写不读 ----------
+
+FAKE_KEY = "sk-fake-1234567890abcd"
+
+
+def _make_provider(conn, name="假提供商"):
+    return llm.create_provider(
+        conn, name=name, base_url="http://127.0.0.1:9999/v1",
+        api_key=FAKE_KEY, default_model="fake-model",
+    )
+
+
+def test_provider_list_never_leaks_the_plaintext(conn):
+    """接口是对外那一层，密钥在这里漏出去就等于白做了掩码。"""
+    _make_provider(conn)
+
+    payload = json.dumps(main.get_providers(conn=conn), ensure_ascii=False)
+
+    assert FAKE_KEY not in payload
+    assert main.get_providers(conn=conn)["providers"][0]["api_key_masked"] == "****abcd"
+
+
+def test_create_response_is_masked_and_can_be_default(conn):
+    created = main.post_provider(
+        main.ProviderIn(
+            name="甲", base_url="http://example.invalid/v1",
+            api_key=FAKE_KEY, default_model="m", set_as_default=True,
+        ),
+        conn=conn,
+    )
+
+    assert FAKE_KEY not in json.dumps(created, ensure_ascii=False)
+    assert created["is_default"] is True
+    assert created["has_api_key"] is True
+    assert set(created) == {
+        "id", "name", "base_url", "default_model", "is_default", "enabled",
+        "has_api_key", "api_key_masked", "created_at",
+    }
+
+
+def test_duplicate_provider_name_is_409(conn):
+    """重名是"和现有数据撞了"，不是参数写错——与建节点同名同样是 409。"""
+    _make_provider(conn)
+
+    with pytest.raises(HTTPException) as caught:
+        main.post_provider(main.ProviderIn(name="假提供商"), conn=conn)
+
+    assert caught.value.status_code == 409
+    assert "已经有一家" in str(caught.value.detail)
+
+
+def test_missing_provider_is_404_on_all_three(conn):
+    with pytest.raises(HTTPException) as caught:
+        main.put_provider(9999, main.ProviderPatch(name="x"), conn=conn)
+    assert caught.value.status_code == 404
+
+    with pytest.raises(HTTPException) as caught:
+        main.delete_provider(9999, conn=conn)
+    assert caught.value.status_code == 404
+
+    with pytest.raises(HTTPException) as caught:
+        main.test_provider(9999, conn=conn)
+    assert caught.value.status_code == 404
+
+
+def test_connectivity_endpoint_reports_failure_without_raising(conn, monkeypatch):
+    """配错 base_url 是常事：体检要把「不通 + 原因」当返回值给出来，而不是抛异常。"""
+    monkeypatch.setattr(
+        llm, "post_json", lambda url, headers, payload, timeout=30.0: (500, {"__raw__": "boom"})
+    )
+    provider_id = _make_provider(conn)
+
+    result = main.test_provider(provider_id, conn=conn)
+
+    assert result["ok"] is False
+    assert "500" in result["detail"]
+
+
+def test_calls_endpoint_exposes_both_raw_and_weekly(conn, monkeypatch):
+    monkeypatch.setattr(
+        llm, "post_json",
+        lambda url, headers, payload, timeout=30.0: (
+            200, {"choices": [{"message": {"content": "hi"}}],
+                  "usage": {"prompt_tokens": 7, "completion_tokens": 3}},
+        ),
+    )
+    provider_id = _make_provider(conn)
+    main.put_provider(provider_id, main.ProviderPatch(set_as_default=True), conn=conn)
+    llm.Operation(conn, "judge").chat([{"role": "user", "content": "hi"}])
+
+    payload = main.get_llm_calls(conn=conn)
+
+    assert payload["calls"][0]["input_tokens"] == 7
+    assert payload["by_week"][0]["calls"] == 1
+    assert FAKE_KEY not in json.dumps(payload, ensure_ascii=False)
