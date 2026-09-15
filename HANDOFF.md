@@ -79,12 +79,13 @@ cd D:\cadence\backend
 .\.venv\Scripts\python.exe -m pytest -q           # 预期 103 passed
 .\.venv\Scripts\python.exe tools\show_db.py       # 只读看库：计划树 / 报告 / 台账 / 提案
 .\.venv\Scripts\python.exe tools\smoke_p1.py      # 闭环冒烟：自起临时库跑 9 步，不动真实数据
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000   # 手动验收用，/docs 可打开
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000   # 开发用：改代码自动重启
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000            # 不带热加载，验收用
 ```
 
-**待用户执行的验收**：确认 8000 端口上跑的是新代码（`/openapi.json` 里 `NodeIn.due_date` 应为 `format: date`；旧进程不会自动加载新代码），跑 `pytest -q` 预期 `103 passed`，再到 `/docs` 对任意计划建节点、`due_date` 填 `2026-13-01`，预期 `422`。
+**待用户执行的验收**：先自己起服务（见上一行的两条命令；本轮结束时 8000 端口是**空闲**的，Agent 起的服务已关闭），确认它跑的是新代码（`/openapi.json` 里 `NodeIn.due_date` 应为 `format: date`），跑 `pytest -q` 预期 `103 passed`，再到 `/docs` 对任意计划建节点、`due_date` 填 `2026-13-01`，预期 `422`。
 
-**8000 端口的现状**：本会话 Agent 起过一个后台服务（新代码）。注意 `job_kill` 只杀 PowerShell 外壳、**杀不掉它派生的 uvicorn 子进程**——要停请用 `Get-NetTCPConnection -LocalPort 8000` 找出 PID 后 `Stop-Process`。
+**热加载注意**：`--reload` 只监听 Python 文件，改 `sql/schema.sql` 不会触发重启；它也没装 `watchfiles`（走轮询实现），够用但不是最快的。**停服务时别只杀父进程**：`--reload` 会派生「reloader 父进程 + worker 子进程」，外部强杀父进程可能留下子进程继续占着 8000 端口；同理 `job_kill` 只杀 PowerShell 外壳。要停干净请用 `Get-NetTCPConnection -LocalPort 8000 -State Listen` 找出 PID 再 `Stop-Process`。
 
 | 任务类型 | 必读文件 |
 |---|---|
