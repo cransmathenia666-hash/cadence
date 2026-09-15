@@ -1,12 +1,12 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-15 11:55（本地时区）
+> 最近更新：2026-09-15 12:25（本地时区）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜`master`｜`2904831`（本交接文档随后提交）｜无远端｜有未提交改动（见第 3 节）
-> 代码基线：`2904831`（P1 代码，含 T19 防重复提交）
+> 主工作树：`D:\cadence`｜`master`｜`9f95a38`（本交接文档随后提交）｜无远端｜有未提交改动（见第 3 节）
+> 代码基线：`9f95a38`（P1 代码 + T19 防重复提交 + `backend/tools/` 两把自查脚本）
 > 其他工作树：无
-> 当前唯一目标：P1 已实现并由用户亲手验收；**下一步等用户在 B（自查工具）与 C（P2 前端）之间选**
-> 下一条动作：用户跑 `pytest -q`（预期 `88 passed`）并在 `/docs` 复核"双击第二次得 409"，然后选 B 或 C
+> 当前唯一目标：P1 已实现并由用户亲手验收；**下一步等用户在 C（P2 前端）与"先巩固 P1"之间选**
+> 下一条动作：用户重启 8000 服务后跑 `pytest -q`（预期 `88 passed`）与 `tools/smoke_p1.py`，并在 `/docs` 复核双击第二次得 409
 
 ## 1. 当前状态
 
@@ -38,7 +38,7 @@
 候选队列（不影响当前目标）：
 
 - `POST /api/report` 仍**没有**防重复保护（连点会落两条报告）。正解是 P2 前端提交后禁用按钮，不在后端做启发式判重。
-- 本地库 `data/cadence.db` 有用户手工验收的演示数据（计划 1/2/3、节点 1–6、报告 1–4、1 条 pending 提案）——**不得清库**；曾提议但未获授权的 `backend/tools/show_db.py`、`backend/tools/smoke_p1.py` 仍待用户点头。
+- 本地库 `data/cadence.db` 有用户手工验收的演示数据（计划 1/2/3、节点 1–6、报告 1–4、1 条 pending 提案）——**不得清库**。`backend/tools/` 两把自查脚本已按用户授权建好（`show_db.py`、`smoke_p1.py`），见第 6 节。
 
 - 用户未写完的那条需求（原文写作「2、」后留空），默认不做，等用户补。
 - 到 P4 前需用户提供：邮箱 SMTP 授权码（邮件提醒已定为启用）。
@@ -66,41 +66,21 @@
 | E-05 / 2026-09-15 | **用户亲手**在 `/docs` 操作（真 uvicorn + 自己的 `data/cadence.db`）：建计划→建阶段→建 2 个检查点→3 次报告（含 1 次白点）→`GET /api/plan` | 数据留在用户本地库，可随时复查 | 通过：节点按状态机推进、落后量 5 天→0、阶段收尾产出 1 条 pending `stage_advance` 提案、`GET /api/plan` 七项字段与预测逐项吻合 | 适用于当时的 `7eee000`；`plan.py`、`main.py` 已在 T19 后变更 |
 | E-06 / 2026-09-15 | T19 后重跑 `cd backend; .\.venv\Scripts\python.exe -m pytest -q` | 测试文件在仓库内，命令可复跑 | 通过：88 passed | 适用于 HEAD `2904831`；`backend/` 下代码或测试变更后失效 |
 | E-07 / 2026-09-15 | T19 后临时库起 uvicorn（`127.0.0.1:8099`）+ Invoke-RestMethod：建计划/阶段后对同名检查点连点两次、带空格标题、换标题、已收尾后重建同名、同名阶段 | 临时库已删除；复跑方式：按第 6 节脚本建好计划与阶段后，对同一 `POST /api/plan/nodes` 连发两次 | 通过：第二次 409（带中文原因）；空格标题同样 409；换标题 201；已收尾后重建同名 201；同名阶段 409 | 适用于 HEAD `2904831`；`plan.py`、`main.py` 变更后失效 |
+| E-08 / 2026-09-15 | `python tools/show_db.py`（对用户真实库只读导出）+ 一次只读连接写库试验 | 脚本在仓库内，命令可复跑 | 通过：打印出 3 个计划、plan 3 的阶段树（2/2 收尾）、4 条报告、台账 10–19 条含理由、1 条 pending 提案，与已知事实逐项一致；只读连接写库被 SQLite 拒绝（`attempt to write a readonly database`）；用户库大小与 mtime 未变 | 适用于 `app/plan.py` 未变时；纯只读，可反复跑 |
+| E-09 / 2026-09-15 | `python tools/smoke_p1.py`（自起临时库 + 空闲端口） | 脚本在仓库内，命令可复跑；临时库跑完自动删除 | 通过：9 步全绿——落后量 5→0、阶段收尾产出提案、未收尾同名 409、已收尾同名 201；跑完用户库 mtime 未变、无残留库与残留进程 | 适用于 HEAD `9f95a38`；`plan.py`、`main.py` 或接口契约变更后失效 |
 
 ## 6. 启动、验收与上下文
 
 ```powershell
 cd D:\cadence\backend
-.\.venv\Scripts\python.exe -m app.db init
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+.\.venv\Scripts\python.exe -m app.db init         # 建库（可重复执行）
+.\.venv\Scripts\python.exe -m pytest -q           # 预期 88 passed
+.\.venv\Scripts\python.exe tools\show_db.py       # 只读看库：计划树 / 报告 / 台账 / 提案
+.\.venv\Scripts\python.exe tools\smoke_p1.py      # 闭环冒烟：自起临时库跑 9 步，不动真实数据
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000   # 手动验收用，/docs 可打开
 ```
 
-预期：第一条建库并打印路径；第二条 `78 passed`；第三条监听 8000，`http://127.0.0.1:8000/docs` 可打开。
-
-**验收命令（请用户亲手跑，对应 E-03/E-04）：**
-
-```powershell
-# 1) 单测
-cd D:\cadence\backend
-.\.venv\Scripts\python.exe -m pytest -q
-
-# 2) 起服务（另开一个终端保持运行）
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
-
-# 3) 走一次闭环（第三个终端；中文用 UTF-8 字节，避免编码问题）
-$base = "http://127.0.0.1:8000"
-function Post-Json($url, $payload) {
-    $bytes = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress -Depth 5))
-    Invoke-RestMethod $url -Method Post -ContentType "application/json; charset=utf-8" -Body $bytes
-}
-$plan  = Post-Json "$base/api/plan" @{ goal = "我的第一个计划" }
-$stage = Post-Json "$base/api/plan/nodes" @{ plan_id = $plan.id; level = "stage"; title = "阶段 1"; deliverable = "一个能访问的地址"; sort_order = 10 }
-$cp    = Post-Json "$base/api/plan/nodes" @{ plan_id = $plan.id; parent_id = $stage.id; level = "checkpoint"; title = "检查点 1"; due_date = "2026-09-10" }
-Invoke-RestMethod "$base/api/plan"                       # 看当前阶段与落后量（应为 5 天）
-Post-Json "$base/api/report" @{ node_id = $cp.id; status = "done"; note = "做完了" }
-Invoke-RestMethod "$base/api/plan"                       # 落后量应回到 0，并产出推进提案
-```
+**给用户的验收（项目约定第 9 条：命令由用户亲手跑）**：先重启 8000 服务（旧进程不会自动加载新代码），跑 `pytest -q` 预期 `88 passed`；再到 `/docs` 对 3 号计划的阶段 4 连点两次建同名检查点，第二次应得 `409`。
 
 | 任务类型 | 必读文件 |
 |---|---|

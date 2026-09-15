@@ -175,6 +175,8 @@
 开发        uvicorn app.main:app --reload --port 8000
 接口文档    http://127.0.0.1:8000/docs
 测试        pytest -q
+看库        python tools/show_db.py            （只读打印计划 / 节点 / 报告 / 台账 / 提案）
+闭环冒烟    python tools/smoke_p1.py           （自起临时库跑完闭环，不动真实数据；`--base-url` 可对着已起服务跑）
 周检查点    python -m app.jobs.weekly_checkpoint --dry-run
 ```
 
@@ -203,6 +205,7 @@ backend/
       weekly_checkpoint.py
   sql/schema.sql      建表语句
   tests/              pytest
+  tools/              开发辅助脚本：show_db.py（只读看库）、smoke_p1.py（闭环冒烟）
   requirements.txt
 frontend/
   app/                Next.js App Router 页面
