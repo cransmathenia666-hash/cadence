@@ -377,6 +377,77 @@ export async function getProfile(): Promise<ProfileView> {
   return request<ProfileView>("/api/profile");
 }
 
+// ---------- 档案写入（录入 / 取代 / 作废） ----------
+
+/** 五类档案的约定令牌与中文名。令牌必须用这五个——否则后端的「缺失类别」判断会不准。 */
+export const PROFILE_CATEGORIES = {
+  life_habit: "生活习惯（睡眠/运动/作息）",
+  life_log: "生活记录（日程/课程/近况）",
+  current_state: "当前状态（精力/时间/压力）",
+  short_term_goal: "短期目标 + 当下痛点",
+  long_axis: "长期主线（职业方向）",
+} as const;
+
+export type ProfileCategory = keyof typeof PROFILE_CATEGORIES;
+
+/** 补一条档案的回执。 */
+export type CreatedProfileItem = { id: number; category: ProfileCategory; content: string };
+
+/**
+ * 往档案里补一条。
+ *
+ * 档案**不是键值对**：同一类别允许多条并存（比如两条短期目标），互不挤掉；
+ * 想换掉旧的，用 `updateProfileItem`（取代）或 `voidProfileItem`（作废），别靠重新添加。
+ */
+export async function createProfileItem(input: {
+  category: ProfileCategory;
+  content: string;
+}): Promise<CreatedProfileItem> {
+  return request<CreatedProfileItem>("/api/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ category: input.category, content: input.content }),
+  });
+}
+
+/**
+ * 改一条档案的内容的回执。
+ *
+ * 后端实现是台账「取代」：旧值标记 superseded 留痕，返回的 `id` 是**新条目**的 id
+ * （`superseded` 是被换下的旧 id）——四问答案里引用过的旧 id 从此指向历史，这是有意的。
+ */
+export type UpdatedProfileItem = {
+  id: number;
+  superseded: number;
+  category: string;
+  content: string;
+};
+
+/** 改一条档案的内容。`reason` 必填：台账要能回答「为什么改」。 */
+export async function updateProfileItem(input: {
+  itemId: number;
+  content: string;
+  reason: string;
+}): Promise<UpdatedProfileItem> {
+  return request<UpdatedProfileItem>(`/api/profile/${input.itemId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: input.content, reason: input.reason }),
+  });
+}
+
+/** 作废一条档案（不物理删除，台账留痕）。`reason` 必填。 */
+export async function voidProfileItem(
+  itemId: number,
+  reason: string,
+): Promise<{ id: number; voided: boolean }> {
+  return request<{ id: number; voided: boolean }>(`/api/profile/${itemId}/void`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
 /** 四问中的一问：一句话答案 + 它依据的档案 id。 */
 export type JudgmentAnswer = {
   answer: string;

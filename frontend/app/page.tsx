@@ -37,6 +37,8 @@ export default function Home() {
         {" · "}
         <Link href="/providers">LLM 提供商</Link>
         {" · "}
+        <Link href="/profile">长期档案</Link>
+        {" · "}
         <Link href="/ask">问一句</Link>
       </p>
 
