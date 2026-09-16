@@ -226,11 +226,16 @@ def set_status(
     new_status: str,
     actor: str = "user",
     reason: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> str:
     """通用状态迁移（如计划节点 not_started -> in_progress）。
 
     状态机规则由调用方判断，台账只负责写入与留痕。
     同状态重复设置会被忽略——否则台账很快被噪音淹没。
+
+    `extra` 是与这次迁移同属一回事的附加字段（例如否决候选时的 `reject_reason`）：
+    并进同一条 UPDATE，免得业务表被改两次、也没机会绕过台账。
+    列名与 `fetch_active` 的 filters 同一个信任口径——只来自本仓库内部调用，不接受外部输入。
     """
     spec = _spec(entity_type)
     row = _row(conn, spec, entity_id)
@@ -240,7 +245,13 @@ def set_status(
     if before == new_status:
         return before
 
-    conn.execute(f"UPDATE {spec.table} SET {spec.status_column} = ? WHERE id = ?", (new_status, entity_id))
+    assignments = [f"{spec.status_column} = ?"]
+    params: list[Any] = [new_status]
+    for column, value in (extra or {}).items():
+        assignments.append(f"{column} = ?")
+        params.append(value)
+    params.append(entity_id)
+    conn.execute(f"UPDATE {spec.table} SET {', '.join(assignments)} WHERE id = ?", tuple(params))
     log_event(conn, entity_type, entity_id, "status_change", before, new_status, reason, actor)
     conn.commit()
     return new_status

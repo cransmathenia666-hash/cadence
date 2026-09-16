@@ -108,6 +108,8 @@ _FIELD_LABELS: dict[str, str] = {
     "category": "档案类别",
     "content": "档案内容",
     "reason": "理由",
+    "accept": "是否采纳",
+    "kind": "类型",
 }
 
 # Pydantic 的错误类型 → 中文说明。没登记的类型回退用原始的英文 msg——
@@ -371,14 +373,24 @@ def get_llm_calls(limit: int = 50, conn: sqlite3.Connection = Depends(get_conn))
 # `pending` 提案；档案与计划一个字都不改——改动要等你在 T14 的界面里裁定。
 
 class RequestIn(BaseModel):
-    kind: Literal["evaluate"] = Field(
+    kind: Literal["evaluate", "search"] = Field(
         default="evaluate",
-        description="目前只实现 evaluate（判断某个资料值不值得学）；"
-        "search（「我不知道该学什么」）属 T13，尚未实现",
+        description="evaluate=判断某个资料值不值得学（四问）；search=我不知道该学什么（候选清单）",
     )
     raw_text: str = Field(
-        min_length=1, description="你的原话，例如「我看到一个 Rust 异步编程教程」"
+        min_length=1, description="你的原话，例如「我看到一个 Rust 异步编程教程」或「我不知道该学什么」"
     )
+
+
+class VerdictIn(BaseModel):
+    """对一条候选表态。
+
+    否决必须写理由（业务层判，缺理由回 400）：它会同时进 `reject_reason` 列与台账流水，
+    并成为下一次「找」的禁区——理由写得越具体，禁区越管得住。
+    """
+
+    accept: bool = Field(description="true = 采纳，false = 否决")
+    reason: str | None = Field(default=None, description="否决必填：进台账、并成为下次的禁区")
 
 
 @app.get("/api/profile")
@@ -394,13 +406,31 @@ def get_profile(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
 
 @app.post("/api/requests", status_code=201)
 def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """提交每轮输入，目前只做「判断一个资料值不值得学」。
+    """提交每轮输入。两种形态按 `kind` 分流，都不写档案、不写计划。
 
-    三步：把你的输入记一行 → 跑四问（最多调 2 次模型）→ 落一条 `pending` 提案。
-    提案**等你裁定**，这里不改任何档案。
+    - `evaluate`（B 入口）：记一行输入 → 跑四问（最多调 2 次模型）→ 落一条 `pending` 提案。
+    - `search`（A 入口，T13）：记一行输入 → 生成 3–5 条带排序的候选（最多调 2 次模型）
+      → 落成 `proposed` 候选，等你在界面上采纳 / 否决。
     """
     request_id = advisor.record_request(conn, payload.kind, payload.raw_text)
     try:
+        if payload.kind == "search":
+            found = advisor.find_candidates(conn, payload.raw_text)
+            candidate_ids = advisor.propose_candidates(
+                conn, request_id=request_id, result=found
+            )
+            return {
+                "request_id": request_id,
+                "kind": "search",
+                "candidate_ids": candidate_ids,
+                "candidates": found["candidates"],
+                "recommended_start": found["recommended_start"],
+                "start_reason": found["start_reason"],
+                "source": found["source"],
+                "profile_basis": found["profile_basis"],
+                "banned_titles": found["banned_titles"],
+                "calls": found["calls"],
+            }
         result = advisor.judge(conn, payload.raw_text)
     except advisor.AdvisorError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -418,6 +448,41 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
         "profile_basis": result["profile_basis"],
         "calls": result["calls"],
     }
+
+
+@app.get("/api/candidates")
+def get_candidates(
+    request_id: int | None = None, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """取候选清单。不传 `request_id` 就取最近一轮有候选的那次「找」。
+
+    没有候选时返回 `request_id: null` 与空列表——「还没问过」不是错误，前端不必先探一次。
+    返回里带每条候选的状态：界面要能看出哪些是自己已经否掉过的（去重是「不再推荐」，
+    不是「假装它没发生过」）。
+    """
+    return advisor.list_candidates(conn, request_id)
+
+
+@app.post("/api/candidates/{candidate_id}/verdict",
+          responses={409: {"description": "这条候选已经裁定过了"}})
+def post_candidate_verdict(
+    candidate_id: int, payload: VerdictIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """采纳 / 否决一条候选。
+
+    否决留痕（`reject_reason` + 台账流水），并让它的标题成为下一次「找」的禁区——
+    这是成功标准 2 后半句「已被否决的候选不再出现」的入口。
+    """
+    try:
+        return advisor.decide_candidate(
+            conn, candidate_id, accept=payload.accept, reason=payload.reason
+        )
+    except advisor.CandidateNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except advisor.CandidateConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except advisor.AdvisorError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 # ---------- 长期档案的写入（档案录入） ----------

@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 from . import ledger, llm
 from .db import now_iso
+from .providers import find
+from .providers.find import Brief
 
 
 class AdvisorError(RuntimeError):
@@ -29,6 +31,14 @@ class AdvisorError(RuntimeError):
     一律明确报错而不是"返回一段凑合的建议"——这本产品的价值就在判断质量，
     悄悄给个平庸答案比报错更糟。
     """
+
+
+class CandidateNotFound(AdvisorError):
+    """候选不存在 → 接口层翻成 404。"""
+
+
+class CandidateConflict(AdvisorError):
+    """候选已经裁定过 → 接口层翻成 409（与现状冲突，不是参数写错）。"""
 
 
 # 记在 llm_call.task 里的任务名，和 connectivity_test 之类区分开
@@ -342,3 +352,311 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return data if isinstance(data, dict) else None
+
+
+# ---------- 「找」：候选清单（T13） ----------
+#
+# 与四问共用同一套判据（SPEC 第 4 节：「找」与「判」不做两套逻辑），也共用同一条纪律：
+# LLM 只产出提案式的结果，落库要经用户裁定；输出先过 schema 校验，不合格带原因重试一次，
+# 两次都不合格就如实报错、什么都不落。
+#
+# 与四问不同的只有两点：
+# ① 候选是**一组**而不是一问一答，所以条数（3–5）本身就是校验项；
+# ② 有一份**禁区**：已经否决过的候选一个字都不许再出现——这是成功标准 2 的后半句。
+
+TASK_FIND = "find"
+
+# 深度四档，照抄 SPEC 第 4 节第 ② 问的说法
+DEPTH_TARGETS: tuple[str, ...] = ("浅尝", "够用", "熟练", "精通")
+
+# 候选形态，与 `candidate.kind` 列的注释一致
+CANDIDATE_KINDS: tuple[str, ...] = ("concept", "doc", "project", "course")
+
+# 条数约束（SPEC 第 9 节成功标准 2：3–5 条）
+MIN_CANDIDATES = 3
+MAX_CANDIDATES = 5
+
+
+class Candidate(BaseModel):
+    """一条候选。`why` 与四问的 `answer` 同一条底线：要么指回档案，要么明说依据不足。"""
+
+    title: str = Field(min_length=1)
+    kind: Literal["concept", "doc", "project", "course"]
+    why: str = Field(min_length=1)
+    depth_target: Literal["浅尝", "够用", "熟练", "精通"]
+    profile_item_ids: list[int] = Field(default_factory=list)
+
+
+class FoundList(BaseModel):
+    """一次「找」的输出。条数越界会被 Pydantic 直接拦住（不补齐、不截断）。"""
+
+    candidates: list[Candidate] = Field(
+        min_length=MIN_CANDIDATES, max_length=MAX_CANDIDATES
+    )
+    recommended_start: str = Field(min_length=1)
+    start_reason: str = Field(min_length=1)
+
+
+def _normalize_title(title: str) -> str:
+    """比标题时用的归一化：去首尾空白、去掉中间所有空白、转小写。
+
+    故意不做模糊匹配：判据要能一眼看懂。代价是「学 Python」与「Python 基础」这种
+    换了个说法的同一件事仍可能漏过——这条限制写进了交接文档，不在本轮加复杂度。
+    """
+    return "".join(title.split()).casefold()
+
+
+def _rejected_titles(conn: sqlite3.Connection) -> list[str]:
+    """已经被否决过的候选标题（去重、按 id 序）。
+
+    为什么取 `rejected` 而不是所有历史：候选只有三种终态，`rejected` 才是「你别再推这个」，
+    `accepted` 是「这个我要了」——后者不该进禁区（但也不该反复推，交给 prompt 里的档案去说）。
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT title FROM candidate WHERE status = 'rejected' ORDER BY id"
+    ).fetchall()
+    return [str(row["title"]) for row in rows]
+
+
+def _brief(raw_text: str, profile: dict[str, Any], banned: list[str]) -> Brief:
+    """把档案与判据组装成来源层要的输入（见 `providers/find.Brief`）。
+
+    组装留在 advisor 而不是来源层：档案长什么样、哪些类别空着、每档深度看哪几类，
+    这些都是「判」的知识；来源只管怎么把它讲给模型听。
+    """
+    return Brief(
+        raw_text=raw_text,
+        profile_lines=[
+            f"#{item['id']} [{item['category']}] {item['content']}" for item in profile["items"]
+        ],
+        missing_labels=[PROFILE_CATEGORIES[key] for key in profile["missing_categories"]],
+        depth_guide_lines=[
+            f"{QUESTIONS[key]}：主要看 "
+            + "、".join(PROFILE_CATEGORIES[name] for name in JUDGE_SOURCES[key])
+            for key in ("depth_target", "intensity", "time_budget")
+        ],
+        depth_targets=DEPTH_TARGETS,
+        kinds=CANDIDATE_KINDS,
+        min_candidates=MIN_CANDIDATES,
+        max_candidates=MAX_CANDIDATES,
+        banned_titles=banned,
+    )
+
+
+def find_candidates(
+    conn: sqlite3.Connection,
+    raw_text: str,
+    *,
+    provider_id: int | None = None,
+    model: str | None = None,
+    transport: llm.Transport | None = None,
+    source: find.Source | None = None,
+) -> dict[str, Any]:
+    """跑一次「我不知道该学什么」。**只回结果，不落库**——落库由 `propose_candidates` 负责。
+
+    与 `judge` 同一条纪律：不合格带原因重试一次，第二次仍不合格就抛 `AdvisorError`，
+    绝不把一份凑合的清单一分成三份端上来。
+    """
+    profile = read_profile(conn)
+    if not profile["items"]:
+        raise AdvisorError(
+            "长期档案一条都没有，「找」没有判据可依——先去 /profile 补档案"
+            "（至少「长期主线」与「短期目标」），再来问"
+        )
+
+    chosen_source = source or find.DEFAULT_SOURCE
+    allowed_ids = {item["id"] for item in profile["items"]}
+    banned = _rejected_titles(conn)
+    messages = chosen_source.build_messages(_brief(raw_text, profile, banned))
+
+    operation = llm.Operation(conn, TASK_FIND, transport=transport)
+    text = operation.chat(messages, provider_id=provider_id, model=model)
+    found, problem = _check_find(text, allowed_ids, banned)
+
+    attempts = 1
+    if problem is not None:
+        # 重试一次：把「哪里不合格」原样告诉模型，比让它重新猜有效得多。
+        # 这一下用掉第 2 次调用，仍在 Operation 的 3 次闸以内。
+        attempts = 2
+        messages = [
+            *messages,
+            {"role": "assistant", "content": text},
+            {
+                "role": "user",
+                "content": f"你上面的输出不合格：{problem}。请只输出合格的 JSON 对象，不要任何解释。",
+            },
+        ]
+        text = operation.chat(messages, provider_id=provider_id, model=model)
+        found, problem = _check_find(text, allowed_ids, banned)
+        if problem is not None:
+            raise AdvisorError(
+                f"模型连着 {attempts} 次都没给出合格的候选清单（{problem}）；"
+                "已按上限中止，**没有落任何候选**"
+            )
+
+    if found is None:  # 理论上到不了：上面两条路径都保证 problem 为 None 时它必有值
+        raise AdvisorError("内部状态异常：验收通过却没有解析出候选清单")
+
+    return {
+        "candidates": [item.model_dump() for item in found.candidates],
+        "recommended_start": found.recommended_start,
+        "start_reason": found.start_reason,
+        "source": find.describe(chosen_source),
+        "profile_basis": {
+            "total": len(profile["items"]),
+            "missing_categories": profile["missing_categories"],
+        },
+        "banned_titles": banned,
+        "attempts": attempts,
+        "calls": operation.used,
+    }
+
+
+def _check_find(
+    text: str, allowed_ids: set[int], banned: list[str]
+) -> tuple[FoundList | None, str | None]:
+    """验收模型输出：返回（合格的清单, None）或（None, 不合格的原因）。
+
+    同 `_check`，刻意不抛异常——不合格的原因要能喂回模型重试一次。
+    """
+    data = _extract_json(text)
+    if data is None:
+        return None, "输出不是合法的 JSON 对象"
+
+    try:
+        found = FoundList.model_validate(data)
+    except ValidationError as error:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or '(根)'}: {item['msg']}"
+            for item in error.errors()
+        )
+        return None, f"字段不合格（{details}）"
+
+    cited = {item_id for candidate in found.candidates for item_id in candidate.profile_item_ids}
+    unknown = sorted(cited - allowed_ids)
+    if unknown:
+        return None, f"引用了不存在的档案 id：{unknown}（只能用我列给你的那些 id）"
+
+    # 与四问同一条兜底：没给依据的候选，`why` 里必须明说「依据不足」。
+    for candidate in found.candidates:
+        if not candidate.profile_item_ids and "依据不足" not in candidate.why:
+            return None, (
+                f"候选「{candidate.title}」的 why 既没给 profile_item_ids，也没说「依据不足」——"
+                "没有依据的推荐不许当合格输出"
+            )
+
+    titles = [candidate.title for candidate in found.candidates]
+    if found.recommended_start not in titles:
+        return None, (
+            f"recommended_start「{found.recommended_start}」不是候选之一"
+            f"（要一字不差复制某条的 title，现有：{titles}）"
+        )
+
+    # 去重的硬保证：禁区里的标题一个字都不许再出现。
+    # 为什么是「判不合格重试」而不是「悄悄过滤掉」：过滤会让条数掉到 3 条以下、也不告诉
+    # 模型它又推了禁过的；判不合格会把禁区再讲一遍，第二次还犯就如实报错。
+    banned_set = {_normalize_title(title) for title in banned}
+    repeated = [title for title in titles if _normalize_title(title) in banned_set]
+    if repeated:
+        return None, f"这些是你以前否决过的，不许再出现：{repeated}（换个方向，别再推它们）"
+
+    return found, None
+
+
+def propose_candidates(
+    conn: sqlite3.Connection, *, request_id: int, result: dict[str, Any]
+) -> list[int]:
+    """把候选清单落成 `proposed` 候选行，返回候选 id（按优先级顺序）。
+
+    走 `ledger.create_active`（同 `propose`）：候选也是台账里登记过的东西，
+    将来 `GET /api/candidates` 与裁定动作都靠这套口径找得到它。
+    `rank` 就是列表顺序——顺序即优先级，前端不再自己排。
+    """
+    ids: list[int] = []
+    for rank, candidate in enumerate(result["candidates"], start=1):
+        is_recommended = candidate["title"] == result["recommended_start"]
+        reason = f"「找」的第 {rank} 条候选（{result['source']['name']}）"
+        if is_recommended:
+            reason += f"；建议先从这条开始：{result['start_reason']}"
+        ids.append(
+            ledger.create_active(
+                conn,
+                "candidate",
+                {
+                    "request_id": request_id,
+                    "title": candidate["title"],
+                    "kind": candidate["kind"],
+                    "why": candidate["why"],
+                    "depth_target": candidate["depth_target"],
+                    "rank": rank,
+                    "is_recommended": 1 if is_recommended else 0,
+                },
+                actor="agent",
+                reason=reason,
+            )
+        )
+    return ids
+
+
+def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> dict[str, Any]:
+    """取某轮「找」的候选清单。不传 `request_id` 就取最近一轮有候选的那次请求。
+
+    返回里**带上状态**（`proposed` / `accepted` / `rejected`）：界面要能把「你已经否掉过哪些」
+    也显示出来——去重是「不再推荐」，不是「假装它没发生过」。
+    """
+    if request_id is None:
+        latest = conn.execute("SELECT request_id FROM candidate ORDER BY id DESC LIMIT 1").fetchone()
+        request_id = int(latest["request_id"]) if latest is not None else None
+    if request_id is None:
+        return {"request_id": None, "raw_text": None, "candidates": [], "recommended": None}
+
+    request_row = conn.execute(
+        "SELECT id, kind, raw_text, created_at FROM learning_request WHERE id = ?", (request_id,)
+    ).fetchone()
+    rows = conn.execute(
+        "SELECT id, title, kind, why, depth_target, rank, is_recommended, status, reject_reason"
+        " FROM candidate WHERE request_id = ? ORDER BY rank, id",
+        (request_id,),
+    ).fetchall()
+    candidates = [dict(row) for row in rows]
+    recommended = next((item for item in candidates if item["is_recommended"]), None)
+    return {
+        "request_id": request_id,
+        "raw_text": None if request_row is None else request_row["raw_text"],
+        "created_at": None if request_row is None else request_row["created_at"],
+        "candidates": candidates,
+        "recommended": recommended,
+    }
+
+
+def decide_candidate(
+    conn: sqlite3.Connection, candidate_id: int, *, accept: bool, reason: str | None = None
+) -> dict[str, Any]:
+    """采纳或否决一条候选。
+
+    与提案裁定同一条口径（SPEC 第 18 节第 22 条）：候选的「不再算数」由自己的业务终态
+    表达（`accepted` / `rejected`），不动台账的生命周期列。否决必须写理由——它同时进
+    `reject_reason` 列与台账流水，下次「找」把标题当禁区用。
+    """
+    row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
+    if row is None:
+        raise CandidateNotFound(f"候选 id={candidate_id} 不存在")
+    if row["status"] != "proposed":
+        raise CandidateConflict(
+            f"候选 id={candidate_id} 已经裁定过了（{row['status']}），不能再改"
+        )
+
+    target = "accepted" if accept else "rejected"
+    if not accept and not str(reason or "").strip():
+        raise AdvisorError("否决必须写明理由——它会被当成禁区，下次「找」不再推荐它")
+
+    ledger.set_status(
+        conn,
+        "candidate",
+        candidate_id,
+        target,
+        actor="user",
+        reason=None if reason is None else reason.strip(),
+        extra={"reject_reason": reason.strip()} if not accept else None,
+    )
+    return {"id": candidate_id, "status": target, "reject_reason": None if accept else reason}
