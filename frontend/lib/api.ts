@@ -492,6 +492,100 @@ export async function askMaterial(rawText: string): Promise<AskResult> {
   });
 }
 
+// ---------- 「找」：候选清单（T13） ----------
+
+/** 一条候选：标题 + 为什么对你有用 + 建议深度 + 依据的档案 id。 */
+export type FoundCandidate = {
+  title: string;
+  /** concept / doc / project / course（概念 / 资料 / 项目 / 课程）。 */
+  kind: string;
+  why: string;
+  /** 浅尝 / 够用 / 熟练 / 精通。 */
+  depth_target: string;
+  profile_item_ids: number[];
+};
+
+export type FindResult = {
+  request_id: number;
+  kind: "search";
+  /** 与 `candidates` 一一对应、同顺序：裁决时要用它们。 */
+  candidate_ids: number[];
+  /** 顺序即优先级（后端已按 rank 排好，前端不再自己排）。 */
+  candidates: FoundCandidate[];
+  /** 「建议先从哪条开始」的那条标题（一字不差复制自 candidates）。 */
+  recommended_start: string;
+  start_reason: string;
+  /** 候选来源自述。`networked: false` = 甲档（不联网，只给路线建议）。 */
+  source: { name: string; networked: boolean };
+  profile_basis: ProfileBasis;
+  /** 这次被当成禁区的标题（你以前否决过的）。 */
+  banned_titles: string[];
+  calls: number;
+};
+
+/**
+ * 提交「我不知道该学什么」，拿回 3–5 条带排序的候选。
+ *
+ * 走的是同一个 `POST /api/requests`，只是 `kind` 不同。落成的是 `proposed` 候选，
+ * 等你在界面上采纳 / 否决——**否决过的标题会成为下次的禁区**。
+ */
+export async function findCandidates(rawText: string): Promise<FindResult> {
+  return request<FindResult>("/api/requests", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "search", raw_text: rawText }),
+  });
+}
+
+/** 已落库的一条候选。`status` 是 proposed / accepted / rejected。 */
+export type CandidateRow = {
+  id: number;
+  title: string;
+  kind: string;
+  why: string;
+  depth_target: string;
+  rank: number;
+  is_recommended: number;
+  status: string;
+  reject_reason: string | null;
+};
+
+export type CandidateList = {
+  /** 还没问过时是 null（不是错误）。 */
+  request_id: number | null;
+  raw_text: string | null;
+  created_at?: string | null;
+  candidates: CandidateRow[];
+  recommended: CandidateRow | null;
+};
+
+/** 取候选清单。不传 `requestId` 就取最近一轮有候选的那次「找」。 */
+export async function listCandidates(requestId?: number): Promise<CandidateList> {
+  const query = requestId === undefined ? "" : `?request_id=${requestId}`;
+  return request<CandidateList>(`/api/candidates${query}`);
+}
+
+/** 采纳或否决的回执。 */
+export type VerdictResult = { id: number; status: string; reject_reason: string | null };
+
+/**
+ * 采纳 / 否决一条候选。
+ *
+ * 否决**必须写理由**（缺理由后端回 400）：理由进台账，并成为下次「找」的禁区——
+ * 这是「你否决过的候选不再出现」的入口。
+ */
+export async function verdictCandidate(
+  candidateId: number,
+  accept: boolean,
+  reason?: string,
+): Promise<VerdictResult> {
+  return request<VerdictResult>(`/api/candidates/${candidateId}/verdict`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accept, reason: reason ?? null }),
+  });
+}
+
 // ---------- 调用记账（T10 的接口，之前只能在 /docs 里看） ----------
 
 /** 一次模型调用的流水。失败时上游常常不给用量，所以 tokens 允许为 null。 */
