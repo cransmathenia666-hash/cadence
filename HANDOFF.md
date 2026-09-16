@@ -1,11 +1,11 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-16（档案补入防一字不差重复 `af759fa`——用户走查发现的缺口；另把 Open Question 第 3 条「agent 提炼档案路线」的记录并入版本库）
+> 最近更新：2026-09-16（T13 候选清单与去重完成：后端 `ad1bf18`、前端 `/ask` 两种形态 `585166f`）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`、T12 `f08f75b`、T11+`/ask` `882cf69`、交接 E-28 `7dec7aa`、档案录入 `163f24e`/`b09bc34`、防重复 `af759fa`｜无远端｜未提交改动只剩用户三件（见第 3 节）与 `.dsh-vision-toolkit/`（非本项目产物，未动）
+> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`、T12 `f08f75b`、T11+`/ask` `882cf69`、交接 E-28 `7dec7aa`、档案录入 `163f24e`/`b09bc34`、防重复 `af759fa`、T13 `ad1bf18`/`585166f`｜无远端｜未提交改动只剩用户三件（见第 3 节）与 `.dsh-vision-toolkit/`（非本项目产物，未动）
 > 其他工作树：无
-> 当前唯一目标：**P3（决策入口）进行中**——T10（provider 管理 + 调用记账）、T11（provider 管理页面）、T12（四问判断链路）、T22（档案录入，2026-09-16 补的清单缺口）已完成，剩下 T13–T14。P1、P2 已完成（走查已过）
-> 下一条动作：做 T13（候选清单生成与去重）
+> 当前唯一目标：**P3（决策入口）收尾**——T10、T11、T12、T13（候选清单）、T22（档案录入）已完成，**只剩 T14**（候选与提案的正式前端：`/candidates` 与 `/proposals` 两个页面）。P1、P2 已完成（走查已过）
+> 下一条动作：做 T14（候选与提案的前端交互）——注意 T13 已在 `/ask` 页做了候选的临时展示与就地采纳/否决，T14 要做的是**正式页面 + 提案裁定**（`proposal.kind` 有 `material_judgment` / `stage_advance` / `profile_change` / `plan_replan`，裁定界面按 kind 分流）
 
 ## 1. 当前状态
 
@@ -24,25 +24,32 @@
 | provider 管理页面（T11） | 通过 | 本轮 E-24（前端只验 lint 与 tsc）＋**用户手工走查** | `frontend/app/providers/page.tsx` 的行为、或 `lib/api.ts` 里那 5 个 provider 函数与 `Provider*` 类型改动后失效；**样式未做**；用户 2026-09-15 口头回报走查成功 |
 | 四问判断链路（T12） | 通过 | 本轮 E-25、E-26 + **E-27（真实模型跑通）** | `advisor.py`、或 `main.py` 里 `/api/requests`、`/api/profile` 两条路由与 `RequestIn` 变更后失效；单测只打假上游，真实输出质量由 E-27 覆盖一次 |
 | `/ask` 四问临时入口页（T14 提前做的一小块） | 通过（仅 lint/tsc） | 本轮追加的 `npm run lint` + `npx tsc --noEmit` 均 exit=0（**这两条是全项目跑的，`/ask` 就此补上**，见 E-28） | `frontend/app/ask/page.tsx`：浏览器走查未单独做，但用户经它真实跑通过一次四问（E-27）且 2026-09-16 回报前端体验没有问题；行为或 `lib/api.ts` 的 `askMaterial`/`getProfile` 改动后失效 |
+| 「找」候选清单与去重（T13） | 通过 | 本轮 E-31 | `advisor.find_candidates`/`_check_find`/`decide_candidate`、`providers/find.py` 的 prompt、那三条路由（`/api/requests` 的 search 分支、`/api/candidates`、`/api/candidates/{id}/verdict`）或 `ledger.set_status` 的 `extra` 参数变更后失效；**只验了假上游**，真实模型的清单质量与去重效果由用户手工走查覆盖 |
+| `/ask` 页的「找」形态（候选展示 + 就地采纳/否决） | 通过（仅 lint/tsc） | 本轮 E-31 | `frontend/app/ask/page.tsx` 的 search 分支行为、或 `lib/api.ts` 的 `findCandidates`/`verdictCandidate`/`CandidateRow` 改动后失效；**浏览器走查归用户**（与 T14 的正式页面走查一并做） |
 | 档案录入（T22，2026-09-16 补的清单缺口） | 通过 | 本轮 E-29、E-30 | `main.py` 里那三条 profile 写路由与请求模型、或 `advisor.PROFILE_CATEGORIES` 词表变更后失效；`/profile` 页用户 2026-09-16 已实际补档并跑通一次四问（回报「验证通过」），借此发现的「一字不差可重复补入」缺口由 `af759fa` 结清（E-30） |
 | SPEC 第 9 节真实使用验收 | 未验证 | 成功标准 1、5 的后端部分已由 E-05、E-19 覆盖；2、3、4 与前端部分未做 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
 
-**目标：P3（决策入口）进行中——T10、T11、T12 已完成，剩下 T13–T14。** 完成定义对应 SPEC 第 9 节成功标准 2 与 3：输入「我不知道该学什么」得到 3–5 条带排序的候选；输入「我发现了某个资料」得到能指回长期档案字段的四问判断。两者都由 LLM 产出**提案**，经用户裁定后才落库。
+**目标：P3（决策入口）收尾——T10、T11、T12、T13、T22 已完成，只剩 T14。** 完成定义对应 SPEC 第 9 节成功标准 2 与 3：输入「我不知道该学什么」得到 3–5 条带排序的候选（**后端与临时入口已实现**，真实模型走查待用户）；输入「我发现了某个资料」得到能指回长期档案字段的四问判断（E-27 已跑通）。两者都由 LLM 产出**待裁定的结果**，经用户裁定后才落库。
 
-**P3 进度：** T10 已完成——`llm.py` + 6 条接口（providers 增删改查、连通性体检、`llm-calls` 记账）；密钥**只写不读**、每次调用落一行账、**同一操作最多 3 次调用**。T11 已完成——`frontend/app/providers/page.tsx` 一页装下列表（掩码）、增、改、删、测连通性、设为默认。T12 已完成——`backend/app/advisor.py`（四问判断：读档案 → 组 prompt → 调模型 → Pydantic 校验 → 不合格就带着原因重试一次 → 合格经台账落 `pending` 提案；**没给 profile_item id 又不说「依据不足」的一律判不合格**）+ `POST /api/requests` + `GET /api/profile`。T22（档案录入）已完成——`POST /api/profile` / `PUT /api/profile/{id}` / `POST /api/profile/{id}/void` 三条写入口（全走台账）+ `/profile` 档案页。**T13 候选清单、T14 候选与提案的前端** 还没做。
+**P3 进度：** T10 已完成——`llm.py` + 6 条接口（providers 增删改查、连通性体检、`llm-calls` 记账）；密钥**只写不读**、每次调用落一行账、**同一操作最多 3 次调用**。T11 已完成——`frontend/app/providers/page.tsx` 一页装下列表（掩码）、增、改、删、测连通性、设为默认，并附「查看调用记账」面板。T12 已完成——`backend/app/advisor.py` 的四问判断 + `POST /api/requests`(evaluate) + `GET /api/profile`。T22 已完成——档案三条写入口（全走台账）+ `/profile` 页。T13 已完成——`providers/find.py`（甲档 `route_only`，不联网）+ `advisor.find_candidates`/`propose_candidates`/`decide_candidate` + `POST /api/requests`(search) + `GET /api/candidates` + `POST /api/candidates/{id}/verdict`；候选与四问共用可回溯底线，去重是硬保证（禁区命中判不合格重试，两次仍命中则不落一条）。`/ask` 页已能切换两种形态并就地采纳/否决。**只剩 T14**：`/candidates` 与 `/proposals` 两个正式页面（提案裁定按 `kind` 分流）。
 
-**本轮不做 / 下一步：** 触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）不在本轮。接着做 **T13（候选清单生成与去重）**——「找」与「判」共用 SPEC 第 4 节那一套判据，`advisor.py` 的四问骨架（Operation 调用、Pydantic 校验、重试一次）可以接着用。**T13 的端到端需要真实密钥**（决策 19：用户的 commandcode 已在其库里配成默认），单测一律假 provider 打桩、不花钱。样式方案仍待用户（走查已过）。
+**本轮不做 / 下一步：** 触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）不在本轮。接着做 **T14（候选与提案的前端交互）**——T13 已在 `/ask` 页做了候选的临时展示与就地裁决，T14 要做正式页面，并补上**提案裁定**（`GET /api/proposals` 与 `POST /api/proposals/{id}/decide` 这两条路由**后端还没有**，属 T14 的后端部分）。样式方案仍待用户（走查已过）。
 
 ## 3. 当前开放问题
 
-无阻塞。**待用户亲手做的只剩一件事**：② 有空时独立复核一次 `pytest -q`（预期 `160 passed`）与 `tools\smoke_p1.py`（预期 9 步全绿）。**已完成**：① P2 四页浏览器走查——用户 2026-09-16 回报「前端体验没有问题」；T11 的 `/providers` 用户 2026-09-15 回报走查成功；**真实 provider 与真实模型**用户 2026-09-16 已跑通（见 E-27）——E-25 的「真密钥待回报」那条已经不欠了。
+无阻塞。**待用户亲手做的只剩一件事**：② 有空时独立复核一次 `pytest -q`（预期 `199 passed`）与 `tools\smoke_p1.py`（预期 9 步全绿）。**已完成**：① P2 四页浏览器走查——用户 2026-09-16 回报「前端体验没有问题」；T11 的 `/providers` 用户 2026-09-15 回报走查成功；**真实 provider 与真实模型**用户 2026-09-16 已跑通（见 E-27）——E-25 的「真密钥待回报」那条已经不欠了。
+
+**待用户走查（T13，新）**：在 `/ask` 页切到「我不知道该学什么」，看候选是否说得对着档案、起点建议是否合理，并试一次**否决后重问**（那条不该再出现）。这是成功标准 2 的人工走查；真实模型的清单质量到目前**只验过假上游**（E-31），第一次真跑会出现什么（比如模型坚持推禁过的、或给出 6 条）谁也说不准——真出问题按 E-31 的失效条件回报即可。
 
 候选队列（不影响当前目标）：
 
 - **P2 代码已完成、走查已过（用户 2026-09-16 回报「前端体验没有问题」）**：`frontend/app/` 下四个页面——`/` 计划表（T8）、`/new` 建计划与建节点、`/report` 提交报告。**样式完全没做**（无 CSS、无组件库，样式方案仍未决）；`sort_order` 前端固定送 0，所以新建节点的顺序按 id 排。
 - **调用记账前端已接上（2026-09-16 补做）**：`GET /api/llm-calls` 不再是"只能在 `/docs` 看"——`/providers` 页底部加了一个「查看调用记账」按钮（**点才拉，不自动请求**），展示按周汇总 + 最近流水（provider_id 会对着本页已加载的列表换成名字，删掉的 provider 回退成 `#id`，因为账是故意留着的）。前端因此**不再有缺口**：13 条接口里只剩 `GET /api/health` 没接。
+- **去重的边界（T13，别当成漏网）**：禁区比对只做「去空白 + 转小写」的归一化（`advisor._normalize_title`），**不做模糊匹配**——「学 Python」与「Python 基础」这种换个说法的同一件事仍可能被当成新候选。这是刻意留的简单口径（判据要一眼看懂）；真被绕烦了再加，届时属于改业务规则。
+- **候选没有提案**：T13 落的是 `candidate` 行（`status='proposed'`），不是 `proposal`。四问（T12）落的是 `proposal(kind=material_judgment)`——两者不要混：候选等你在 `/ask` 页或 T14 页面上采纳/否决，提案等裁定界面按 `kind` 分流。
+- **`/ask` 页现在承担两种形态**（判断资料 + 找方向），它是 T14 之前的临时入口；T14 做正式页面时这一页是留是删没有定，删之前先确认正式页面能覆盖这两种入口。
 - **provider 的「地址 / 模型」在界面上清不成空**：后端把"没传该字段"当成"别动它"，空串又会被前端挡掉（不送进请求体），所以留空 = 不改。要清空只能直接改库。T11 面板的小字里已写明。
 - **T12 定下的三条新约定**（都只影响 P3 后续，别在 T13/T14 里放松）：① `proposal.kind` 新增取值 `material_judgment`（不加列、不用迁移），T14 的裁定界面按 kind 分流；② `profile_item.category` 的**约定词表**是 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis`（库里是自由文本、无约束，目前只有 `long_axis` 真实用过；表外的类别不会丢，只是不算"缺失类别"）；③ 四问里**没给 profile_item id 又不说「依据不足」的输出一律判不合格**——这是"答案能指回具体字段"那条验收的兜底。
 - **用户长期档案目前只有「长期主线」2 条**（id=1 已 superseded「旧主线：先把 Python 学完」，id=2 active「新主线：通用工程基础 + 能上线的项目」），另外四类全空（`GET /api/profile` 的 `missing_categories` 会照实报）。所以真实跑四问时 ②③④ 会得到「依据不足」——那是**正常现象、不是 bug**；要让四问答得实，得先补档案。
@@ -93,6 +100,7 @@
 | E-28 / 2026-09-16 | 落盘提交：T12 后端 `f08f75b`（`advisor.py` / `test_advisor.py` / `main.py` / `llm.py`）与 T11+`/ask` 前端 `882cf69`（`providers/`、`ask/`、`api.ts`、`page.tsx`）；提交前复跑 `npm run lint` 与 `npx tsc --noEmit`（均 exit=0）、`pytest -q`（**160 passed**）；同轮用户回报「前端体验没有问题」（P2 页面浏览器走查） | 两笔提交在仓库内可查；lint / tsc / pytest 均可复跑 | 通过：提交时点前后端全绿；P2 走查通过 | lint/tsc 按行为写：页面行为或 lint/tsc 配置变更后失效；pytest 沿用 E-26 的失效条件（`advisor.py`、那两条路由、`RequestIn`、`llm.py` 变更后失效） |
 | E-29 / 2026-09-16 | T22 档案录入：`pytest -q`（**177 passed**：原 160 + 17 条新单测）与 `tools\smoke_p1.py`（9 步全绿——本轮动了契约，按纪律加跑）；前端 `npm run lint` 与 `npx tsc --noEmit`（均 exit=0）。提交 `163f24e`（后端）与 `b09bc34`（前端） | `backend/tests/test_profile_write.py` 可复跑 | 通过：五令牌外的类别 422 拒收；同类别可多条并存；取代后旧值从 `GET /api/profile` 消失但台账留 before/after/理由；作废同理；历史行再动回 409；不存在回 404；纯空白 content/reason 回 400 | 那三条写路由与请求模型、或 `advisor.PROFILE_CATEGORIES` 变更后失效；`/profile` 页按行为写，浏览器走查归用户 |
 | E-30 / 2026-09-16 | 档案补入防重复（用户走查发现：一字不差可反复补入）：`pytest -q`（**181 passed**：原 177 + 4 条防重复单测）与 `tools\smoke_p1.py`（9 步全绿——动了契约语义，按纪律加跑）。提交 `af759fa`；同轮用户回报 `/profile` 补档 + `/ask` 四问「验证通过」 | `backend/tests/test_profile_write.py` 可复跑 | 通过：同类别同文本（含首尾空白差异）回 409 并指明已有条目 id；不同类别同文本不挡；作废后重填同文本不挡（判重只看 active 条目） | `post_profile_item` 的判重逻辑变更后失效；其余同 E-29 的条件 |
+| E-31 / 2026-09-16 | T13：`pytest -q`（**199 passed**：原 181 + 18 条候选单测）与 `tools\smoke_p1.py`（9 步全绿——本轮动了契约，按纪律加跑）；前端 `npm run lint` 与 `npx tsc --noEmit`（均 exit=0）。提交 `ad1bf18`（后端）、`585166f`（前端 `/ask` 两种形态） | `backend/tests/test_candidates.py` 可复跑 | 通过：3–5 条越界判不合格并带原因重试一次、两次不合格抛 `AdvisorError` 且**一条候选都不落**；`rank` 即列表顺序、`is_recommended` 落在 `recommended_start` 那条；`recommended_start` 对不上任何 title 判不合格；`why` 没依据又不说「依据不足」判不合格；引用不存在的档案 id 判不合格；**禁区命中即判不合格**（含「学Rust」「学 rust」「 学 Rust 」这类空白/大小写变体），两次仍命中则不落一条；无档案时一次模型都不调；否决缺理由报错、理由进 `reject_reason` 与台账流水；已裁定再改抛 `CandidateConflict`（409）、不存在抛 `CandidateNotFound`（404）；`GET /api/candidates` 默认取最近一轮、无候选时返回空而不报错 | `advisor` 的候选链路、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效。**只验了假上游**：真实模型的清单质量与去重效果不在本证据范围 |
 
 ## 6. 启动、验收与上下文
 

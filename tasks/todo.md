@@ -93,10 +93,11 @@
   - Verify：用假 LLM provider 跑单测，验证「合法输出→落提案」「非法输出→重试一次后如实报错」两条路径
   - Files：`backend/app/advisor.py`、`backend/app/llm.py`、`backend/tests/test_advisor.py`
 
-- [ ] **T13 候选清单生成与去重**
+- [x] **T13 候选清单生成与去重**
   - Acceptance：输入「我不知道该学什么」，产出 3–5 条候选，每条带「为什么对你有用」与建议深度，带排序和一句「建议先从哪条开始」；已被否决的候选不再出现；「找」走 provider 接口，当前为不联网实现
   - Verify：单测覆盖候选数量约束、排序、去重（否决过的候选被过滤）；成功标准 2 的人工走查
   - Files：`backend/app/advisor.py`、`backend/app/providers/find.py`、`backend/tests/test_candidates.py`
+  - 实施记录（2026-09-16）：入口复用 `POST /api/requests`（`kind=search`）；来源抽成 `providers/find.py` 的 `Brief` + `Source`（甲档 `route_only`，返回 `source.networked=false` 自证不联网）；候选与四问共用可回溯底线（`why` 要么给 id、要么说「依据不足」）；`recommended_start` 必须一字不差复制某条 title；去重是硬保证——禁区内标题命中即判不合格重试，两次仍命中就报错且不落一条；裁定走 `accepted`/`rejected` 终态，否决理由进 `reject_reason` 与台账并成为下次禁区。`pytest -q` 199 passed + 冒烟 9 步全绿。**归一化只做去空白与大小写**：换个说法的同一件事仍可能漏过，未做模糊匹配。
 
 - [ ] **T14 候选与提案的前端交互**
   - Acceptance：页面上能看候选、采纳或否决；能看待裁定提案并裁定（档案变更 / 计划重排）；否决结果落台账
