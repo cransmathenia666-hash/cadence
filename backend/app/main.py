@@ -105,6 +105,9 @@ _FIELD_LABELS: dict[str, str] = {
     "note": "一句话说明",
     "artifact_url": "产物链接",
     "material_feedback": "资料评价",
+    "category": "档案类别",
+    "content": "档案内容",
+    "reason": "理由",
 }
 
 # Pydantic 的错误类型 → 中文说明。没登记的类型回退用原始的英文 msg——
@@ -415,3 +418,103 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
         "profile_basis": result["profile_basis"],
         "calls": result["calls"],
     }
+
+
+# ---------- 长期档案的写入（档案录入） ----------
+#
+# 档案此前只有读（GET /api/profile）：这三条写入口补上「档案只有读、没有写」的缺口。
+# 三条全走台账（SPEC 第 8 节铁律）：新增落 active、修改是「取代」（旧值留痕、可查为什么改）、
+# 删除是「作废」（void，必须写理由）——不存在物理删除，历史永远能回答「当时为什么这么写」。
+# category 只收 advisor.PROFILE_CATEGORIES 那五个令牌：库里没有约束，这层边界是
+# 「缺失类别」判断还准不准的最后一道闸。
+#
+# 状态码口径（同 SPEC 第 11 节）：入参不合法 422（Pydantic 拦）、对象不存在 404、
+# 与现状冲突（条目已被取代/作废）409、业务规则拒绝 400。
+
+
+class ProfileItemIn(BaseModel):
+    # Literal 写死这五个令牌、不引用 advisor.PROFILE_CATEGORIES 动态生成：
+    # 校验错误要能在 OpenAPI 契约里枚举出来，前端与 /docs 才看得见合法取值。
+    category: Literal["life_habit", "life_log", "current_state", "short_term_goal", "long_axis"] = Field(
+        description="档案类别，五个约定令牌之一（与 advisor.PROFILE_CATEGORIES 一致）"
+    )
+    content: str = Field(min_length=1, description="一两句话的提炼结论，不是原始资料")
+
+
+class ProfileItemUpdate(BaseModel):
+    """取代一条档案：旧值标记 superseded、新值成为当前有效值。
+
+    只许改 content；想换类别就作废旧条目、另立新条目——类别是档案的坐标，
+    「原地换坐标」会让历史流水对不上号。
+    """
+
+    content: str = Field(min_length=1, description="新的内容")
+    reason: str = Field(min_length=1, description="为什么改——写进台账，回答「为什么改」")
+
+
+class ProfileItemVoidIn(BaseModel):
+    reason: str = Field(min_length=1, description="为什么作废——写进台账")
+
+
+def _require_active_profile_item(conn: sqlite3.Connection, item_id: int) -> sqlite3.Row:
+    """404 与 409 的分流在这里做：不存在是 404，存在但已不是当前有效值是 409。"""
+    row = conn.execute("SELECT * FROM profile_item WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"档案条目 id={item_id} 不存在")
+    if row["status"] != "active":
+        raise HTTPException(
+            status_code=409,
+            detail=f"档案条目 id={item_id} 已不是当前有效值（{row['status']}），只能改动当前有效的条目",
+        )
+    return row
+
+
+@app.post("/api/profile", status_code=201)
+def post_profile_item(payload: ProfileItemIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """往档案里补一条。同一类别允许多条并存（比如两条短期目标），互相不挤掉。"""
+    content = payload.content.strip()
+    try:
+        item_id = ledger.create_active(
+            conn, "profile_item", {"category": payload.category, "content": content}, actor="user"
+        )
+    except ledger.LedgerError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"id": item_id, "category": payload.category, "content": content}
+
+
+@app.put("/api/profile/{item_id}")
+def put_profile_item(
+    item_id: int, payload: ProfileItemUpdate, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """改一条档案的内容：实为台账「取代」——旧值不删，before/after 与理由都留在流水里。"""
+    row = _require_active_profile_item(conn, item_id)
+    try:
+        new_id = ledger.supersede(
+            conn,
+            "profile_item",
+            item_id,
+            {"content": payload.content.strip()},
+            reason=payload.reason.strip(),
+            actor="user",
+        )
+    except ledger.LedgerError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "id": new_id,
+        "superseded": item_id,
+        "category": row["category"],
+        "content": payload.content.strip(),
+    }
+
+
+@app.post("/api/profile/{item_id}/void")
+def void_profile_item(
+    item_id: int, payload: ProfileItemVoidIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """作废一条档案（不物理删除）：条目从此不在 GET /api/profile 里出现，台账留痕。"""
+    _require_active_profile_item(conn, item_id)
+    try:
+        ledger.void(conn, "profile_item", item_id, reason=payload.reason.strip(), actor="user")
+    except ledger.LedgerError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"id": item_id, "voided": True}
