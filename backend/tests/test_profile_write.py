@@ -88,6 +88,41 @@ def test_whitespace_only_content_is_rejected_as_400(conn):
     assert caught.value.status_code == 400
 
 
+# ---------- 防一字不差的重复（同 T19 的思路，但只挡当前有效条目） ----------
+
+
+def test_exact_duplicate_is_409_and_names_the_existing_id(conn):
+    first = create(conn, category="short_term_goal", content="三周内上线第一个项目")
+
+    with pytest.raises(HTTPException) as caught:
+        create(conn, category="short_term_goal", content="三周内上线第一个项目")
+    assert caught.value.status_code == 409
+    assert str(first["id"]) in caught.value.detail
+
+
+def test_duplicate_check_ignores_leading_and_trailing_whitespace(conn):
+    create(conn, content="每天投入 2 小时")
+
+    with pytest.raises(HTTPException) as caught:
+        create(conn, content="  每天投入 2 小时  ")
+    assert caught.value.status_code == 409
+
+
+def test_same_content_in_different_category_is_allowed(conn):
+    """格位不同不算重复：同样的字放在「短期目标」和「生活记录」是两条不同的判据。"""
+    create(conn, category="short_term_goal", content="每周跑步三次")
+    create(conn, category="life_log", content="每周跑步三次")  # 不抛即通过
+
+
+def test_refill_after_void_is_allowed(conn):
+    """作废后重新补一样的文字是正当需求——判重只看当前有效的条目。"""
+    item_id = create(conn, content="旧目标，先作废")["id"]
+    main.void_profile_item(item_id, ProfileItemVoidIn(reason="过期了"), conn)
+
+    recreated = create(conn, content="旧目标，先作废")
+    assert recreated["id"] != item_id
+
+
 # ---------- 取代 ----------
 
 

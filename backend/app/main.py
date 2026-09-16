@@ -469,10 +469,26 @@ def _require_active_profile_item(conn: sqlite3.Connection, item_id: int) -> sqli
     return row
 
 
-@app.post("/api/profile", status_code=201)
+@app.post("/api/profile", status_code=201,
+          responses={409: {"description": "同类别下已有一条一字不差的当前有效条目（多半是重复提交）"}})
 def post_profile_item(payload: ProfileItemIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """往档案里补一条。同一类别允许多条并存（比如两条短期目标），互相不挤掉。"""
+    """往档案里补一条。同一类别允许多条并存（比如两条短期目标），互相不挤掉。
+
+    但**一字不差的重复**要挡（同 T19 防重复提交的思路）：档案是给 AI 引用的判据，
+    重复条目会让它被反复引用、还会在页面上越积越多。判重只看当前有效的条目——
+    作废后重新填一样的文字是正当需求（同「已完成节点不挡同名重建」）。
+    """
     content = payload.content.strip()
+    duplicate = conn.execute(
+        "SELECT id FROM profile_item WHERE status = 'active' AND category = ? AND content = ?",
+        (payload.category, content),
+    ).fetchone()
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"档案里已有这条：#{duplicate['id']}（{payload.category}，一字不差）。"
+            "不用再补；想改它就用「改」，不想让它算数就「作废」",
+        )
     try:
         item_id = ledger.create_active(
             conn, "profile_item", {"category": payload.category, "content": content}, actor="user"
