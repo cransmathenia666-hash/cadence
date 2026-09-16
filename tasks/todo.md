@@ -1,8 +1,10 @@
-# 任务清单 v0.5
+# 任务清单 v0.6
 
 配套：`docs/SPEC.md` · `tasks/plan.md`
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
+
+**v0.6 变更**：P3 补 T22（档案录入）——档案此前只有读、没有写入口，四问缺判据；用户 2026-09-16 点名要做，任务补记进清单。
 
 **v0.5 变更**：P1 补充 T20（台账语义归属，方案 B）与 T21（建节点入参校验），均为已完成的后端修补。
 **v0.4 变更**：P4 新增 T17 Markdown 导出；验收任务顺延为 T18。
@@ -100,6 +102,11 @@
   - Acceptance：页面上能看候选、采纳或否决；能看待裁定提案并裁定（档案变更 / 计划重排）；否决结果落台账
   - Verify：否决一条候选后重新请求同类输入，该候选不再出现；裁定提案后档案与计划表按预期变化
   - Files：`frontend/app/candidates/page.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`
+
+- [x] **T22 档案录入（P3 补充）**
+  - Acceptance：`POST /api/profile`（新增）、`PUT /api/profile/{id}`（取代，旧值留痕）、`POST /api/profile/{id}/void`（作废）三条写入口**全走台账**；`category` 只收 `advisor.PROFILE_CATEGORIES` 五个约定令牌；取代与作废必填理由；同类别允许多条并存；前端 `/profile` 页能看五类缺口、补、改、作废
+  - Verify：`pytest -q` 177 passed（含 17 条新单测）+ `tools\smoke_p1.py` 9 步全绿；前端 lint 与 tsc exit=0（浏览器走查归用户）
+  - Files：`backend/app/main.py`、`backend/tests/test_profile_write.py`、`frontend/app/profile/page.tsx`、`frontend/lib/api.ts`
 
 ## P4 触达兜底
 

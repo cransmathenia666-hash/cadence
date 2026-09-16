@@ -1,10 +1,10 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-16（T11/T12 落盘提交；用户回报前端走查通过）
+> 最近更新：2026-09-16（档案录入 T22 完成：后端 `163f24e`、前端 `b09bc34`）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜`master`｜后端代码基线 `fe4a5b8`、前端脚手架 `d8f9e3c`、T12 后端 `f08f75b`、T11 与 `/ask` 前端 `882cf69`｜无远端｜未提交改动只剩用户三件（见第 3 节）与 `.dsh-vision-toolkit/`（非本项目产物，未动）
+> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`、T12 `f08f75b`、T11+`/ask` `882cf69`、交接 E-28 `7dec7aa`、档案录入 `163f24e`/`b09bc34`｜无远端｜未提交改动只剩用户三件（见第 3 节）与 `.dsh-vision-toolkit/`（非本项目产物，未动）
 > 其他工作树：无
-> 当前唯一目标：**P3（决策入口）进行中**——T10（provider 管理 + 调用记账）、T11（provider 管理页面）、T12（四问判断链路）已完成，剩下 T13–T14。P1、P2 已完成（P2 浏览器手工走查用户 2026-09-16 回报通过）
+> 当前唯一目标：**P3（决策入口）进行中**——T10（provider 管理 + 调用记账）、T11（provider 管理页面）、T12（四问判断链路）、T22（档案录入，2026-09-16 补的清单缺口）已完成，剩下 T13–T14。P1、P2 已完成（走查已过）
 > 下一条动作：做 T13（候选清单生成与去重）
 
 ## 1. 当前状态
@@ -24,13 +24,14 @@
 | provider 管理页面（T11） | 通过 | 本轮 E-24（前端只验 lint 与 tsc）＋**用户手工走查** | `frontend/app/providers/page.tsx` 的行为、或 `lib/api.ts` 里那 5 个 provider 函数与 `Provider*` 类型改动后失效；**样式未做**；用户 2026-09-15 口头回报走查成功 |
 | 四问判断链路（T12） | 通过 | 本轮 E-25、E-26 + **E-27（真实模型跑通）** | `advisor.py`、或 `main.py` 里 `/api/requests`、`/api/profile` 两条路由与 `RequestIn` 变更后失效；单测只打假上游，真实输出质量由 E-27 覆盖一次 |
 | `/ask` 四问临时入口页（T14 提前做的一小块） | 通过（仅 lint/tsc） | 本轮追加的 `npm run lint` + `npx tsc --noEmit` 均 exit=0（**这两条是全项目跑的，`/ask` 就此补上**，见 E-28） | `frontend/app/ask/page.tsx`：浏览器走查未单独做，但用户经它真实跑通过一次四问（E-27）且 2026-09-16 回报前端体验没有问题；行为或 `lib/api.ts` 的 `askMaterial`/`getProfile` 改动后失效 |
+| 档案录入（T22，2026-09-16 补的清单缺口） | 通过 | 本轮 E-29 | `main.py` 里那三条 profile 写路由与请求模型、或 `advisor.PROFILE_CATEGORIES` 词表变更后失效；`/profile` 页只验了 lint/tsc，浏览器走查归用户 |
 | SPEC 第 9 节真实使用验收 | 未验证 | 成功标准 1、5 的后端部分已由 E-05、E-19 覆盖；2、3、4 与前端部分未做 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
 
 **目标：P3（决策入口）进行中——T10、T11、T12 已完成，剩下 T13–T14。** 完成定义对应 SPEC 第 9 节成功标准 2 与 3：输入「我不知道该学什么」得到 3–5 条带排序的候选；输入「我发现了某个资料」得到能指回长期档案字段的四问判断。两者都由 LLM 产出**提案**，经用户裁定后才落库。
 
-**P3 进度：** T10 已完成——`llm.py` + 6 条接口（providers 增删改查、连通性体检、`llm-calls` 记账）；密钥**只写不读**、每次调用落一行账、**同一操作最多 3 次调用**。T11 已完成——`frontend/app/providers/page.tsx` 一页装下列表（掩码）、增、改、删、测连通性、设为默认。T12 已完成——`backend/app/advisor.py`（四问判断：读档案 → 组 prompt → 调模型 → Pydantic 校验 → 不合格就带着原因重试一次 → 合格经台账落 `pending` 提案；**没给 profile_item id 又不说「依据不足」的一律判不合格**）+ `POST /api/requests` + `GET /api/profile`。**T13 候选清单、T14 候选与提案的前端** 还没做。
+**P3 进度：** T10 已完成——`llm.py` + 6 条接口（providers 增删改查、连通性体检、`llm-calls` 记账）；密钥**只写不读**、每次调用落一行账、**同一操作最多 3 次调用**。T11 已完成——`frontend/app/providers/page.tsx` 一页装下列表（掩码）、增、改、删、测连通性、设为默认。T12 已完成——`backend/app/advisor.py`（四问判断：读档案 → 组 prompt → 调模型 → Pydantic 校验 → 不合格就带着原因重试一次 → 合格经台账落 `pending` 提案；**没给 profile_item id 又不说「依据不足」的一律判不合格**）+ `POST /api/requests` + `GET /api/profile`。T22（档案录入）已完成——`POST /api/profile` / `PUT /api/profile/{id}` / `POST /api/profile/{id}/void` 三条写入口（全走台账）+ `/profile` 档案页。**T13 候选清单、T14 候选与提案的前端** 还没做。
 
 **本轮不做 / 下一步：** 触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）不在本轮。接着做 **T13（候选清单生成与去重）**——「找」与「判」共用 SPEC 第 4 节那一套判据，`advisor.py` 的四问骨架（Operation 调用、Pydantic 校验、重试一次）可以接着用。**T13 的端到端需要真实密钥**（决策 19：用户的 commandcode 已在其库里配成默认），单测一律假 provider 打桩、不花钱。样式方案仍待用户（走查已过）。
 
@@ -45,7 +46,7 @@
 - **provider 的「地址 / 模型」在界面上清不成空**：后端把"没传该字段"当成"别动它"，空串又会被前端挡掉（不送进请求体），所以留空 = 不改。要清空只能直接改库。T11 面板的小字里已写明。
 - **T12 定下的三条新约定**（都只影响 P3 后续，别在 T13/T14 里放松）：① `proposal.kind` 新增取值 `material_judgment`（不加列、不用迁移），T14 的裁定界面按 kind 分流；② `profile_item.category` 的**约定词表**是 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis`（库里是自由文本、无约束，目前只有 `long_axis` 真实用过；表外的类别不会丢，只是不算"缺失类别"）；③ 四问里**没给 profile_item id 又不说「依据不足」的输出一律判不合格**——这是"答案能指回具体字段"那条验收的兜底。
 - **用户长期档案目前只有「长期主线」2 条**（id=1 已 superseded「旧主线：先把 Python 学完」，id=2 active「新主线：通用工程基础 + 能上线的项目」），另外四类全空（`GET /api/profile` 的 `missing_categories` 会照实报）。所以真实跑四问时 ②③④ 会得到「依据不足」——那是**正常现象、不是 bug**；要让四问答得实，得先补档案。
-- **档案只有「读」，没有任何「写」的入口**（本轮确认）：`main.py` 里 `profile` 只有一条 `GET /api/profile`，没有 POST/PUT；前端也没有任何档案页面（`getProfile()` 只在 `/ask` 页加载时被自动调一次，用来显示缺口，**不对应任何按钮**）。库里那 2 条是早先**直接写库**塞进去的。**`tasks/todo.md` 里也没有"档案录入"这条任务**（T14 只列了候选页与提案页）——这是任务清单的缺口。要做的话，写进 `category` 的值必须用 `advisor.PROFILE_CATEGORIES` 那五个令牌，否则四问的"缺失类别"判断会不准。
+- **档案录入已补上（T22，2026-09-16）**：原「只有读、没有写」的缺口已结。写进 `category` 的值只收 `advisor.PROFILE_CATEGORIES` 那五个令牌（请求模型用 Literal 挡住，表外值 422）；取代与作废必填理由，全走台账。四问要答得实，用 `/profile` 页把空着的那四类补上。
 - **前端写 effect 会被 eslint 拦**：`react-hooks/set-state-in-effect` 禁止在 effect 体内**同步** setState。取数要写成 `.then(回调)` 里 setState（"订阅外部系统"的形态），或用 SWR/TanStack（加依赖属 Ask first）。本会话踩过一次。
 - **写任何 `frontend/` 下的代码前，必须先读 `frontend/node_modules/next/dist/docs/` 里的对应指南**。`frontend/AGENTS.md` 由 `next dev` 自动生成并会自行重建（删了也会回来，提交它才能保持工作区干净），它明说 Next.js 16 相对训练数据有破坏性变更；已见实例：`app/layout.tsx` 用新的 `LayoutProps` 类型，而不是旧的 `children: React.ReactNode` 写法。至少读 `01-app/02-guides/upgrading/version-16.md` 与 `01-app/01-getting-started/06-fetching-data.md`。
 - **只能操作「最新建的那个有效计划」（多计划未支持，待定）**：契约里**没有列出计划的接口**，前端只能拿 `GET /api/plan` 不传参数时的"最新建的那个 active 计划"。用户 2026-09-15 决定**先只补透明度**——`/new` 与计划表现在会写明「将建在 计划 #N 里」。**是否支持多计划待定**：若要，需加一条 `GET /api/plans`（改契约，SPEC 第 16 节 Ask first）。用户库里现有 3 个计划，另两个在界面里够不着。
@@ -89,6 +90,7 @@
 | E-26 / 2026-09-16 | T12：`pytest -q`（**160 passed**：原 147 + 13 条 advisor 单测）与 `python tools\smoke_p1.py`（9 步全绿——本轮动了新契约与台账写入，按纪律加跑） | `backend/tests/test_advisor.py` 可复跑 | 通过：合法输出落一条 `pending` 提案且引用的档案 id 真实存在；**没给 id 又不说「依据不足」的漂亮话判为不合格**；引用不存在的 id 判为不合格；首次不合格→带原因重试一次→第二次合格则成功（恰好 2 次调用）；两次都不合格→抛 `AdvisorError` 且**不落任何提案**；无档案时一次模型都不调；`\`\`\`json` 代码块被容忍 | `advisor.py`、那两条新路由或 `RequestIn` 变更后失效。**只验了假上游**：真实模型的输出质量不在本证据范围 |
 | E-27 / 2026-09-16 | **真实模型端到端跑通**（用户操作，Agent 只读库核对）：用户在 `/ask` 页提交「我要不要学python？」，真 provider = commandcode（id=3，`deepseek/deepseek-v4.1-flash`），`llm_call` 记 `task=judge`、ok=1、549 进 / 598 出 tokens、耗时 **5.5 秒**；`learning_request` 落 1 行；`proposal #3`（kind=`material_judgment`）status=`pending` | 数据在用户库 `data/cadence.db`，可随时复查：`llm_call`（按 task 分组：`connectivity_test` 5 次含 1 次成功、`judge` 1 次成功）、`proposal #3` 的 payload | 通过，且质量符合设计：① 引用了**真实存在的** `#2` 并复述其内容；②③ 同样指回 `#2` 并说明缺哪类；④ 明写「依据不足」且 `profile_item_ids` 为空数组。**「真密钥体检」同时得证**（那 1 次成功的 `connectivity_test`）——E-25 里「待用户回报」一条就此结清 | 用户库数据可复查。**证的是这一条链路**：`/api/requests` 契约、`advisor` 的 prompt 与校验、`llm.post_json` 的请求头、provider id=3 的配置；改任一处即失效。**未覆盖**：真实模型的输出质量是否稳定（只跑过 1 次） |
 | E-28 / 2026-09-16 | 落盘提交：T12 后端 `f08f75b`（`advisor.py` / `test_advisor.py` / `main.py` / `llm.py`）与 T11+`/ask` 前端 `882cf69`（`providers/`、`ask/`、`api.ts`、`page.tsx`）；提交前复跑 `npm run lint` 与 `npx tsc --noEmit`（均 exit=0）、`pytest -q`（**160 passed**）；同轮用户回报「前端体验没有问题」（P2 页面浏览器走查） | 两笔提交在仓库内可查；lint / tsc / pytest 均可复跑 | 通过：提交时点前后端全绿；P2 走查通过 | lint/tsc 按行为写：页面行为或 lint/tsc 配置变更后失效；pytest 沿用 E-26 的失效条件（`advisor.py`、那两条路由、`RequestIn`、`llm.py` 变更后失效） |
+| E-29 / 2026-09-16 | T22 档案录入：`pytest -q`（**177 passed**：原 160 + 17 条新单测）与 `tools\smoke_p1.py`（9 步全绿——本轮动了契约，按纪律加跑）；前端 `npm run lint` 与 `npx tsc --noEmit`（均 exit=0）。提交 `163f24e`（后端）与 `b09bc34`（前端） | `backend/tests/test_profile_write.py` 可复跑 | 通过：五令牌外的类别 422 拒收；同类别可多条并存；取代后旧值从 `GET /api/profile` 消失但台账留 before/after/理由；作废同理；历史行再动回 409；不存在回 404；纯空白 content/reason 回 400 | 那三条写路由与请求模型、或 `advisor.PROFILE_CATEGORIES` 变更后失效；`/profile` 页按行为写，浏览器走查归用户 |
 
 ## 6. 启动、验收与上下文
 

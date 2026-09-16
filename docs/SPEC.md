@@ -148,6 +148,9 @@
 | GET | `/api/candidates` | 取候选清单（带初判、排序、推荐先学哪条） |
 | POST | `/api/candidates/{id}/verdict` | 采纳 / 否决某条候选（否决要留痕） |
 | GET | `/api/profile` | 取长期档案五类当前有效值 |
+| POST | `/api/profile` | 补一条档案（2026-09-16 新增：类别限五个约定令牌；同类别可多条并存） |
+| PUT | `/api/profile/{item_id}` | 改内容（2026-09-16 新增：实为台账「取代」，旧值留痕；`reason` 必填） |
+| POST | `/api/profile/{item_id}/void` | 作废一条（2026-09-16 新增：不物理删除，台账留痕；`reason` 必填） |
 | GET | `/api/proposals` | 取待裁定提案（档案变更 / 计划重排） |
 | POST | `/api/proposals/{id}/decide` | 裁定提案 |
 | GET | `/api/providers` | 列出已配置的 LLM 提供商（密钥掩码） |
