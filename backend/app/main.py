@@ -23,7 +23,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, db, ledger, llm, plan
+from . import advisor, config, db, ledger, llm, plan
 
 app = FastAPI(
     title="cadence",
@@ -360,3 +360,58 @@ def get_llm_calls(limit: int = 50, conn: sqlite3.Connection = Depends(get_conn))
     为什么不设预算上限就必须有这个：不设上限的前提是「看得见花了多少」。
     """
     return {"calls": llm.list_calls(conn, limit=limit), "by_week": llm.call_summary_by_week(conn)}
+
+
+# ---------- 决策入口：四问判断（T12） ----------
+#
+# 这一段的形状：**LLM 只产出提案**。接口负责把你的输入记一行、把判断跑出来、落一条
+# `pending` 提案；档案与计划一个字都不改——改动要等你在 T14 的界面里裁定。
+
+class RequestIn(BaseModel):
+    kind: Literal["evaluate"] = Field(
+        default="evaluate",
+        description="目前只实现 evaluate（判断某个资料值不值得学）；"
+        "search（「我不知道该学什么」）属 T13，尚未实现",
+    )
+    raw_text: str = Field(
+        min_length=1, description="你的原话，例如「我看到一个 Rust 异步编程教程」"
+    )
+
+
+@app.get("/api/profile")
+def get_profile(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """长期档案的当前有效值（五类），外加哪几类还空着。
+
+    为什么要报「哪几类空着」：四问里 ②③④ 主要靠 `current_state` / `short_term_goal` /
+    `life_habit` / `life_log`，这几类没记录时答案只能是「依据不足」——与其让你纳闷
+    它为什么答得空，不如接口直接把缺口摊开。
+    """
+    return advisor.read_profile(conn)
+
+
+@app.post("/api/requests", status_code=201)
+def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """提交每轮输入，目前只做「判断一个资料值不值得学」。
+
+    三步：把你的输入记一行 → 跑四问（最多调 2 次模型）→ 落一条 `pending` 提案。
+    提案**等你裁定**，这里不改任何档案。
+    """
+    request_id = advisor.record_request(conn, payload.kind, payload.raw_text)
+    try:
+        result = advisor.judge(conn, payload.raw_text)
+    except advisor.AdvisorError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    proposal_id = advisor.propose(
+        conn, request_id=request_id, raw_text=payload.raw_text, result=result
+    )
+    return {
+        "request_id": request_id,
+        "proposal_id": proposal_id,
+        "kind": advisor.MATERIAL_JUDGMENT_KIND,
+        "judgment": result["judgment"],
+        "profile_basis": result["profile_basis"],
+        "calls": result["calls"],
+    }

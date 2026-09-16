@@ -277,6 +277,20 @@ def call_summary_by_week(conn: sqlite3.Connection, limit_weeks: int = 8) -> list
 
 # ---------- 真正发请求 ----------
 
+# 默认 User-Agent：**必须显式给一个像浏览器的**，不能空着。
+#
+# 为什么：urllib 默认会报 `Python-urllib/3.x`，而 Cloudflare 的 Browser Integrity Check
+# 会按「浏览器指纹」把这种请求挡在门外，直接回 `403` + `error code: 1010`
+# （它的官方定义就是 "banned your access based on your browser's signature"）。
+# 2026-09-15 实测 commandcode（它就在 Cloudflare 后面）：不带 UA → 1010；
+# 换成浏览器 UA → 立刻收到 commandcode 自己的 401。
+# 这不是伪装身份——我们本来就是个正常的 HTTP 客户端，只是要报上名号。
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
 def post_json(
     url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float = 30.0
 ) -> tuple[int, Any]:
@@ -288,7 +302,13 @@ def post_json(
         url,
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={"Content-Type": "application/json", **headers},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": DEFAULT_USER_AGENT,
+            # `headers` 放最后：调用方（含测试）想覆盖上面任何一项都覆盖得了
+            **headers,
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
