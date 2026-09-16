@@ -1,0 +1,72 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "dsh-agent",
+  "elements": [
+    { "type": "text", "id": "tT", "x": 60, "y": 22, "width": 900, "height": 36, "text": "cadence：代码怎么串联（P1 完成：一条链）", "fontSize": 28, "fontFamily": 1, "strokeColor": "#1e1e1e", "originalText": "cadence：代码怎么串联（P1 完成：一条链）", "autoResize": true },
+
+    { "type": "rectangle", "id": "nUp", "x": 1080, "y": 16, "width": 620, "height": 74, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "strokeColor": "#e8590c", "boundElements": [{ "id": "t_nUp", "type": "text" }] },
+    { "type": "text", "id": "t_nUp", "x": 1092, "y": 26, "width": 596, "height": 58, "text": "本次更新（2026-09-15）：P0 的「两座岛」已焊成一条链\nmain → plan → ledger → db；新增 plan.py 规则层、tools/ 两把脚本、409 防重复", "fontSize": 14, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "nUp", "originalText": "本次更新（2026-09-15）：P0 的「两座岛」已焊成一条链\nmain → plan → ledger → db；新增 plan.py 规则层、tools/ 两把脚本、409 防重复", "autoResize": true },
+
+    { "type": "rectangle", "id": "zA", "x": 40, "y": 100, "width": 1740, "height": 650, "backgroundColor": "#a5d8ff", "fillStyle": "solid", "opacity": 20, "roundness": { "type": 3 }, "strokeColor": "#1971c2" },
+    { "type": "text", "id": "tZA", "x": 60, "y": 112, "width": 1000, "height": 28, "text": "HTTP 进程 · uvicorn app.main:app（这条链只在进程内，不经过网络）", "fontSize": 22, "fontFamily": 1, "strokeColor": "#1971c2", "originalText": "HTTP 进程 · uvicorn app.main:app（这条链只在进程内，不经过网络）", "autoResize": true },
+
+    { "type": "rectangle", "id": "c1", "x": 80, "y": 180, "width": 240, "height": 76, "backgroundColor": "#d0bfff", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_c1", "type": "text" }] },
+    { "type": "text", "id": "t_c1", "x": 92, "y": 194, "width": 216, "height": 48, "text": "浏览器 / curl / /docs", "fontSize": 16, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "c1", "originalText": "浏览器 / curl / /docs", "autoResize": true },
+
+    { "type": "arrow", "id": "a1", "x": 320, "y": 218, "width": 60, "height": 0, "points": [[0, 0], [60, 0]], "endArrowhead": "arrow", "boundElements": [{ "id": "t_a1", "type": "text" }] },
+    { "type": "text", "id": "t_a1", "x": 330, "y": 186, "width": 40, "height": 20, "text": "HTTP", "fontSize": 14, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "a1", "originalText": "HTTP", "autoResize": true },
+
+    { "type": "rectangle", "id": "m1", "x": 380, "y": 160, "width": 300, "height": 180, "backgroundColor": "#a5d8ff", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_m1", "type": "text" }] },
+    { "type": "text", "id": "t_m1", "x": 392, "y": 174, "width": 276, "height": 152, "text": "app/main.py · 路由层\n5 个操作：health / 建计划 /\n建节点 / 提交报告 / 取计划\n\n只做三件事：收参数、翻错误码、\n返回 JSON", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "m1", "originalText": "app/main.py · 路由层\n5 个操作：health / 建计划 /\n建节点 / 提交报告 / 取计划\n\n只做三件事：收参数、翻错误码、\n返回 JSON", "autoResize": true },
+
+    { "type": "arrow", "id": "a2", "x": 680, "y": 250, "width": 140, "height": 0, "points": [[0, 0], [140, 0]], "endArrowhead": "arrow", "boundElements": [{ "id": "t_a2", "type": "text" }] },
+    { "type": "text", "id": "t_a2", "x": 690, "y": 214, "width": 120, "height": 20, "text": "import plan", "fontSize": 14, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "a2", "originalText": "import plan", "autoResize": true },
+
+    { "type": "rectangle", "id": "p1", "x": 820, "y": 140, "width": 360, "height": 220, "backgroundColor": "#b2f2bb", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_p1", "type": "text" }] },
+    { "type": "text", "id": "t_p1", "x": 832, "y": 154, "width": 336, "height": 192, "text": "app/plan.py · 规则层\n状态机 · 落后量 · 周检查点判定\n防重复判定 · 计划树\n\n阶段检查点全收尾 → 产出\n「是否进入下一阶段」提案\n\n不碰 HTTP，所以能脱离服务单测", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "p1", "originalText": "app/plan.py · 规则层\n状态机 · 落后量 · 周检查点判定\n防重复判定 · 计划树\n\n阶段检查点全收尾 → 产出\n「是否进入下一阶段」提案\n\n不碰 HTTP，所以能脱离服务单测", "autoResize": true },
+
+    { "type": "arrow", "id": "a3", "x": 1180, "y": 250, "width": 140, "height": 0, "points": [[0, 0], [140, 0]], "endArrowhead": "arrow", "boundElements": [{ "id": "t_a3", "type": "text" }] },
+    { "type": "text", "id": "t_a3", "x": 1190, "y": 214, "width": 130, "height": 20, "text": "import ledger", "fontSize": 14, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "a3", "originalText": "import ledger", "autoResize": true },
+
+    { "type": "rectangle", "id": "l1", "x": 1320, "y": 140, "width": 380, "height": 220, "backgroundColor": "#ffd8a8", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_l1", "type": "text" }] },
+    { "type": "text", "id": "t_l1", "x": 1332, "y": 154, "width": 356, "height": 192, "text": "app/ledger.py · 唯一状态写入口\n\ncreate_active / supersede / void\nset_status / fetch_active / history\n\n改业务表的同一次事务里写 ledger_event\n缺理由就抛错，不静默忽略", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "l1", "originalText": "app/ledger.py · 唯一状态写入口\n\ncreate_active / supersede / void\nset_status / fetch_active / history\n\n改业务表的同一次事务里写 ledger_event\n缺理由就抛错，不静默忽略", "autoResize": true },
+
+    { "type": "arrow", "id": "a4", "x": 1510, "y": 360, "width": 0, "height": 60, "points": [[0, 0], [0, 60]], "endArrowhead": "arrow", "boundElements": [{ "id": "t_a4", "type": "text" }] },
+    { "type": "text", "id": "t_a4", "x": 1520, "y": 372, "width": 220, "height": 20, "text": "from .db import now_iso", "fontSize": 14, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "a4", "originalText": "from .db import now_iso", "autoResize": true },
+
+    { "type": "rectangle", "id": "d1", "x": 1320, "y": 430, "width": 380, "height": 110, "backgroundColor": "#a5d8ff", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_d1", "type": "text" }] },
+    { "type": "text", "id": "t_d1", "x": 1332, "y": 444, "width": 356, "height": 82, "text": "app/db.py + sql/schema.sql\nconnect() / init()\n表结构唯一来源；now_iso 被 ledger 与 plan 各 import 一次", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "d1", "originalText": "app/db.py + sql/schema.sql\nconnect() / init()\n表结构唯一来源；now_iso 被 ledger 与 plan 各 import 一次", "autoResize": true },
+
+    { "type": "arrow", "id": "a5", "x": 1510, "y": 540, "width": 0, "height": 60, "points": [[0, 0], [0, 60]], "endArrowhead": "arrow", "boundElements": [{ "id": "t_a5", "type": "text" }] },
+    { "type": "text", "id": "t_a5", "x": 1520, "y": 552, "width": 220, "height": 20, "text": "手写 SQL（不用 ORM）", "fontSize": 14, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "a5", "originalText": "手写 SQL（不用 ORM）", "autoResize": true },
+
+    { "type": "rectangle", "id": "db1", "x": 1320, "y": 600, "width": 380, "height": 110, "backgroundColor": "#c3fae8", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_db1", "type": "text" }] },
+    { "type": "text", "id": "t_db1", "x": 1332, "y": 614, "width": 356, "height": 82, "text": "data/cadence.db · 12 张表\n唯一真相源；写只经 ledger.py\n现在：3 个计划 · 6 个节点 · 4 条报告 · 1 条提案", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "db1", "originalText": "data/cadence.db · 12 张表\n唯一真相源；写只经 ledger.py\n现在：3 个计划 · 6 个节点 · 4 条报告 · 1 条提案", "autoResize": true },
+
+    { "type": "rectangle", "id": "flow", "x": 380, "y": 430, "width": 780, "height": 250, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_flow", "type": "text" }] },
+    { "type": "text", "id": "t_flow", "x": 396, "y": 446, "width": 748, "height": 218, "text": "一次 POST /api/report 怎么流（P1 的主链）\n\n① main.py 收参数：状态四选一 + 一句话（必填）\n② plan.submit_report 先判「这次迁移合不合法」，再落库\n③ ledger 写 report 行 + 改 plan_node 状态 + 记台账流水\n④ 阶段若因此收尾 → 产出一条 stage_advance 提案等你裁定\n\n报告的词 → 节点的词：done→done、partial→in_progress、\nstuck→stuck、skipped→skipped（两套词，一张映射表）", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "left", "verticalAlign": "middle", "containerId": "flow", "originalText": "一次 POST /api/report 怎么流（P1 的主链）\n\n① main.py 收参数：状态四选一 + 一句话（必填）\n② plan.submit_report 先判「这次迁移合不合法」，再落库\n③ ledger 写 report 行 + 改 plan_node 状态 + 记台账流水\n④ 阶段若因此收尾 → 产出一条 stage_advance 提案等你裁定\n\n报告的词 → 节点的词：done→done、partial→in_progress、\nstuck→stuck、skipped→skipped（两套词，一张映射表）", "autoResize": true },
+
+    { "type": "rectangle", "id": "zB", "x": 40, "y": 800, "width": 1660, "height": 300, "backgroundColor": "#d0bfff", "fillStyle": "solid", "opacity": 20, "roundness": { "type": 3 }, "strokeColor": "#7048e8" },
+    { "type": "text", "id": "tZB", "x": 60, "y": 1056, "width": 1000, "height": 28, "text": "不过 HTTP 的调用者：pytest 与 show_db.py 直接 from app import …；smoke_p1.py 自己起服务走 HTTP", "fontSize": 22, "fontFamily": 1, "strokeColor": "#7048e8", "originalText": "不过 HTTP 的调用者：pytest 与 show_db.py 直接 from app import …；smoke_p1.py 自己起服务走 HTTP", "autoResize": true },
+
+    { "type": "rectangle", "id": "t1", "x": 80, "y": 860, "width": 460, "height": 150, "backgroundColor": "#b2f2bb", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_t1", "type": "text" }] },
+    { "type": "text", "id": "t_t1", "x": 92, "y": 874, "width": 436, "height": 122, "text": "pytest tests/（88 项）\ntest_ledger · test_plan · test_progress\n每项自己建临时库（fixture），跑完销毁\nfrom app import db, ledger, plan", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "t1", "originalText": "pytest tests/（88 项）\ntest_ledger · test_plan · test_progress\n每项自己建临时库（fixture），跑完销毁\nfrom app import db, ledger, plan", "autoResize": true },
+
+    { "type": "rectangle", "id": "t2", "x": 600, "y": 860, "width": 460, "height": 150, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_t2", "type": "text" }] },
+    { "type": "text", "id": "t_t2", "x": 612, "y": 874, "width": 436, "height": 122, "text": "tools/show_db.py（只读看库）\n以 mode=ro 打开库，里面只有 SELECT\n写操作会被 SQLite 直接拒绝\nfrom app import db, ledger, plan", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "t2", "originalText": "tools/show_db.py（只读看库）\n以 mode=ro 打开库，里面只有 SELECT\n写操作会被 SQLite 直接拒绝\nfrom app import db, ledger, plan", "autoResize": true },
+
+    { "type": "rectangle", "id": "t3", "x": 1120, "y": 860, "width": 520, "height": 150, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_t3", "type": "text" }] },
+    { "type": "text", "id": "t_t3", "x": 1132, "y": 874, "width": 496, "height": 122, "text": "tools/smoke_p1.py（闭环冒烟）\n不 import app：自己找空闲端口、用临时库起服务，\n然后走 HTTP 跑 9 步；跑完删临时库，不碰真实数据", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "t3", "originalText": "tools/smoke_p1.py（闭环冒烟）\n不 import app：自己找空闲端口、用临时库起服务，\n然后走 HTTP 跑 9 步；跑完删临时库，不碰真实数据", "autoResize": true },
+
+    { "type": "rectangle", "id": "n1", "x": 40, "y": 1140, "width": 620, "height": 110, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_n1", "type": "text" }] },
+    { "type": "text", "id": "t_n1", "x": 56, "y": 1152, "width": 588, "height": 86, "text": "看任何项目都问 5 句：\n① 从哪启动 ② 请求怎么流 ③ 数据谁持有\n④ 谁 import 谁 ⑤ 对外借了什么", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "n1", "originalText": "看任何项目都问 5 句：\n① 从哪启动 ② 请求怎么流 ③ 数据谁持有\n④ 谁 import 谁 ⑤ 对外借了什么", "autoResize": true },
+
+    { "type": "rectangle", "id": "n2", "x": 700, "y": 1140, "width": 620, "height": 110, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_n2", "type": "text" }] },
+    { "type": "text", "id": "t_n2", "x": 716, "y": 1152, "width": 588, "height": 86, "text": "一次 POST /api/report 动 4 处：\nreport 表（你说了什么）· plan_node 状态（算到哪步）\nledger_event 流水（为什么）· proposal 提案（等你拍板）", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "n2", "originalText": "一次 POST /api/report 动 4 处：\nreport 表（你说了什么）· plan_node 状态（算到哪步）\nledger_event 流水（为什么）· proposal 提案（等你拍板）", "autoResize": true },
+
+    { "type": "rectangle", "id": "n3", "x": 1360, "y": 1140, "width": 340, "height": 110, "backgroundColor": "#fff3bf", "fillStyle": "solid", "roundness": { "type": 3 }, "boundElements": [{ "id": "t_n3", "type": "text" }] },
+    { "type": "text", "id": "t_n3", "x": 1372, "y": 1152, "width": 316, "height": 86, "text": "对外只借 3 个包：\nfastapi · uvicorn · pytest\ntools/ 只用标准库", "fontSize": 15, "fontFamily": 1, "strokeColor": "#1e1e1e", "textAlign": "center", "verticalAlign": "middle", "containerId": "n3", "originalText": "对外只借 3 个包：\nfastapi · uvicorn · pytest\ntools/ 只用标准库", "autoResize": true }
+  ],
+  "appState": { "viewBackgroundColor": "#ffffff" }
+}
