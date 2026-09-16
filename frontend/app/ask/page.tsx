@@ -193,7 +193,7 @@ export default function AskPage() {
         </p>
         <button type="submit" disabled={pending}>
           {pending
-            ? "正在问模型…（要几秒到几十秒）"
+            ? "正在问模型…（四问几秒到几十秒；候选清单更长，可能一两分钟）"
             : mode === "search"
               ? "给我一份候选清单"
               : "问一下"}

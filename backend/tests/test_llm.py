@@ -318,3 +318,46 @@ def test_summary_groups_by_week(conn):
     assert newest["calls"] == 1 and newest["input_tokens"] == 30
     assert oldest["calls"] == 2 and oldest["ok"] == 1 and oldest["failed"] == 1
     assert oldest["errors"] == ["炸了"]
+
+
+# ---------- 读超时（2026-09-16 用户走查踩到的那次） ----------
+
+
+class TimeoutTransport:
+    """假上游：直接抛读超时，模拟模型生成太久。"""
+
+    def __call__(self, url: str, headers: dict, payload: dict):
+        raise TimeoutError("The read operation timed out")
+
+
+def test_chat_timeout_is_generous_because_long_output_is_slow():
+    """候选清单实测要 23 秒、4350 token；30 秒的默认值就是这么被撞穿的。
+
+    这条不是形式主义：它是防止有人把超时改回一个「看起来更合理」的短值。
+    """
+    import inspect
+
+    assert llm.CHAT_TIMEOUT_SECONDS >= 120
+    assert (
+        inspect.signature(llm.post_json).parameters["timeout"].default
+        == llm.CHAT_TIMEOUT_SECONDS
+    )
+    # 体检反过来要快速失败，不能跟着聊天一起放宽
+    assert llm.CONNECTIVITY_TIMEOUT_SECONDS < llm.CHAT_TIMEOUT_SECONDS
+
+
+def test_timeout_message_explains_itself_and_is_recorded(conn):
+    make_default_provider(conn)
+    operation = llm.Operation(conn, "find", transport=TimeoutTransport())
+
+    with pytest.raises(llm.LlmError) as caught:
+        operation.chat([{"role": "user", "content": "我不知道该学什么"}])
+
+    message = str(caught.value)
+    assert "重试" in message  # 告诉用户下一步该干嘛，而不是只甩一个 TimeoutError
+    assert str(llm.CHAT_TIMEOUT_SECONDS).rstrip("0").rstrip(".") in message  # 等了多久
+
+    calls = llm.list_calls(conn)
+    assert len(calls) == 1
+    assert calls[0]["ok"] is False
+    assert "TimeoutError" in calls[0]["error"]

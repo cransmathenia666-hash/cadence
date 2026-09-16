@@ -26,6 +26,16 @@ from .plan import parse_date, week_key
 # 同一操作内允许的最大模型调用次数。
 MAX_CALLS_PER_OPERATION = 3
 
+# 读超时（秒）。默认值按「一次生成一份长清单」的真实耗时定，不是按短请求：
+# 2026-09-16 实测，候选清单（task=find）成功那次输出 4350 token、耗时 23 秒，
+# 紧接着的两次都在恰好 30 秒处被读超时掐断（记账里是 TimeoutError）。
+# 30 秒原本是给短请求（体检、四问那种几百 token 的输出）设的，对长输出太紧。
+# 放宽到 180 秒后，最坏情况是「不合格重试一次」——一次 `find` 最长约 6 分钟。
+CHAT_TIMEOUT_SECONDS = 180.0
+
+# 体检要的是「通不通」这个快速结论：配错地址、密钥失效都该秒回，所以单独给一个短超时。
+CONNECTIVITY_TIMEOUT_SECONDS = 20.0
+
 # 测连通性也走记账，但用单独的 task 名，免得混进业务调用的统计里。
 CONNECTIVITY_TASK = "connectivity_test"
 
@@ -292,11 +302,17 @@ DEFAULT_USER_AGENT = (
 
 
 def post_json(
-    url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float = 30.0
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: float = CHAT_TIMEOUT_SECONDS,
 ) -> tuple[int, Any]:
     """发一个 JSON POST。用标准库 urllib——项目刻意不加 HTTP 依赖（见 SPEC 第 10 节）。
 
     连不上、超时这类异常**不在这里吞掉**：交给调用方记账并如实报错。
+
+    默认超时是 `CHAT_TIMEOUT_SECONDS`（长输出用），需要快速失败的调用方
+    （比如体检）自己传一个更短的值。
     """
     request = urllib.request.Request(
         url,
@@ -404,6 +420,13 @@ class Operation:
             text, input_tokens, output_tokens = _parse_reply(status, body)
         except Exception as cause:  # 上游怎么错都要记账，不能"失败了就不记"
             error_text = f"{type(cause).__name__}: {cause}"
+            if isinstance(cause, TimeoutError):
+                # 超时最容易让人以为是自己的配置坏了。其实是「这次生成太久」——
+                # 候选清单这类长输出就是这样，重试一次通常能过（见 CHAT_TIMEOUT_SECONDS）。
+                error_text += (
+                    f"（等了 {int(CHAT_TIMEOUT_SECONDS)} 秒还没读完；"
+                    "长清单本来就慢，直接重试一次通常能过）"
+                )
         finally:
             record_call(
                 self._conn,
@@ -437,7 +460,13 @@ def test_provider(
     if provider is None:
         raise LlmError(f"provider id={provider_id} 不存在")
 
-    send = transport or post_json
+    def send(url: str, headers: dict[str, str], payload: dict[str, Any]) -> tuple[int, Any]:
+        """体检要**快速失败**：真发请求时用短超时，别让人对着转圈等三分钟；
+        打桩的假传输按它自己的签名调（单测的签名就是三参数）。"""
+        if transport is None:
+            return post_json(url, headers, payload, timeout=CONNECTIVITY_TIMEOUT_SECONDS)
+        return transport(url, headers, payload)
+
     model = provider["default_model"]
     started = time.perf_counter()
     input_tokens: int | None = None
