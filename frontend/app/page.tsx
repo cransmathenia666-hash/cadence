@@ -34,6 +34,10 @@ export default function Home() {
         <Link href="/new">建计划 / 建节点</Link>
         {" · "}
         <Link href="/report">提交报告</Link>
+        {" · "}
+        <Link href="/providers">LLM 提供商</Link>
+        {" · "}
+        <Link href="/ask">问一句</Link>
       </p>
 
       {error !== null && (
