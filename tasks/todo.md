@@ -104,7 +104,7 @@
   - Files：`frontend/app/candidates/page.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`
 
 - [x] **T22 档案录入（P3 补充）**
-  - Acceptance：`POST /api/profile`（新增）、`PUT /api/profile/{id}`（取代，旧值留痕）、`POST /api/profile/{id}/void`（作废）三条写入口**全走台账**；`category` 只收 `advisor.PROFILE_CATEGORIES` 五个约定令牌；取代与作废必填理由；同类别允许多条并存；前端 `/profile` 页能看五类缺口、补、改、作废
+  - Acceptance：`POST /api/profile`（新增）、`PUT /api/profile/{id}`（取代，旧值留痕）、`POST /api/profile/{id}/void`（作废）三条写入口**全走台账**；`category` 只收 `advisor.PROFILE_CATEGORIES` 五个约定令牌；取代与作废必填理由；同类别允许多条并存但**一字不差的当前有效条目 409**（判重只看 active，作废后重填不挡）；前端 `/profile` 页能看五类缺口、补、改、作废
   - Verify：`pytest -q` 177 passed（含 17 条新单测）+ `tools\smoke_p1.py` 9 步全绿；前端 lint 与 tsc exit=0（浏览器走查归用户）
   - Files：`backend/app/main.py`、`backend/tests/test_profile_write.py`、`frontend/app/profile/page.tsx`、`frontend/lib/api.ts`
 
