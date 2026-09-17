@@ -5,12 +5,15 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import {
   ApiError,
+  createPlan,
   findCandidates,
   getProfile,
   listCandidates,
+  listPlans,
   verdictCandidate,
   type CandidateList,
   type FindResult,
+  type PlanSummary,
   type ProfileView,
 } from "@/lib/api";
 
@@ -37,6 +40,7 @@ const STATUS_LABELS: Record<string, string> = {
   proposed: "待裁定",
   accepted: "已采纳",
   rejected: "已否决",
+  expired: "已过期（被新一轮顶掉，不算否决）",
 };
 
 /** 一份清单里的一条候选：新问的和重看库里那轮的，都统一成这个形状。 */
@@ -51,6 +55,8 @@ type Row = {
   rejectReason: string | null;
   /** 依据的档案 id。库里的候选没存这列，重看时是 null。 */
   basis: number[] | null;
+  /** 这一轮针对的计划；null = 「新方向（不属于任何计划）」。采纳落点看它。 */
+  planId: number | null;
 };
 
 function rowsFromFind(found: FindResult): Row[] {
@@ -64,6 +70,7 @@ function rowsFromFind(found: FindResult): Row[] {
     status: "proposed",
     rejectReason: null,
     basis: item.profile_item_ids,
+    planId: found.plan_id,
   }));
 }
 
@@ -78,6 +85,7 @@ function rowsFromStored(stored: CandidateList): Row[] {
     status: item.status,
     rejectReason: item.reject_reason,
     basis: null,
+    planId: item.plan_id,
   }));
 }
 
@@ -95,6 +103,14 @@ export default function CandidatesPage() {
   const [rawText, setRawText] = useState("");
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
+
+  /** 计划列表与「这一轮针对哪个计划」（"" = 新方向，不属于任何计划）。 */
+  const [plans, setPlans] = useState<PlanSummary[]>([]);
+  const [planChoice, setPlanChoice] = useState("");
+  /** 「新方向」的候选采纳时要显式选落点；adoptingId = 正在选的那条。 */
+  const [adoptingId, setAdoptingId] = useState<number | null>(null);
+  const [adoptPlanId, setAdoptPlanId] = useState("");
+  const [newPlanGoal, setNewPlanGoal] = useState("");
 
   const [verdicting, setVerdicting] = useState(false);
   const [verdictError, setVerdictError] = useState<string | null>(null);
@@ -115,6 +131,15 @@ export default function CandidatesPage() {
         setStoredText(stored.raw_text);
       })
       .catch((cause: unknown) => setAskError(messageOf(cause, "取候选清单时出了意外错误")));
+    listPlans()
+      .then((items) => {
+        setPlans(items);
+        // 默认对准最新建的那个计划；下拉里随时能换成别的或「新方向」
+        if (items.length > 0) {
+          setPlanChoice((current) => (current === "" ? String(items[items.length - 1].id) : current));
+        }
+      })
+      .catch(() => setPlans([]));
   }, []);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -125,7 +150,7 @@ export default function CandidatesPage() {
     setVerdictError(null);
     setRejectingId(null);
     try {
-      const found = await findCandidates(rawText);
+      const found = await findCandidates(rawText, planChoice === "" ? null : Number(planChoice));
       setFresh(found);
       setStoredText(null);
       setRows(rowsFromFind(found));
@@ -136,11 +161,16 @@ export default function CandidatesPage() {
     }
   }
 
-  async function onVerdict(candidateId: number, accept: boolean, reason?: string) {
+  async function onVerdict(
+    candidateId: number,
+    accept: boolean,
+    reason?: string,
+    landingPlanId?: number | null,
+  ) {
     setVerdicting(true);
     setVerdictError(null);
     try {
-      const done = await verdictCandidate(candidateId, accept, reason);
+      const done = await verdictCandidate(candidateId, accept, reason, landingPlanId);
       setRows((previous) =>
         (previous ?? []).map((row) =>
           row.id === candidateId
@@ -157,8 +187,35 @@ export default function CandidatesPage() {
       }));
       setRejectingId(null);
       setRejectReason("");
+      setAdoptingId(null);
+      setAdoptPlanId("");
+      setNewPlanGoal("");
     } catch (cause) {
       setVerdictError(messageOf(cause, "表态失败，原因不明"));
+    } finally {
+      setVerdicting(false);
+    }
+  }
+
+  /** 「新方向」的候选：新建一个计划（目标默认取候选标题），再把它采纳进去。 */
+  async function onCreatePlanAndAdopt(candidateId: number, goal: string) {
+    setVerdicting(true);
+    setVerdictError(null);
+    try {
+      const created = await createPlan(goal);
+      setPlans(await listPlans());
+      const done = await verdictCandidate(candidateId, true, undefined, created.id);
+      setRows((previous) =>
+        (previous ?? []).map((row) => (row.id === candidateId ? { ...row, status: done.status } : row)),
+      );
+      setNotes((previous) => ({
+        ...previous,
+        [candidateId]: `已采纳，新建了计划 #${created.id}「${created.goal}」并在里面建了阶段 #${done.node_id}。`,
+      }));
+      setAdoptingId(null);
+      setNewPlanGoal("");
+    } catch (cause) {
+      setVerdictError(messageOf(cause, "新建计划并采纳失败，原因不明"));
     } finally {
       setVerdicting(false);
     }
@@ -194,6 +251,23 @@ export default function CandidatesPage() {
       )}
 
       <form onSubmit={onSubmit}>
+        <p>
+          <label htmlFor="plan">这一轮针对哪个计划：</label>
+          <select id="plan" value={planChoice} onChange={(event) => setPlanChoice(event.target.value)}>
+            <option value="">新方向（不属于任何计划）</option>
+            {plans.map((item) => (
+              <option key={item.id} value={item.id}>
+                计划 #{item.id}：{item.goal}
+                {item.current_stage !== null && `（当前阶段：${item.current_stage.title}）`}
+              </option>
+            ))}
+          </select>
+          <br />
+          <small>
+            对准一个计划，候选会带着它的当前阶段来给（更贴手头这件事）；选「新方向」就是单纯找方向。
+            采纳时就落到这个计划里——不再「偷偷落最新」。
+          </small>
+        </p>
         <p>
           <label htmlFor="raw">我的处境 / 想法（必填）：</label>
           <br />
@@ -297,10 +371,14 @@ export default function CandidatesPage() {
                     <p>
                       <button
                         type="button"
-                        onClick={() => onVerdict(row.id, true)}
+                        onClick={() =>
+                          row.planId === null ? setAdoptingId(row.id) : onVerdict(row.id, true)
+                        }
                         disabled={verdicting}
                       >
-                        采纳（自动在计划里建阶段）
+                        {row.planId === null
+                          ? "采纳（先选落到哪个计划）"
+                          : `采纳（落到计划 #${row.planId} 建阶段）`}
                       </button>{" "}
                       {rejectingId === row.id ? (
                         <>
@@ -332,6 +410,52 @@ export default function CandidatesPage() {
                         </button>
                       )}
                     </p>
+                  )}
+
+                  {adoptingId === row.id && (
+                    <div>
+                      <p>
+                        <label htmlFor={`landing-${row.id}`}>采纳到哪个计划（必选）：</label>
+                        <select
+                          id={`landing-${row.id}`}
+                          value={adoptPlanId}
+                          onChange={(event) => setAdoptPlanId(event.target.value)}
+                        >
+                          <option value="">请选择…</option>
+                          {plans.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              计划 #{item.id}：{item.goal}
+                            </option>
+                          ))}
+                        </select>{" "}
+                        <button
+                          type="button"
+                          onClick={() => onVerdict(row.id, true, undefined, Number(adoptPlanId))}
+                          disabled={verdicting || adoptPlanId === ""}
+                        >
+                          确认采纳到这个计划
+                        </button>{" "}
+                        <button type="button" onClick={() => setAdoptingId(null)} disabled={verdicting}>
+                          取消
+                        </button>
+                      </p>
+                      <p>
+                        <label htmlFor={`new-plan-${row.id}`}>或者新建一个计划（目标默认取这条候选）：</label>
+                        <input
+                          id={`new-plan-${row.id}`}
+                          value={newPlanGoal}
+                          onChange={(event) => setNewPlanGoal(event.target.value)}
+                          placeholder={row.title}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onCreatePlanAndAdopt(row.id, newPlanGoal.trim() || row.title)}
+                          disabled={verdicting}
+                        >
+                          新建计划并采纳
+                        </button>
+                      </p>
+                    </div>
                   )}
 
                   {rejectingId === row.id && (

@@ -216,6 +216,52 @@ export async function submitReport(input: {
   });
 }
 
+// ---------- 计划的列表与生命周期（T24） ----------
+
+/** 计划列表里的一项。`status`：active 进行中 / closed 已收尾 / void 已作废。 */
+export type PlanSummary = {
+  id: number;
+  goal: string;
+  status: string;
+  valid_from: string;
+  /** 当前阶段（第一个没收尾的阶段）；都收尾了或还没建阶段时为 null。 */
+  current_stage: { id: number; title: string } | null;
+  stages: number;
+  stages_finished: number;
+};
+
+/** 列出计划。默认只给进行中的；`includeInactive` 连收尾 / 作废的一起给。 */
+export async function listPlans(includeInactive = false): Promise<PlanSummary[]> {
+  const data = await request<{ plans: PlanSummary[] }>(
+    `/api/plans?include_inactive=${includeInactive}`,
+  );
+  return data.plans;
+}
+
+/** 收尾一个计划（做完了）。可重复调用。 */
+export async function closePlan(
+  planId: number,
+  reason?: string,
+): Promise<{ plan_id: number; status: string; changed: boolean }> {
+  return request(`/api/plans/${planId}/close`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason ?? null }),
+  });
+}
+
+/** 作废一个计划（不算数了）。**理由必填**——它进台账。 */
+export async function voidPlan(
+  planId: number,
+  reason: string,
+): Promise<{ plan_id: number; status: string }> {
+  return request(`/api/plans/${planId}/void`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
 // ---------- 建计划与建节点（写接口） ----------
 
 /** 节点层级：阶段=可验证交付物，检查点=周打卡，任务=要干的活。与后端 NodeIn.level 一致。 */
@@ -527,6 +573,8 @@ export type FoundCandidate = {
 export type FindResult = {
   request_id: number;
   kind: "search";
+  /** 这一轮针对哪个计划；null = 「新方向（不属于任何计划）」（SPEC 决策 33）。 */
+  plan_id: number | null;
   /** 与 `candidates` 一一对应、同顺序：裁决时要用它们。 */
   candidate_ids: number[];
   /** 顺序即优先级（后端已按 rank 排好，前端不再自己排）。 */
@@ -548,15 +596,15 @@ export type FindResult = {
  * 走的是同一个 `POST /api/requests`，只是 `kind` 不同。落成的是 `proposed` 候选，
  * 等你在界面上采纳 / 否决——**否决过的标题会成为下次的禁区**。
  */
-export async function findCandidates(rawText: string): Promise<FindResult> {
+export async function findCandidates(rawText: string, planId?: number | null): Promise<FindResult> {
   return request<FindResult>("/api/requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind: "search", raw_text: rawText }),
+    body: JSON.stringify({ kind: "search", raw_text: rawText, plan_id: planId ?? null }),
   });
 }
 
-/** 已落库的一条候选。`status` 是 proposed / accepted / rejected。 */
+/** 已落库的一条候选。`status` 是 proposed / accepted / rejected / expired（过期≠否决）。 */
 export type CandidateRow = {
   id: number;
   title: string;
@@ -567,12 +615,16 @@ export type CandidateRow = {
   is_recommended: number;
   status: string;
   reject_reason: string | null;
+  /** 这一轮针对的计划；null = 「新方向」。采纳时落点看它（没有就得显式选）。 */
+  plan_id: number | null;
 };
 
 export type CandidateList = {
   /** 还没问过时是 null（不是错误）。 */
   request_id: number | null;
   raw_text: string | null;
+  /** 这一轮的所属计划；null = 「新方向（不属于任何计划）」。 */
+  plan_id: number | null;
   created_at?: string | null;
   candidates: CandidateRow[];
   recommended: CandidateRow | null;
@@ -607,11 +659,13 @@ export async function verdictCandidate(
   candidateId: number,
   accept: boolean,
   reason?: string,
+  planId?: number | null,
 ): Promise<VerdictResult> {
   return request<VerdictResult>(`/api/candidates/${candidateId}/verdict`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accept, reason: reason ?? null }),
+    // plan_id 只在候选没有归属（「新方向」）时需要——决定采纳落到哪个计划
+    body: JSON.stringify({ accept, reason: reason ?? null, plan_id: planId ?? null }),
   });
 }
 

@@ -8,7 +8,9 @@ import {
   createNode,
   createPlan,
   getPlan,
+  listPlans,
   type NodeLevel,
+  type PlanSummary,
   type PlanTree,
 } from "@/lib/api";
 
@@ -33,6 +35,9 @@ function messageOf(cause: unknown, fallback: string): string {
 
 export default function NewPage() {
   const [tree, setTree] = useState<PlanTree | null>(null);
+  const [plans, setPlans] = useState<PlanSummary[]>([]);
+  /** 节点建到哪个计划里；"" = 最新建的那个（与取计划树的默认一致）。 */
+  const [targetPlanId, setTargetPlanId] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, setPending] = useState(false);
@@ -48,25 +53,30 @@ export default function NewPage() {
   const [dueDate, setDueDate] = useState("");
 
   useEffect(() => {
-    getPlan()
-      .then((data) => {
-        setTree(data);
-        setLoadError(null);
+    getPlan().then((data) => {
+      setTree(data);
+      setLoadError(null);
+    }).catch((cause: unknown) => setLoadError(messageOf(cause, LOAD_FAILED)));
+    listPlans()
+      .then((items) => {
+        setPlans(items);
       })
-      .catch((cause: unknown) => setLoadError(messageOf(cause, LOAD_FAILED)));
+      .catch(() => setPlans([]));
   }, []);
 
-  /** 建完之后重新取一次，页面上的树就跟着变了。 */
+  /** 建完之后重新取一次（树 + 计划列表），页面上的树就跟着变了。 */
   async function refresh() {
     try {
-      setTree(await getPlan());
+      setTree(await getPlan(targetPlanId === "" ? undefined : Number(targetPlanId)));
+      setPlans(await listPlans());
       setLoadError(null);
     } catch (cause) {
       setLoadError(messageOf(cause, LOAD_FAILED));
     }
   }
 
-  const planId = tree?.plan?.id ?? null;
+  // 建节点要有明确的落点（T24）：下拉选了就用它，没选就沿用「最新建的那个计划」
+  const planId = targetPlanId === "" ? (tree?.plan?.id ?? null) : Number(targetPlanId);
   const stages = tree?.stages ?? [];
 
   async function onCreatePlan(event: FormEvent<HTMLFormElement>) {
@@ -77,6 +87,7 @@ export default function NewPage() {
       const created = await createPlan(goal);
       setFeedback({ ok: true, text: `已建计划 #${created.id}：${created.goal}` });
       setGoal("");
+      setTargetPlanId(String(created.id));  // 建完就对准它，接着往里面放阶段与任务
       await refresh();
     } catch (cause) {
       setFeedback({ ok: false, text: messageOf(cause, "建计划失败，原因不明") });
@@ -167,11 +178,32 @@ export default function NewPage() {
               不写出来的话，你根本不知道节点会落进哪个计划——这是用户实际踩到的坑。
             */}
             <p>
-              将建在 <strong>计划 #{planId}「{tree?.plan?.goal}」</strong> 里。
-              <br />
-              <small>
-                界面目前只能操作「最新建的那个有效计划」；同时管多个计划还没做（契约里也没有「列出计划」的接口）。
-              </small>
+              <label htmlFor="target-plan">建到哪个计划：</label>
+              <select
+                id="target-plan"
+                value={targetPlanId}
+                onChange={async (event) => {
+                  const next = event.target.value;
+                  setTargetPlanId(next);
+                  setTree(await getPlan(next === "" ? undefined : Number(next)));
+                }}
+              >
+                <option value="">（最新建的那个计划）</option>
+                {plans.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    #{item.id}：{item.goal}
+                  </option>
+                ))}
+              </select>
+              {planId !== null && (
+                <>
+                  <br />
+                  <small>
+                    将建在 <strong>计划 #{planId}「{tree?.plan?.goal}」</strong> 里；
+                    采纳候选时也会按候选自带的计划归属落进对应的计划。
+                  </small>
+                </>
+              )}
             </p>
             <form onSubmit={onCreateNode}>
             <fieldset>
