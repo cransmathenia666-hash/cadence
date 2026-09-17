@@ -464,7 +464,7 @@ def get_candidates(
 
 
 @app.post("/api/candidates/{candidate_id}/verdict",
-          responses={409: {"description": "这条候选已经裁定过了"}})
+          responses={409: {"description": "这条候选已经裁定过了，或采纳落不了阶段（没有 active 计划 / 有同名未收尾阶段）"}})
 def post_candidate_verdict(
     candidate_id: int, payload: VerdictIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
@@ -472,6 +472,8 @@ def post_candidate_verdict(
 
     否决留痕（`reject_reason` + 台账流水），并让它的标题成为下一次「找」的禁区——
     这是成功标准 2 后半句「已被否决的候选不再出现」的入口。
+    采纳（2026-09-17 起）会在最新 active 计划里自动建一个同名阶段，响应带
+    `plan_id` / `node_id`；落不了阶段时整个动作失败（409），候选保持 proposed 可重试。
     """
     try:
         return advisor.decide_candidate(

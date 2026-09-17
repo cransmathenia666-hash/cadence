@@ -566,13 +566,23 @@ export async function listCandidates(requestId?: number): Promise<CandidateList>
 }
 
 /** 采纳或否决的回执。 */
-export type VerdictResult = { id: number; status: string; reject_reason: string | null };
+export type VerdictResult = {
+  id: number;
+  status: string;
+  reject_reason: string | null;
+  /** 采纳时后端自动落的阶段：建进了哪个计划（最新 active 的那个）。否决时为 null。 */
+  plan_id: number | null;
+  /** 自动建出的阶段节点 id。否决时为 null。 */
+  node_id: number | null;
+};
 
 /**
  * 采纳 / 否决一条候选。
  *
  * 否决**必须写理由**（缺理由后端回 400）：理由进台账，并成为下次「找」的禁区——
  * 这是「你否决过的候选不再出现」的入口。
+ * 采纳（2026-09-17 起）会在最新 active 计划里自动建一个同名阶段；落不了阶段
+ * （没有 active 计划、有同名未收尾阶段）回 409，候选保持 proposed 可重试。
  */
 export async function verdictCandidate(
   candidateId: number,

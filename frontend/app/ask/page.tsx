@@ -13,6 +13,7 @@ import {
   type FindResult,
   type Judgment,
   type ProfileView,
+  type VerdictResult,
 } from "@/lib/api";
 
 /**
@@ -67,7 +68,7 @@ export default function AskPage() {
   const [error, setError] = useState<string | null>(null);
 
   /** 候选的裁决结果，按候选 id 存：裁完就地显示，不动整份清单。 */
-  const [verdicts, setVerdicts] = useState<Record<number, string>>({});
+  const [verdicts, setVerdicts] = useState<Record<number, VerdictResult>>({});
   /** 正在填否决理由的那条；null = 没人在填。 */
   const [rejectingId, setRejectingId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -117,7 +118,7 @@ export default function AskPage() {
     setVerdictError(null);
     try {
       const done = await verdictCandidate(candidateId, accept, reason);
-      setVerdicts((previous) => ({ ...previous, [candidateId]: done.status }));
+      setVerdicts((previous) => ({ ...previous, [candidateId]: done }));
       setRejectingId(null);
       setRejectReason("");
     } catch (cause) {
@@ -264,7 +265,8 @@ export default function AskPage() {
           <ol>
             {found.candidates.map((item, index) => {
               const candidateId = found.candidate_ids[index];
-              const status = verdicts[candidateId];
+              const verdict = verdicts[candidateId];
+              const status = verdict?.status;
               const isStart = item.title === found.recommended_start;
               return (
                 <li key={candidateId}>
@@ -329,8 +331,9 @@ export default function AskPage() {
                   ) : (
                     <p role="status">
                       <small>
-                        已{status === "accepted" ? "采纳" : "否决"}（否决的理由已进台账，
-                        下次「找」不会再出现这条）。
+                        {status === "accepted" && verdict
+                          ? `已采纳，已在计划 #${verdict.plan_id} 里自动建了阶段 #${verdict.node_id}——回计划表就能看到。`
+                          : "已否决（理由已进台账，下次「找」不会再出现这条）。"}
                       </small>
                     </p>
                   )}

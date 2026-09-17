@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from app import advisor, db, ledger, llm, main
+from app import advisor, db, ledger, llm, main, plan
 from app.main import VerdictIn
 
 
@@ -321,6 +321,7 @@ def test_reject_requires_reason_and_leaves_trace(conn):
     )
 
     assert result["status"] == "rejected"
+    assert result["plan_id"] is None and result["node_id"] is None  # 否决不建任何节点
     row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
     assert row["status"] == "rejected"
     assert row["reject_reason"] == "和主线无关"
@@ -330,6 +331,7 @@ def test_reject_requires_reason_and_leaves_trace(conn):
 
 
 def test_accept_and_the_two_refusals(conn):
+    ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
     request_id = advisor.record_request(conn, "search", "问过")
     candidate_id = ledger.create_active(
         conn,
@@ -347,6 +349,60 @@ def test_accept_and_the_two_refusals(conn):
     # 不存在的候选
     with pytest.raises(advisor.CandidateNotFound):
         advisor.decide_candidate(conn, 999, accept=True)
+
+
+def make_candidate(conn, title: str) -> int:
+    request_id = advisor.record_request(conn, "search", "问过")
+    return ledger.create_active(
+        conn,
+        "candidate",
+        {"request_id": request_id, "title": title, "why": "w", "depth_target": "够用", "rank": 1},
+        actor="agent",
+        reason="测试用",
+    )
+
+
+# ---------- 采纳自动落阶段（2026-09-17 用户拍板） ----------
+
+def test_accept_creates_a_stage_in_the_latest_active_plan(conn):
+    ledger.create_active(conn, "plan", {"goal": "旧计划"}, actor="user")
+    latest_plan = ledger.create_active(conn, "plan", {"goal": "最新计划"}, actor="user")
+    candidate_id = make_candidate(conn, "学 HTTP")
+
+    result = main.post_candidate_verdict(candidate_id, VerdictIn(accept=True), conn)
+
+    assert result["status"] == "accepted"
+    assert result["plan_id"] == latest_plan
+    node = plan.get_node(conn, result["node_id"])
+    assert node["level"] == "stage" and node["title"] == "学 HTTP"
+    assert int(node["plan_id"]) == latest_plan
+    # 节点自己走台账留痕：一条 create 事件，紧随候选的 accepted 之后
+    events = ledger.history(conn, "plan_node", result["node_id"])
+    assert [event["change_type"] for event in events] == ["create"]
+
+
+def test_accept_without_any_active_plan_conflicts_and_keeps_candidate_proposed(conn):
+    candidate_id = make_candidate(conn, "学 HTTP")
+
+    with pytest.raises(advisor.CandidateConflict):
+        advisor.decide_candidate(conn, candidate_id, accept=True)
+
+    row = conn.execute("SELECT status FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
+    assert row["status"] == "proposed"  # 没动它，建完计划可重试
+
+
+def test_accept_with_same_title_open_stage_conflicts_and_keeps_candidate_proposed(conn):
+    plan_id = ledger.create_active(conn, "plan", {"goal": "计划"}, actor="user")
+    plan.add_node(conn, plan_id, "stage", "学 HTTP")
+    candidate_id = make_candidate(conn, "学 HTTP")
+
+    with pytest.raises(advisor.CandidateConflict):
+        advisor.decide_candidate(conn, candidate_id, accept=True)
+
+    row = conn.execute("SELECT status FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
+    assert row["status"] == "proposed"
+    stages = plan.get_stages(conn, plan_id)
+    assert len(stages) == 1  # 没有第二条同名阶段被建出来
 
 
 def test_list_candidates_defaults_to_the_latest_search(conn):

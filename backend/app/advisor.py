@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import ledger, llm
+from . import ledger, llm, plan
 from .db import now_iso
 from .providers import find
 from .providers.find import Brief
@@ -38,7 +38,8 @@ class CandidateNotFound(AdvisorError):
 
 
 class CandidateConflict(AdvisorError):
-    """候选已经裁定过 → 接口层翻成 409（与现状冲突，不是参数写错）。"""
+    """候选已裁定过，或采纳的前提不满足（没有 active 计划 / 有同名未收尾阶段）
+    → 接口层翻成 409（与现状冲突，不是参数写错）。"""
 
 
 # 记在 llm_call.task 里的任务名，和 connectivity_test 之类区分开
@@ -637,6 +638,12 @@ def decide_candidate(
     与提案裁定同一条口径（SPEC 第 18 节第 22 条）：候选的「不再算数」由自己的业务终态
     表达（`accepted` / `rejected`），不动台账的生命周期列。否决必须写理由——它同时进
     `reject_reason` 列与台账流水，下次「找」把标题当禁区用。
+
+    采纳（2026-09-17 用户拍板）不再只记状态：候选是一条学习方向，自动落成**最新 active
+    计划**里的一个阶段（节点两级里阶段=一段有产出的方向，检查点=周打卡，候选对应前者）。
+    台账每个操作各自提交、没有请求级事务，所以「计划存在 / 无同名未收尾阶段」都**预检
+    在改候选状态之前**——失败时候选保持 proposed 可重试，绝不留下「已采纳却没建阶段」
+    的半截状态。
     """
     row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
     if row is None:
@@ -650,6 +657,18 @@ def decide_candidate(
     if not accept and not str(reason or "").strip():
         raise AdvisorError("否决必须写明理由——它会被当成禁区，下次「找」不再推荐它")
 
+    plan_id: int | None = None
+    if accept:
+        target_plan = plan.resolve_plan(conn, None)
+        if target_plan is None:
+            raise CandidateConflict("还没有 active 计划，采纳后阶段无处可落——先建一个计划再采纳")
+        plan_id = int(target_plan["id"])
+        try:
+            # add_node 内部还会再查一次重名；这里提前查是为了把失败挡在改状态之前
+            plan.assert_no_open_duplicate(conn, plan_id, "stage", str(row["title"]))
+        except plan.DuplicateNode as error:
+            raise CandidateConflict(str(error)) from error
+
     ledger.set_status(
         conn,
         "candidate",
@@ -659,4 +678,15 @@ def decide_candidate(
         reason=None if reason is None else reason.strip(),
         extra={"reject_reason": reason.strip()} if not accept else None,
     )
-    return {"id": candidate_id, "status": target, "reject_reason": None if accept else reason}
+
+    node_id: int | None = None
+    if accept:
+        node_id = plan.add_node(conn, int(plan_id), "stage", str(row["title"]), actor="user")
+
+    return {
+        "id": candidate_id,
+        "status": target,
+        "reject_reason": None if accept else reason,
+        "plan_id": plan_id,
+        "node_id": node_id,
+    }
