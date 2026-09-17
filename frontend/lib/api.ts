@@ -641,3 +641,94 @@ export type LlmCalls = {
 export async function getLlmCalls(limit = 50): Promise<LlmCalls> {
   return request<LlmCalls>(`/api/llm-calls?limit=${limit}`);
 }
+
+// ---------- 待裁定提案（T14） ----------
+
+/** `stage_advance` 的 payload：阶段收尾后的「要不要往前走」。 */
+export type StageAdvancePayload = {
+  plan_id: number;
+  stage_id: number;
+  stage_title: string;
+  /** null = 后面没有更多阶段了；批准这类提案就是把那个计划收尾。 */
+  next_stage_id: number | null;
+  next_stage_title: string | null;
+  settled?: number;
+  done?: number;
+  skipped?: number;
+  /** 提案当时问你的那句话（与 `reason` 同一句）。 */
+  question?: string;
+};
+
+/** 重排提案给的一个出路（减量 / 顺延 / 换交付物）。 */
+export type ReplanOption = { kind: string; label: string; detail: string };
+
+/** `plan_replan` 的 payload：落后、或整周没报告时的重排建议。 */
+export type PlanReplanPayload = {
+  week: string;
+  plan_id: number;
+  stage_id: number | null;
+  stage_title: string | null;
+  why: string;
+  lag_days: number;
+  options: ReplanOption[];
+};
+
+/** `material_judgment` 的 payload：一次四问判断的结论。 */
+export type MaterialJudgmentPayload = {
+  source_text: string;
+  learning_request_id: number;
+  judgment: Judgment;
+  profile_basis: ProfileBasis;
+};
+
+/**
+ * 一条提案。`payload` 的形状随 `kind` 变——页面里按 kind 转成上面三个类型之一
+ * （`profile_change` 还没有生产者，没有定型的 payload 形状）。
+ */
+export type Proposal = {
+  id: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  /** 提出时的那句话（谁提的、问的是什么）。 */
+  reason: string | null;
+  created_at: string;
+  decided_at: string | null;
+};
+
+/** 取待裁定提案，按提出顺序排；`kind` 传了就只取那一类。 */
+export async function listProposals(kind?: string): Promise<Proposal[]> {
+  const query = kind === undefined ? "" : `?kind=${kind}`;
+  const data = await request<{ proposals: Proposal[] }>(`/api/proposals${query}`);
+  return data.proposals;
+}
+
+/** 裁定的回执。`effect` 说明这次到底动了什么。 */
+export type ProposalDecision = {
+  id: number;
+  kind: string;
+  status: string;
+  /** `plan_closed` 是唯一的结构性动作；`replan_recorded` 只记下你选的方向；其余纯记账。 */
+  effect: "plan_closed" | "replan_recorded" | "recorded_only";
+  option: string | null;
+};
+
+/**
+ * 批准 / 驳回一条提案。
+ *
+ * 驳回**必须写理由**（缺理由后端回 400）；批准 `plan_replan` 必须从提案给的
+ * 三个方向里选一个（`option`）。已裁定过回 409、不存在回 404。
+ */
+export async function decideProposal(
+  proposalId: number,
+  input: { approved: boolean; reason?: string; option?: string },
+): Promise<ProposalDecision> {
+  return request<ProposalDecision>(`/api/proposals/${proposalId}/decide`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      approved: input.approved,
+      reason: input.reason ?? null,
+      option: input.option ?? null,
+    }),
+  });
+}

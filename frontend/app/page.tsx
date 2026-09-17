@@ -35,11 +35,13 @@ export default function Home() {
         {" · "}
         <Link href="/report">提交报告</Link>
         {" · "}
+        <Link href="/candidates">候选清单（学什么方向）</Link>
+        {" · "}
+        <Link href="/proposals">待裁定提案（判一份资料）</Link>
+        {" · "}
         <Link href="/providers">LLM 提供商</Link>
         {" · "}
         <Link href="/profile">长期档案</Link>
-        {" · "}
-        <Link href="/ask">问一句</Link>
       </p>
 
       {error !== null && (
