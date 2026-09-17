@@ -168,6 +168,21 @@ CREATE TABLE IF NOT EXISTS task_model_map (
   updated_at  TEXT
 );
 
+-- ========== 对话式规划（SPEC 决策 36） ==========
+
+-- 采纳一条候选之后、生成蓝图之前的那段对话。**追加式**：一行一句话，不写台账
+-- （同 learning_request 的先例——它记的是「我说过什么」，不是有状态的对象）。
+-- 每行的归属同时记住 plan_id 与 candidate_id：这段对话是「围绕这条候选、进这个计划」的。
+CREATE TABLE IF NOT EXISTS plan_chat (
+  id           INTEGER PRIMARY KEY,
+  plan_id      INTEGER NOT NULL,
+  candidate_id INTEGER NOT NULL,
+  role         TEXT    NOT NULL,   -- user / assistant
+  content      TEXT    NOT NULL,   -- 用户原话；助手那侧存它输出的 JSON 原文
+  created_at   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_chat_thread ON plan_chat (candidate_id, plan_id, id);
+
 -- 交付物提交：阶段上的独立动作（决策 32）。每次提交落一行——重提交 = 新行，
 -- 旧值天然留痕；「当前交付物」= 最新那一行。不进 report 表：报告说的是
 -- 「这一周怎么样」，交付物说的是「这个阶段交出了什么」，两件事。

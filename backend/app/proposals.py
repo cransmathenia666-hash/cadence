@@ -12,6 +12,9 @@
   计划仍由你手工改；界面会把该方向的原文摆出来照着改。
 - `material_judgment`（`advisor.py` 产）：四问判断的结论。批准只记账——它回答的是
   「这份资料值不值得学」，不是新方向；落新方向由**候选采纳**那条路负责。
+- `plan_blueprint`（`blueprint.py` 产，SPEC 决策 36）：沿对话出的**一棵树**（阶段 → 任务）。
+  批准 = **按勾选建树**：`selected` 给的是勾中的阶段 / 任务下标，没勾的部分直接丢弃
+  （蓝图是版本化的，想要可以再出一版）；不勾（`selected` 空）= 整份采纳。
 - `profile_change`：还没有生产者（未来的档案提炼 agent 路线会产，见 SPEC 第 17 节第 3 条），
   批准同样只记账；等它真有了生产者，再来这一步定义「批准即写档案」的形状。
 
@@ -25,7 +28,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import ledger, plan
+from . import blueprint, ledger, plan
 from .db import now_iso
 
 
@@ -111,11 +114,14 @@ def decide(
     approved: bool,
     reason: str | None = None,
     option: str | None = None,
+    selected: list[str] | None = None,
 ) -> dict[str, Any]:
-    """裁定一条提案：批准（可选带方向）或驳回（必写理由）。
+    """裁定一条提案：批准（可选带方向 / 勾选）或驳回（必写理由）。
 
     全部前提先验完再动手：台账每个操作各自提交、没有请求级事务，
     验不过就一条都不写——提案保持 `pending`，你处理完可以再裁一次。
+    蓝图那条路的「验」包括**建树前的查重**（`blueprint.resolve_build` 是只读的），
+    所以这里先把要建的节点解析好，再改提案状态，最后才动手建。
     """
     row = _require_pending(conn, proposal_id)
     kind = str(row["kind"])
@@ -135,6 +141,11 @@ def decide(
             raise ProposalConflict("这个计划已经收尾了，不必再裁一次")
         closing_plan_id = int(raw_plan_id)
 
+    # 蓝图：先只读地解析出要建哪些节点（查完重名），建的动作留到状态改完之后
+    builds: list[Any] = []
+    if approved and kind == blueprint.BLUEPRINT_KIND:
+        builds = blueprint.resolve_build(conn, payload, selected)
+
     chosen: str | None = None
     if approved and kind == "plan_replan":
         chosen = str(option or "").strip()
@@ -153,6 +164,10 @@ def decide(
             base = f"批准：进入下一阶段「{payload.get('next_stage_title')}」"
         elif closing_plan_id is not None:
             base = "批准：收尾这个计划"
+        elif kind == blueprint.BLUEPRINT_KIND:
+            task_count = sum(len(build.tasks) for build in builds)
+            new_stages = sum(1 for build in builds if build.reuse_id is None)
+            base = f"批准：按勾选建树（{new_stages} 个新阶段、{task_count} 件任务）"
         else:
             base = _APPROVE_REASONS.get(kind, f"批准：{kind}")
     else:
@@ -169,6 +184,7 @@ def decide(
     )
 
     effect = "recorded_only"
+    built: dict[str, Any] | None = None
     if approved and closing_plan_id is not None:
         ledger.set_status(
             conn,
@@ -181,6 +197,9 @@ def decide(
         effect = "plan_closed"
     elif approved and kind == "plan_replan":
         effect = "replan_recorded"
+    elif approved and kind == blueprint.BLUEPRINT_KIND:
+        built = blueprint.apply_build(conn, int(payload.get("plan_id") or 0), builds)
+        effect = "blueprint_built"
 
     return {
         "id": proposal_id,
@@ -188,4 +207,5 @@ def decide(
         "status": "accepted" if approved else "rejected",
         "effect": effect,
         "option": chosen if approved else None,
+        "built": built,
     }

@@ -23,7 +23,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import advisor, config, db, ledger, llm, plan, proposals
+from . import advisor, blueprint, config, db, ledger, llm, plan, proposals
 
 app = FastAPI(
     title="cadence",
@@ -628,6 +628,14 @@ class ProposalDecideIn(BaseModel):
     approved: bool = Field(description="true = 批准（可能带副作用），false = 驳回")
     reason: str | None = Field(default=None, description="驳回必填；批准时可选，都进台账")
     option: str | None = Field(default=None, description="批准 plan_replan 时必填：选中的那个方向")
+    selected: list[str] | None = Field(
+        default=None,
+        description=(
+            "批准 plan_blueprint 时用：勾中的阶段 / 任务下标，"
+            "形如 [\"0\", \"1.2\"]（阶段整段写 \"下标\"，单个任务写 \"阶段下标.任务下标\"，从 0 起）。"
+            "没勾的部分直接丢弃；不传 = 整份采纳"
+        ),
+    )
 
 
 @app.get("/api/proposals")
@@ -643,9 +651,10 @@ def post_proposal_decide(
 ) -> dict:
     """批准 / 驳回一条提案。
 
-    批准不必都改东西：`effect` 字段说明这一次到底动了什么——`plan_closed` 是唯一
-    的结构性动作（「后面没有更多阶段」的推进提案获准 = 计划收尾），`replan_recorded`
-    只记下你选的重排方向，`recorded_only` 就是纯记账。驳回只留痕，不改任何业务数据。
+    批准不必都改东西：`effect` 字段说明这一次到底动了什么——`blueprint_built` 是
+    **按勾选把树建进计划**（阶段 / 任务，`built` 里列出建了哪些），`plan_closed` 是
+    「后面没有更多阶段」的推进提案获准 = 计划收尾，`replan_recorded` 只记下你选的重排方向，
+    `recorded_only` 就是纯记账。驳回只留痕，不改任何业务数据。
     """
     try:
         return proposals.decide(
@@ -654,12 +663,109 @@ def post_proposal_decide(
             approved=payload.approved,
             reason=payload.reason,
             option=payload.option,
+            selected=payload.selected,
         )
     except proposals.ProposalNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except blueprint.BlueprintNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
     except proposals.ProposalConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    except proposals.ProposalError as error:
+    except blueprint.BlueprintConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (proposals.ProposalError, blueprint.BlueprintError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+# ---------- 对话式规划（T26：SPEC 决策 36） ----------
+#
+# 采纳一条候选之后、生成蓝图之前的那段对话。三条路由：看历史 / 聊一轮 / 出方案。
+# 「采纳之后」是硬前提——没采纳就来聊会被回 409（见 blueprint._accepted_candidate）。
+#
+# 状态码口径同其它链路：不存在 404、与现状冲突 409（没采纳 / 计划定不下来 / 轮数到顶 /
+# 计划已收尾）、业务规则拒绝 400（模型输出不合格、档案空着）。
+
+
+class PlanChatIn(BaseModel):
+    """聊一轮：我说一句话，模型回最多 3 个问题。"""
+
+    candidate_id: int = Field(description="聊的是哪条候选（必须是已采纳的）")
+    message: str = Field(min_length=1, description="你的这一句回答")
+    plan_id: int | None = Field(
+        default=None,
+        description="这条候选没有计划归属（「新方向」）时用它指明落在哪个计划",
+    )
+
+
+class PlanBlueprintIn(BaseModel):
+    """出方案：把上面聊清的意向落成一条 `pending` 蓝图提案。"""
+
+    candidate_id: int
+    plan_id: int | None = Field(default=None, description="同 `PlanChatIn.plan_id`")
+
+
+@app.get("/api/plan-chat")
+def get_plan_chat(
+    candidate_id: int,
+    plan_id: int | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict:
+    """看这段对话：历史消息 + 聊了几轮 + 能不能出方案 + 有没有待裁定蓝图。
+
+    追问的边界：`can_generate` 为 false 表示还没聊过——决策 36 要求先问清意向再出树。
+    """
+    try:
+        return blueprint.view(conn, candidate_id, plan_id)
+    except blueprint.BlueprintNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except blueprint.BlueprintConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except blueprint.BlueprintError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan-chat", status_code=201)
+def post_plan_chat(payload: PlanChatIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """聊一轮：**每轮 1 次调用、最多 6 轮**（决策 6 修订 / 决策 36）。
+
+    输出不合格时**不重试**（那一轮只给 1 次调用）：如实回 400，而你那句话已经留在
+    对话里了——再说一句就接着走。
+    """
+    try:
+        return blueprint.say(
+            conn, payload.candidate_id, payload.message, plan_id=payload.plan_id
+        )
+    except blueprint.BlueprintNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except blueprint.BlueprintConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except blueprint.BlueprintError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan-chat/blueprint", status_code=201)
+def post_plan_blueprint(
+    payload: PlanBlueprintIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """出方案：1 次调用（不合格带原因重试 1 次），落成一条 `pending` 蓝图提案。
+
+    **树 = 版本**：同一个计划同时只有一份待裁定蓝图，新的一版落库时把旧的标成
+    `superseded`（业务终态，不走台账的取代——决策 22 禁止对提案做生命周期操作）。
+    `superseded_ids` 里列出的就是被它顶掉的那一版。
+    """
+    try:
+        return blueprint.generate_blueprint(
+            conn, payload.candidate_id, plan_id=payload.plan_id
+        )
+    except blueprint.BlueprintNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except blueprint.BlueprintConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except blueprint.BlueprintError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except llm.LlmError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 

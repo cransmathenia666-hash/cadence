@@ -319,7 +319,7 @@ def _check(text: str, allowed_ids: set[int]) -> tuple[Judgment | None, str | Non
 
     刻意**不抛异常**：不合格的原因要能被拿回去喂给模型重试一次，抛异常就断了这条路。
     """
-    data = _extract_json(text)
+    data = extract_json(text)
     if data is None:
         return None, "输出不是合法的 JSON 对象"
 
@@ -359,11 +359,14 @@ def _answers(judgment: Judgment) -> list[Answer]:
     ]
 
 
-def _extract_json(text: str) -> dict[str, Any] | None:
+def extract_json(text: str) -> dict[str, Any] | None:
     """从模型输出里取出 JSON 对象。
 
     为什么容一手代码块：模型很爱把 JSON 包在 ```json ... ``` 里，加了这层壳不代表内容错，
     为这个就判不合格纯属浪费一次调用。取第一个 `{` 到最后一个 `}` 之间的内容。
+
+    公开（去掉前导下划线）是因为 `blueprint.py` 的对话与蓝图要用**同一套**取法：
+    这条容错口径不该两个模块各写一遍。
     """
     raw = text.strip()
     if raw.startswith("```"):
@@ -696,7 +699,7 @@ def _check_find(
 
     同 `_check`，刻意不抛异常——不合格的原因要能喂回模型重试一次。
     """
-    data = _extract_json(text)
+    data = extract_json(text)
     if data is None:
         return None, "输出不是合法的 JSON 对象"
 
@@ -897,7 +900,7 @@ def decide_candidate(
 
     target_plan_id: int | None = None
     if accept:
-        target_plan_id = _landing_plan(conn, row, plan_id)
+        target_plan_id = landing_plan(conn, row, plan_id)
         try:
             # add_node 内部还会再查一次重名；这里提前查是为了把失败挡在改状态之前
             plan.assert_no_open_duplicate(conn, target_plan_id, "stage", str(row["title"]))
@@ -927,13 +930,16 @@ def decide_candidate(
     }
 
 
-def _landing_plan(
+def landing_plan(
     conn: sqlite3.Connection, candidate: sqlite3.Row, explicit_plan_id: int | None
 ) -> int:
-    """采纳该落进哪个计划（SPEC 决策 33 ②）。
+    """这条候选该落进哪个计划（SPEC 决策 33 ②）。
 
     顺序：候选自带的归属 > 调用方显式指定；两者都没有就报错（不许偷偷落最新）。
     显式指定与归属不一致也报错——免得候选被落到别的计划里去。
+
+    公开（去掉前导下划线）是因为 `blueprint.py` 的对话与蓝图要用**同一套**归属校验：
+    采纳落哪个计划、这段对话属于哪个计划，必须是同一个答案，否则蓝图会建到别的计划里。
     """
     request_row = conn.execute(
         "SELECT plan_id FROM learning_request WHERE id = ?", (candidate["request_id"],)
