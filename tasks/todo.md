@@ -4,6 +4,8 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.7 变更（2026-09-17）**：新增 P3.5 一节（排在 P4 之前）——T23 任务层与交付物验收（三级结构，**取代 T4 定下的旧完成判定**：阶段完成＝周检查点全部收尾 → 任务全打勾/跳过 + 交付物已提交）、T24 多计划与严格分开、T25 「找」的加宽、T26 对话式规划与蓝图。对应 SPEC 决策 30–36。
+
 **v0.6 变更**：P3 补 T22（档案录入）——档案此前只有读、没有写入口，四问缺判据；用户 2026-09-16 点名要做，任务补记进清单。
 
 **v0.5 变更**：P1 补充 T20（台账语义归属，方案 B）与 T21（建节点入参校验），均为已完成的后端修补。
@@ -108,6 +110,28 @@
   - Acceptance：`POST /api/profile`（新增）、`PUT /api/profile/{id}`（取代，旧值留痕）、`POST /api/profile/{id}/void`（作废）三条写入口**全走台账**；`category` 只收 `advisor.PROFILE_CATEGORIES` 五个约定令牌；取代与作废必填理由；同类别允许多条并存但**一字不差的当前有效条目 409**（判重只看 active，作废后重填不挡）；前端 `/profile` 页能看五类缺口、补、改、作废
   - Verify：`pytest -q` 177 passed（含 17 条新单测）+ `tools\smoke_p1.py` 9 步全绿；前端 lint 与 tsc exit=0（浏览器走查归用户）
   - Files：`backend/app/main.py`、`backend/tests/test_profile_write.py`、`frontend/app/profile/page.tsx`、`frontend/lib/api.ts`
+
+## P3.5 结构与流程改造（2026-09-17 定，排在 P4 之前）
+
+- [ ] **T23 任务层与交付物验收（P1 骨架改造；取代 T4 的旧完成判定）**
+  - Acceptance：结构变三级（计划 → 阶段 → { 任务…、周打卡… }），`plan_node.level` 增 `task`（数据库无约束、不用迁移）；**阶段完成判定 = 全部任务打勾完成或跳过 且 交付物已提交**，满足后才自动产「进下一阶段」提案（文案「任务全部完成、交付物已提交」）；**没有任务的阶段**按「任务条件天然满足」只看交付物；任务一键打勾（走台账）、可跳过（跳过算完成、理由必填）、截止日期可选（带了才进落后量）；交付物提交是阶段上的独立动作（链接 + 一句话，可重新提交、旧值留痕，单独存 `deliverable_submission` 表）；**周打卡不再参与阶段完成判定**（退为周报 / 落后提醒 / P4 触达的节奏职能）；界面：计划表阶段下分两组（任务 / 周打卡）、任务行有打勾按钮、阶段上有「提交交付物」按钮与状态，`/new` 可建任务（选所属阶段）
+  - Verify：单测覆盖完成判定四组合（有/无任务 × 交付物已交/未交）、打勾与跳过路径、落后量只吃带日期的任务、交付物重提交留痕；`pytest -q` + `tools\smoke_p1.py`（动了契约与台账写入）；前端 lint 与 tsc exit=0（浏览器走查归用户）
+  - Files：`backend/sql/schema.sql`、`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/test_task_layer.py`、`frontend/components/plan-tree.tsx`、`frontend/app/new/page.tsx`、`frontend/lib/api.ts`
+
+- [ ] **T24 多计划与严格分开**
+  - Acceptance：按 SPEC 决策 33 四条落地——① 候选带计划归属（提问时选计划，或「新方向（不属于任何计划）」）；② 采纳落到候选归属计划，无归属时显式选「进哪个计划 / 新建一个」（**改掉「落最新计划」**）；③ `GET /api/plans` + 计划作废/收尾路由（台账对 plan 的 void/supersede 本就开放），默认只列进行中、作废进历史留理由；④ 界面加计划切换器（首页 / `/new` / `/candidates`）；`/report` 不动
+  - Verify：单测覆盖归属传递、无归属时的显式落点、作废后 `GET /api/plans` 不再列出；契约变更同步 SPEC 第 11 节；浏览器走查归用户
+  - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/app/advisor.py`、`backend/tests/test_plans.py`、`frontend/app/page.tsx`、`frontend/app/candidates/page.tsx`、`frontend/app/new/page.tsx`、`frontend/lib/api.ts`
+
+- [ ] **T25 「找」的加宽（独立小步，可插队提前）**
+  - Acceptance：按 SPEC 决策 35——① 反馈流水（否决理由、采纳/否决记录、每轮清单按时间）进 prompt；② 输出 schema 加可选「追问槽位」，追问必须说清缺哪类信息，否则判不合格（延续「依据不足」纪律）
+  - Verify：单测覆盖反馈流水组装与追问槽位的校验；`pytest -q`；真实模型走查归用户
+  - Files：`backend/app/advisor.py`、`backend/app/providers/find.py`、`backend/tests/test_candidates.py`
+
+- [ ] **T26 对话式规划与蓝图（含决策 6 修订）**
+  - Acceptance：按 SPEC 决策 36——采纳候选后触发多轮对话问清意向（形态「方案一」：保留候选层）；沿对话生成该方向的树（计划 / 阶段 / 任务）；**树 = 版本**（一个计划同时只有一份待裁定蓝图，新版落库时旧版自动取代、留痕）；裁定支持**勾选部分采纳**；决策 6 修订落进 SPEC。实现前先定两件技术细节：对话历史存哪、蓝图提案的 `kind` 与 payload 形状
+  - Verify：单测覆盖蓝图提案落库与裁定（勾选部分落库、未勾选部分的处理）、版本取代留痕；契约新增路由同步 SPEC 第 11 节；真实模型走查归用户
+  - Files：`backend/app/blueprint.py`（或并入 `advisor.py`）、`backend/app/main.py`、`backend/tests/test_blueprint.py`、`frontend/app/candidates/page.tsx`（或新页）、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 6）
 
 ## P4 触达兜底
 
