@@ -7,12 +7,17 @@ import {
   ApiError,
   createPlan,
   findCandidates,
+  generateBlueprint,
+  getPlanChat,
   getProfile,
   listCandidates,
   listPlans,
+  sayPlanChat,
   verdictCandidate,
   type CandidateList,
+  type ChatMessage,
   type FindResult,
+  type PlanChatView,
   type PlanSummary,
   type ProfileView,
 } from "@/lib/api";
@@ -23,8 +28,10 @@ import {
  * 与 `/ask` 时代那个临时入口的区别：
  * - **进来就有东西看**：挂载时用 `GET /api/candidates` 取最近一轮的候选（连你已经
  *   裁定过的也显示状态），不用重新问一次模型；重新问一次是「再要一轮」。
- * - 采纳 / 否决都在这里做完：采纳会在最新 active 计划里自动建一个同名阶段
+ * - 采纳 / 否决都在这里做完：采纳会在**候选自带的计划**里自动建一个同名阶段
  *   （后端的事），否决必须写理由——它成为下次的禁区。
+ * - 采纳之后能就地开**规划对话**（T26，SPEC 决策 36）：先把意向聊清楚，再让它出一版
+ *   蓝图（阶段 / 任务），蓝图去「待裁定提案」页勾选采纳。
  *
  * 取数、状态、错误在这里管；判定全在后端（SPEC 第 10 节：前端不做业务计算）。
  */
@@ -93,6 +100,192 @@ function messageOf(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback;
 }
 
+/** 助手那一侧存的是 JSON 原文——这里摊成人话显示（追问槽位同理）。 */
+function ChatMessageView({ item }: { item: ChatMessage }) {
+  if (item.role !== "assistant") {
+    return (
+      <p>
+        <strong>我：</strong>
+        {item.content}
+      </p>
+    );
+  }
+  let data: { questions?: string[]; ready?: boolean; note?: string } | null = null;
+  try {
+    data = JSON.parse(item.content);
+  } catch {
+    data = null; // 解析不了就原样显示，别让一条坏数据整页白掉
+  }
+  if (data === null || typeof data !== "object") {
+    return (
+      <p>
+        <strong>它：</strong>
+        {item.content}
+      </p>
+    );
+  }
+  return (
+    <p>
+      <strong>它：</strong>
+      {data.note}
+      {(data.questions ?? []).length > 0 && (
+        <ol>
+          {(data.questions ?? []).map((question, index) => (
+            <li key={index}>{question}</li>
+          ))}
+        </ol>
+      )}
+      {data.ready === true && <small>（它说信息够了，可以出方案）</small>}
+    </p>
+  );
+}
+
+/**
+ * 规划对话（T26）：聊清意向 → 出一版蓝图。
+ *
+ * 每一轮 1 次调用、整段上限 6 轮（SPEC 决策 6 修订 / 36）；出方案前至少要聊过一轮。
+ * 聊完就去「待裁定提案」页勾选采纳——蓝图不会自己建进计划。
+ */
+function ChatBox({
+  candidateId,
+  planId,
+  title,
+}: {
+  candidateId: number;
+  planId: number | null;
+  title: string;
+}) {
+  const [view, setView] = useState<PlanChatView | null>(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    getPlanChat(candidateId, planId)
+      .then(setView)
+      .catch((cause: unknown) => setError(messageOf(cause, "取这段对话时出了意外错误")));
+  }, [candidateId, planId]);
+
+  async function refresh() {
+    setView(await getPlanChat(candidateId, planId));
+  }
+
+  async function onSend(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const done = await sayPlanChat(candidateId, message, planId);
+      setMessage("");
+      await refresh();
+      setNotice(
+        `第 ${done.turns_used} / ${done.max_turns} 轮：` +
+          (done.reply.ready ? "它说信息够了，可以出方案。" : "它又问了几个问题，答完再发。"),
+      );
+    } catch (cause) {
+      setError(messageOf(cause, "这一轮没成功"));
+      await refresh().catch(() => undefined); // 你那句话后端已经记下了，刷新能看到
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onGenerate() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const created = await generateBlueprint(candidateId, planId);
+      await refresh();
+      setNotice(
+        `已出第 ${created.version} 版蓝图（提案 #${created.proposal_id}，` +
+          `${created.stages.length} 个阶段）；` +
+          (created.superseded_ids.length > 0
+            ? `顶掉了旧的 #${created.superseded_ids.join("、#")}。`
+            : "") +
+          "去「待裁定提案」页勾选采纳——不勾的部分直接丢弃。",
+      );
+    } catch (cause) {
+      setError(messageOf(cause, "出方案失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <p>
+        <strong>规划对话：{title}</strong>{" "}
+        <small>
+          （{view === null ? "…" : `已聊 ${view.turns_used} / ${view.max_turns} 轮`}
+          {planId === null && "；这条候选没有计划归属，先在计划表里给它建个计划"}
+          ）
+        </small>
+      </p>
+      <p>
+        <small>
+          先把意向聊清楚（能投入多少时间、先做哪块、想交出什么），聊够了让它出一版蓝图：
+          阶段 → 任务，带每个阶段的交付物。蓝图是**提案**，要在「待裁定提案」页勾选才会建进计划。
+        </small>
+      </p>
+
+      {(view?.messages ?? []).map((item, index) => (
+        <ChatMessageView key={index} item={item} />
+      ))}
+      {view !== null && view.messages.length === 0 && (
+        <p role="status">
+          <small>还没聊过。说一句你想怎么安排，它就会开始问。</small>
+        </p>
+      )}
+
+      <form onSubmit={onSend}>
+        <textarea
+          rows={2}
+          cols={60}
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          placeholder="例如：我每周大概能投入 6 小时，想先把接口写通，最后交一个能访问的小服务"
+          required
+        />
+        <br />
+        <button type="submit" disabled={busy || message.trim() === ""}>
+          {busy ? "正在说…" : "说这一句"}
+        </button>{" "}
+        <button
+          type="button"
+          onClick={onGenerate}
+          disabled={busy || view === null || !view.can_generate}
+          title={view !== null && !view.can_generate ? "先聊过一轮再出方案" : undefined}
+        >
+          够了，出方案
+        </button>
+      </form>
+
+      {view?.blueprint != null && (
+        <p>
+          <small>
+            这个计划当前有一版待裁定蓝图（提案 #{view.blueprint.id}）——
+            去<Link href="/proposals">待裁定提案</Link>页勾选。再出一次会顶掉它。
+          </small>
+        </p>
+      )}
+      {error !== null && (
+        <p role="alert">
+          <strong>对话失败：</strong>
+          {error}
+        </p>
+      )}
+      {notice !== null && (
+        <p role="status">
+          <small>{notice}</small>
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function CandidatesPage() {
   const [profile, setProfile] = useState<ProfileView | null>(null);
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -111,6 +304,10 @@ export default function CandidatesPage() {
   const [adoptingId, setAdoptingId] = useState<number | null>(null);
   const [adoptPlanId, setAdoptPlanId] = useState("");
   const [newPlanGoal, setNewPlanGoal] = useState("");
+  /** 采纳落到哪个计划，按候选 id 记：规划对话要知道聊的是哪个计划（决策 36）。 */
+  const [landingPlans, setLandingPlans] = useState<Record<number, number>>({});
+  /** 正在展开规划对话的那条候选；null = 都收着。 */
+  const [chattingId, setChattingId] = useState<number | null>(null);
 
   const [verdicting, setVerdicting] = useState(false);
   const [verdictError, setVerdictError] = useState<string | null>(null);
@@ -171,6 +368,10 @@ export default function CandidatesPage() {
     setVerdictError(null);
     try {
       const done = await verdictCandidate(candidateId, accept, reason, landingPlanId);
+      if (done.plan_id !== null) {
+        // 记下落点：规划对话要用它（「新方向」的候选在库里没有归属可查）
+        setLandingPlans((previous) => ({ ...previous, [candidateId]: done.plan_id as number }));
+      }
       setRows((previous) =>
         (previous ?? []).map((row) =>
           row.id === candidateId
@@ -205,6 +406,7 @@ export default function CandidatesPage() {
       const created = await createPlan(goal);
       setPlans(await listPlans());
       const done = await verdictCandidate(candidateId, true, undefined, created.id);
+      setLandingPlans((previous) => ({ ...previous, [candidateId]: created.id }));
       setRows((previous) =>
         (previous ?? []).map((row) => (row.id === candidateId ? { ...row, status: done.status } : row)),
       );
@@ -430,6 +632,26 @@ export default function CandidatesPage() {
                         </button>
                       )}
                     </p>
+                  )}
+
+                  {row.status === "accepted" && (
+                    <p>
+                      <button
+                        type="button"
+                        onClick={() => setChattingId(chattingId === row.id ? null : row.id)}
+                        disabled={verdicting}
+                      >
+                        {chattingId === row.id ? "收起规划对话" : "规划对话（聊清意向后出方案）"}
+                      </button>
+                    </p>
+                  )}
+
+                  {chattingId === row.id && (
+                    <ChatBox
+                      candidateId={row.id}
+                      planId={landingPlans[row.id] ?? row.planId}
+                      title={row.title}
+                    />
                   )}
 
                   {adoptingId === row.id && (

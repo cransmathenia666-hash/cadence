@@ -10,6 +10,7 @@ import {
   getProfile,
   listProposals,
   type AskResult,
+  type BlueprintPayload,
   type Judgment,
   type PlanReplanPayload,
   type ProfileView,
@@ -22,13 +23,15 @@ import {
  * T14：提案裁定页（`/ask` 页并入这里之后，它同时承担两件事）。
  *
  * 上半页是「判一个资料」：提交一份资料，模型给四问判断，结论落成一条待裁定提案。
- * 下半页是**待裁定提案**列表，按 `kind` 分流渲染四类：
+ * 下半页是**待裁定提案**列表，按 `kind` 分流渲染：
  *
  * - `material_judgment` 资料判断：四问答案 + 依据的档案 id；批准只记账（判断本身已是结论）。
  * - `stage_advance` 阶段推进：批准 = 进下一阶段；若后面没有更多阶段，批准 = **把计划收尾**
  *   （唯一会真的改结构的一种）。
  * - `plan_replan` 计划重排：三个出路选一个，批准后只记下方向——改节点字段的写入口还没有，
  *   界面把选中方向的原文摆出来，照着手工改。
+ * - `plan_blueprint` 计划蓝图（T26）：**按勾选建树**——勾中的阶段 / 任务才会进计划，
+ *   没勾的直接丢弃（树是版本化的，想要可以再出一版）。
  * - `profile_change` 档案变更：还没有生产者（未来的档案提炼会走这里），先按通用形态显示。
  *
  * 裁定全部走台账并留理由（SPEC 第 8 节：AI 只产出提案，写入必须经你裁定）。
@@ -45,6 +48,7 @@ const KIND_TITLES: Record<string, string> = {
   material_judgment: "资料判断",
   stage_advance: "阶段推进",
   plan_replan: "计划重排",
+  plan_blueprint: "计划蓝图",
   profile_change: "档案变更",
 };
 
@@ -73,6 +77,25 @@ function JudgmentView({ judgment }: { judgment: Judgment }) {
   );
 }
 
+/** 勾选的公共渲染：一条路径就是一段。`"2"` = 整段；`"2.1"` = 其中第 2 件任务。 */
+function blueprintPaths(payload: BlueprintPayload): string[] {
+  return (payload.stages ?? []).map((_, index) => String(index));
+}
+
+/**
+ * 这条蓝图当前勾了哪些。没有记录时默认**整份都要**——不勾就点批准等于全采纳
+ * （后端也是这个口径：不传 `selected` = 整份）。
+ */
+function selectionOf(
+  proposal: Proposal,
+  selections: Record<number, string[]>,
+): string[] {
+  const stored = selections[proposal.id];
+  if (stored !== undefined) return stored;
+  if (proposal.kind !== "plan_blueprint") return [];
+  return blueprintPaths(proposal.payload as unknown as BlueprintPayload);
+}
+
 export default function ProposalsPage() {
   const [profile, setProfile] = useState<ProfileView | null>(null);
 
@@ -90,6 +113,8 @@ export default function ProposalsPage() {
   /** 驳回理由与重排方向，都按提案 id 存。 */
   const [reasons, setReasons] = useState<Record<number, string>>({});
   const [options, setOptions] = useState<Record<number, string>>({});
+  /** 蓝图的勾选（T26），按提案 id 存；没有记录 = 整份都要（见 `selectionOf`）。 */
+  const [selections, setSelections] = useState<Record<number, string[]>>({});
   /** 正在填驳回理由的那条；null = 没人在填。 */
   const [rejectingId, setRejectingId] = useState<number | null>(null);
 
@@ -131,18 +156,25 @@ export default function ProposalsPage() {
     // 收尾回执要说清动的是哪个计划：先把这条提案的 plan_id 记下来（它马上会从列表消失）
     const target = (proposals ?? []).find((item) => item.id === proposalId);
     const planId = typeof target?.payload?.plan_id === "number" ? target.payload.plan_id : null;
+    const selected = target === undefined ? [] : selectionOf(target, selections);
     try {
       const done = await decideProposal(proposalId, {
         approved,
         reason: reasons[proposalId] ?? undefined,
         option,
+        // 蓝图：把这一版勾中的部分带过去（没勾的部分后端直接丢弃）
+        selected: target?.kind === "plan_blueprint" ? selected : undefined,
       });
       const text = approved
         ? done.effect === "plan_closed"
           ? `已批准：计划 #${planId} 收尾了——计划表里它不再算当前计划。`
-          : done.effect === "replan_recorded"
-            ? `已批准，记下你选的方向「${option}」——改节点字段的写入口还没有，照这条方向的原文手工改。`
-            : "已批准，只记账：这项不会改计划或档案。"
+          : done.effect === "blueprint_built"
+            ? `已批准：计划 #${done.built?.plan_id ?? planId} 里建了 ` +
+              `${done.built?.stages.length ?? 0} 个新阶段、${done.built?.tasks.length ?? 0} 件任务` +
+              `${done.built?.notes.length ? `。${done.built.notes.join("；")}` : "。"}`
+            : done.effect === "replan_recorded"
+              ? `已批准，记下你选的方向「${option}」——改节点字段的写入口还没有，照这条方向的原文手工改。`
+              : "已批准，只记账：这项不会改计划或档案。"
         : "已驳回，理由进了台账。";
       setNotes((previous) => [text, ...previous]);
       setProposals((previous) => (previous ?? []).filter((item) => item.id !== proposalId));
@@ -266,6 +298,8 @@ export default function ProposalsPage() {
                 option={options[proposal.id] ?? ""}
                 onReason={(value) => setReasons((p) => ({ ...p, [proposal.id]: value }))}
                 onOption={(value) => setOptions((p) => ({ ...p, [proposal.id]: value }))}
+                onSelection={(value) => setSelections((p) => ({ ...p, [proposal.id]: value }))}
+                selection={selectionOf(proposal, selections)}
                 onStartReject={() => setRejectingId(proposal.id)}
                 onCancelReject={() => setRejectingId(null)}
                 onApprove={() => onDecide(proposal.id, true, options[proposal.id])}
@@ -285,8 +319,10 @@ function ProposalCard({
   rejecting,
   reason,
   option,
+  selection,
   onReason,
   onOption,
+  onSelection,
   onStartReject,
   onCancelReject,
   onApprove,
@@ -297,14 +333,19 @@ function ProposalCard({
   rejecting: boolean;
   reason: string;
   option: string;
+  selection: string[];
   onReason: (value: string) => void;
   onOption: (value: string) => void;
+  onSelection: (value: string[]) => void;
   onStartReject: () => void;
   onCancelReject: () => void;
   onApprove: () => void;
   onReject: () => void;
 }) {
   const isReplan = proposal.kind === "plan_replan"; // 批准重排必须先选一个方向
+  const isBlueprint = proposal.kind === "plan_blueprint";
+  // 蓝图一个都没勾时批准会被后端拒（400）——索性在按钮上先拦住，并说清为什么
+  const nothingTicked = isBlueprint && selection.length === 0;
 
   return (
     <>
@@ -314,14 +355,26 @@ function ProposalCard({
       </p>
       {proposal.reason !== null && <p>{proposal.reason}</p>}
 
-      <ProposalBody proposal={proposal} option={option} onOption={onOption} />
+      <ProposalBody
+        proposal={proposal}
+        option={option}
+        onOption={onOption}
+        selection={selection}
+        onSelection={onSelection}
+      />
 
       <p>
         <button
           type="button"
           onClick={onApprove}
-          disabled={deciding || (isReplan && option === "")}
-          title={isReplan && option === "" ? "先选一个方向" : undefined}
+          disabled={deciding || (isReplan && option === "") || nothingTicked}
+          title={
+            isReplan && option === ""
+              ? "先选一个方向"
+              : nothingTicked
+                ? "至少要勾一个阶段或任务"
+                : undefined
+          }
         >
           批准
         </button>{" "}
@@ -361,10 +414,14 @@ function ProposalBody({
   proposal,
   option,
   onOption,
+  selection,
+  onSelection,
 }: {
   proposal: Proposal;
   option: string;
   onOption: (value: string) => void;
+  selection: string[];
+  onSelection: (value: string[]) => void;
 }) {
   if (proposal.kind === "material_judgment") {
     const payload = proposal.payload as unknown as MaterialJudgmentPayload;
@@ -439,6 +496,107 @@ function ProposalBody({
           <small>
             批准只记下这个方向——<strong>改节点字段的写入口还没有</strong>，
             计划要照上面这句话手工改。
+          </small>
+        </p>
+      </>
+    );
+  }
+
+  if (proposal.kind === "plan_blueprint") {
+    const payload = proposal.payload as unknown as BlueprintPayload;
+    const stages = payload.stages ?? [];
+    const whole = (index: number) => selection.includes(String(index));
+    const tickedTask = (index: number, taskIndex: number) =>
+      whole(index) || selection.includes(`${index}.${taskIndex}`);
+
+    /** 勾/取消一个阶段：勾 = 整段（丢掉它下面逐条勾的），取消 = 这一段全不要。 */
+    function toggleStage(index: number) {
+      if (whole(index)) {
+        onSelection(selection.filter((item) => item !== String(index)));
+        return;
+      }
+      onSelection([
+        ...selection.filter((item) => !item.startsWith(`${index}.`)),
+        String(index),
+      ]);
+    }
+
+    /** 勾/取消一件任务：整段被勾着时，先把它拆成逐条勾，再动这一条。 */
+    function toggleTask(index: number, taskIndex: number) {
+      const path = `${index}.${taskIndex}`;
+      if (whole(index)) {
+        const rest = stages[index].tasks
+          .map((_, other) => `${index}.${other}`)
+          .filter((other) => other !== path);
+        onSelection([...selection.filter((item) => item !== String(index)), ...rest]);
+        return;
+      }
+      onSelection(
+        selection.includes(path)
+          ? selection.filter((item) => item !== path)
+          : [...selection, path],
+      );
+    }
+
+    return (
+      <>
+        <p>
+          计划 #{payload.plan_id} 的这一版蓝图（
+          {stages.length} 个阶段，
+          {stages.reduce((total, item) => total + (item.tasks?.length ?? 0), 0)} 件任务
+          {payload.candidate_id !== undefined && `，出自候选 #${payload.candidate_id}`}）。
+          <br />
+          <small>
+            <strong>勾中的才会建进计划，没勾的直接丢弃</strong>——树是版本化的，
+            想要别的东西可以沿对话再出一版（新版会顶掉这一版）。
+          </small>
+        </p>
+        <p>
+          <small>目标：{payload.goal}</small>
+        </p>
+        <ol>
+          {stages.map((item, index) => (
+            <li key={`${item.title}-${index}`}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={whole(index)}
+                  onChange={() => toggleStage(index)}
+                />
+                <strong>{item.title}</strong>
+              </label>
+              {item.why !== "" && (
+                <>
+                  <br />
+                  <small>{item.why}</small>
+                </>
+              )}
+              <br />
+              <small>要交的东西：{item.deliverable}</small>
+              {item.tasks?.length > 0 && (
+                <ul>
+                  {item.tasks.map((task, taskIndex) => (
+                    <li key={`${task.title}-${taskIndex}`}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={tickedTask(index, taskIndex)}
+                          onChange={() => toggleTask(index, taskIndex)}
+                        />
+                        {task.title}
+                      </label>
+                      <small>{task.due_date === null ? "（没定日期）" : `（${task.due_date}）`}</small>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ol>
+        <p>
+          <small>
+            同名阶段不会重复建：采纳候选时已经建了同名阶段，任务会挂到它下面。
+            它「要交的东西」写不进去（改节点字段的写入口还没有），批准后会告诉你哪几条这样。
           </small>
         </p>
       </>

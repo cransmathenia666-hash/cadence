@@ -834,9 +834,19 @@ export type ProposalDecision = {
   id: number;
   kind: string;
   status: string;
-  /** `plan_closed` 是唯一的结构性动作；`replan_recorded` 只记下你选的方向；其余纯记账。 */
-  effect: "plan_closed" | "replan_recorded" | "recorded_only";
+  /**
+   * `blueprint_built` = 按勾选把树建进了计划（`built` 里列出建了哪些）；
+   * `plan_closed` = 计划收尾；`replan_recorded` 只记下你选的方向；其余纯记账。
+   */
+  effect: "blueprint_built" | "plan_closed" | "replan_recorded" | "recorded_only";
   option: string | null;
+  /** 只在批准蓝图时有值：这次真建了哪些节点，外加「没能写进去」那类实话。 */
+  built: {
+    plan_id: number;
+    stages: { id: number; title: string; deliverable: string | null }[];
+    tasks: { id: number; title: string; stage_id: number }[];
+    notes: string[];
+  } | null;
 };
 
 /**
@@ -844,10 +854,11 @@ export type ProposalDecision = {
  *
  * 驳回**必须写理由**（缺理由后端回 400）；批准 `plan_replan` 必须从提案给的
  * 三个方向里选一个（`option`）。已裁定过回 409、不存在回 404。
+ * 批准 `plan_blueprint` 时用 `selected` 给勾中的阶段 / 任务下标（见 `Selection`）。
  */
 export async function decideProposal(
   proposalId: number,
-  input: { approved: boolean; reason?: string; option?: string },
+  input: { approved: boolean; reason?: string; option?: string; selected?: string[] },
 ): Promise<ProposalDecision> {
   return request<ProposalDecision>(`/api/proposals/${proposalId}/decide`, {
     method: "POST",
@@ -856,6 +867,121 @@ export async function decideProposal(
       approved: input.approved,
       reason: input.reason ?? null,
       option: input.option ?? null,
+      selected: input.selected ?? null,
     }),
   });
 }
+
+// ---------- 对话式规划与蓝图（T26：SPEC 决策 36） ----------
+
+/** 蓝图里的一个任务。`due_date` 为空 = 没定日期（带了才进落后量）。 */
+export type BlueprintTask = {
+  title: string;
+  due_date: string | null;
+};
+
+/** 蓝图里的一个阶段：名字 + 可验收的交付物 + 为什么先做它 + 任务。 */
+export type BlueprintStage = {
+  title: string;
+  deliverable: string;
+  why: string;
+  tasks: BlueprintTask[];
+};
+
+/**
+ * 一棵蓝图的 payload（`proposal.kind === "plan_blueprint"` 时）。
+ *
+ * **树 = 版本**：同一计划同时只有一份待裁定蓝图，新版落库时旧的变成 `superseded`。
+ */
+export type BlueprintPayload = {
+  plan_id: number;
+  candidate_id: number;
+  goal: string;
+  stages: BlueprintStage[];
+};
+
+/** 对话里的一条消息。助手那侧 `content` 是它输出的 JSON 原文。 */
+export type ChatMessage = {
+  role: string;
+  content: string;
+  created_at: string;
+};
+
+export type PlanChatView = {
+  candidate_id: number;
+  /** 这段对话属于哪个计划；null = 还没定下来（「新方向」的候选，得先指明落点）。 */
+  plan_id: number | null;
+  messages: ChatMessage[];
+  turns_used: number;
+  max_turns: number;
+  /** 聊过至少一轮才能出方案（决策 36：不是一次性静默生成）。 */
+  can_generate: boolean;
+  /** 这个计划当前待裁定的蓝图（同一计划同时只有一份）。 */
+  blueprint: { id: number; created_at: string } | null;
+};
+
+/** 看这段对话（历史 + 聊了几轮 + 能不能出方案）。 */
+export async function getPlanChat(
+  candidateId: number,
+  planId?: number | null,
+): Promise<PlanChatView> {
+  const plan = planId === undefined || planId === null ? "" : `&plan_id=${planId}`;
+  return request<PlanChatView>(`/api/plan-chat?candidate_id=${candidateId}${plan}`);
+}
+
+/** 聊一轮的回执。`reply.question` 是模型这一轮问你的（最多 3 个）。 */
+export type PlanChatTurn = {
+  candidate_id: number;
+  plan_id: number;
+  reply: { questions: string[]; ready: boolean; note: string };
+  turns_used: number;
+  max_turns: number;
+  calls: number;
+};
+
+/** 聊一轮：每轮 1 次调用、整段上限 6 轮，输出不合格不重试（SPEC 决策 6 修订）。 */
+export async function sayPlanChat(
+  candidateId: number,
+  message: string,
+  planId?: number | null,
+): Promise<PlanChatTurn> {
+  return request<PlanChatTurn>("/api/plan-chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      candidate_id: candidateId,
+      message,
+      plan_id: planId ?? null,
+    }),
+  });
+}
+
+/** 出方案的回执。`superseded_ids` = 被这一版顶掉的旧蓝图。 */
+export type BlueprintCreated = {
+  proposal_id: number;
+  plan_id: number;
+  candidate_id: number;
+  version: number;
+  goal: string;
+  stages: BlueprintStage[];
+  superseded_ids: number[];
+  calls: number;
+};
+
+/** 沿对话出一版蓝图，落成一条待裁定提案。必须先聊过一轮。 */
+export async function generateBlueprint(
+  candidateId: number,
+  planId?: number | null,
+): Promise<BlueprintCreated> {
+  return request<BlueprintCreated>("/api/plan-chat/blueprint", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ candidate_id: candidateId, plan_id: planId ?? null }),
+  });
+}
+
+/**
+ * 勾选的样子：`"2"` = 第 3 个阶段整段；`"2.1"` = 第 3 个阶段里的第 2 个任务（下标从 0 起）。
+ * 一个都没勾（空数组）在后端会被拒——「整份都要」是不传这个参数。
+ */
+export type Selection = string[];
