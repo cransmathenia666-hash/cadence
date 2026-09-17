@@ -34,14 +34,19 @@ CREATE INDEX IF NOT EXISTS idx_ledger_entity ON ledger_event (entity_type, entit
 -- ========== 决策入口 ==========
 
 -- 每轮输入：search（不知道学什么）/ evaluate（判断某个资料值不值得学）
+-- plan_id（2026-09-17 T24 加）：这一轮针对哪个计划；为空 = 「新方向（不属于任何计划）」。
+-- 候选随请求继承这个归属，采纳时才知道该落进哪个计划。老库由 db.init 的加列迁移补齐。
 CREATE TABLE IF NOT EXISTS learning_request (
   id         INTEGER PRIMARY KEY,
   kind       TEXT    NOT NULL,
   raw_text   TEXT    NOT NULL,
+  plan_id    INTEGER,
   created_at TEXT    NOT NULL
 );
 
 -- 候选清单：每条都带初判（why / depth_target），审批结果留痕以便去重
+-- status：proposed / accepted / rejected / expired（过期 = 新一轮「找」落库时上一轮未裁定的自动过期；
+-- 过期 ≠ 否决——不进禁区，模型以后还能再推）
 CREATE TABLE IF NOT EXISTS candidate (
   id            INTEGER PRIMARY KEY,
   request_id    INTEGER NOT NULL,

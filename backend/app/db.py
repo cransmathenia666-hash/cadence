@@ -32,16 +32,36 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def init(db_path: Path | str | None = None) -> Path:
-    """建表。可重复执行——schema 里全部是 IF NOT EXISTS。"""
+    """建表 + 补齐后续加上的列。可重复执行。
+
+    表结构只有一处来源（schema.sql），但 `CREATE TABLE IF NOT EXISTS` 不会给**已存在**的
+    表补列——所以从 2026-09-17 起，往老表加列要走下面的 `_ADDED_COLUMNS`：缺了才补，
+    不删不改。新库由 schema.sql 直接建全，老库靠这一步追平，两边结果一致。
+    """
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(path)
     try:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        _add_missing_columns(conn)
         conn.commit()
     finally:
         conn.close()
     return path
+
+
+# (表, 列, 列定义)：往老表补列的清单。只允许「加列」，不做改名与删除。
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # 2026-09-17（T24）：一轮「找」属于哪个计划——候选随请求继承归属
+    ("learning_request", "plan_id", "INTEGER"),
+)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, column, definition in _ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 if __name__ == "__main__":

@@ -331,7 +331,7 @@ def test_reject_requires_reason_and_leaves_trace(conn):
 
 
 def test_accept_and_the_two_refusals(conn):
-    ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
+    plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
     request_id = advisor.record_request(conn, "search", "问过")
     candidate_id = ledger.create_active(
         conn,
@@ -341,7 +341,8 @@ def test_accept_and_the_two_refusals(conn):
         reason="测试用",
     )
 
-    assert advisor.decide_candidate(conn, candidate_id, accept=True)["status"] == "accepted"
+    # 「新方向」的候选没有计划归属，采纳时要显式指明落点（SPEC 决策 33 ②）
+    assert advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)["status"] == "accepted"
 
     # 已经裁定过的不能再改
     with pytest.raises(advisor.CandidateConflict):
@@ -351,8 +352,8 @@ def test_accept_and_the_two_refusals(conn):
         advisor.decide_candidate(conn, 999, accept=True)
 
 
-def make_candidate(conn, title: str) -> int:
-    request_id = advisor.record_request(conn, "search", "问过")
+def make_candidate(conn, title: str, plan_id: int | None = None) -> int:
+    request_id = advisor.record_request(conn, "search", "问过", plan_id)
     return ledger.create_active(
         conn,
         "candidate",
@@ -362,23 +363,57 @@ def make_candidate(conn, title: str) -> int:
     )
 
 
-# ---------- 采纳自动落阶段（2026-09-17 用户拍板） ----------
+# ---------- 采纳落点（2026-09-17 起：落候选归属计划；SPEC 决策 33 ②） ----------
 
-def test_accept_creates_a_stage_in_the_latest_active_plan(conn):
-    ledger.create_active(conn, "plan", {"goal": "旧计划"}, actor="user")
-    latest_plan = ledger.create_active(conn, "plan", {"goal": "最新计划"}, actor="user")
-    candidate_id = make_candidate(conn, "学 HTTP")
+def test_accept_lands_in_the_attributed_plan(conn):
+    attributed = ledger.create_active(conn, "plan", {"goal": "被指定的计划"}, actor="user")
+    ledger.create_active(conn, "plan", {"goal": "更新的计划"}, actor="user")  # 更新，但不该落它
+    candidate_id = make_candidate(conn, "学 HTTP", plan_id=attributed)
 
     result = main.post_candidate_verdict(candidate_id, VerdictIn(accept=True), conn)
 
     assert result["status"] == "accepted"
-    assert result["plan_id"] == latest_plan
+    assert result["plan_id"] == attributed
     node = plan.get_node(conn, result["node_id"])
     assert node["level"] == "stage" and node["title"] == "学 HTTP"
-    assert int(node["plan_id"]) == latest_plan
+    assert int(node["plan_id"]) == attributed
     # 节点自己走台账留痕：一条 create 事件，紧随候选的 accepted 之后
     events = ledger.history(conn, "plan_node", result["node_id"])
     assert [event["change_type"] for event in events] == ["create"]
+
+
+def test_accept_without_attribution_needs_an_explicit_plan(conn):
+    plan_id = ledger.create_active(conn, "plan", {"goal": "某计划"}, actor="user")
+    candidate_id = make_candidate(conn, "学 HTTP")  # 「新方向」：没有计划归属
+
+    with pytest.raises(advisor.CandidateConflict):
+        advisor.decide_candidate(conn, candidate_id, accept=True)  # 不指明就不许采纳
+
+    assert conn.execute(
+        "SELECT status FROM candidate WHERE id = ?", (candidate_id,)
+    ).fetchone()["status"] == "proposed"  # 没动它，可重试
+
+    assert advisor.decide_candidate(
+        conn, candidate_id, accept=True, plan_id=plan_id
+    )["plan_id"] == plan_id
+
+
+def test_accept_refuses_a_plan_that_contradicts_the_attribution(conn):
+    attributed = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    other = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+    candidate_id = make_candidate(conn, "学 HTTP", plan_id=attributed)
+
+    with pytest.raises(advisor.CandidateConflict):
+        advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=other)
+
+
+def test_accept_refuses_a_closed_plan(conn):
+    plan_id = ledger.create_active(conn, "plan", {"goal": "已收尾"}, actor="user")
+    plan.close_plan(conn, plan_id)
+    candidate_id = make_candidate(conn, "学 HTTP", plan_id=plan_id)
+
+    with pytest.raises(advisor.CandidateConflict):
+        advisor.decide_candidate(conn, candidate_id, accept=True)
 
 
 def test_accept_without_any_active_plan_conflicts_and_keeps_candidate_proposed(conn):
@@ -443,6 +478,7 @@ def test_list_candidates_without_any_search_is_empty_not_an_error(conn):
     assert advisor.list_candidates(conn) == {
         "request_id": None,
         "raw_text": None,
+        "plan_id": None,
         "candidates": [],
         "recommended": None,
     }

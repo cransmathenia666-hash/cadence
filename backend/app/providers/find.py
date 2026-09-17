@@ -32,6 +32,9 @@ class Brief:
     profile_lines: list[str]
     # 空着的类别（中文名），用于「靠它们的判断不许编」那段提示
     missing_labels: list[str]
+    # 这一轮针对的计划（目标 / 当前阶段 / 还开着的任务），已由 advisor 拼成现成行；
+    # 为空 = 「新方向（不属于任何计划）」（SPEC 决策 33 ①）
+    plan_context_lines: list[str]
     # 每档深度主要看哪几类档案，来自 advisor.JUDGE_SOURCES（与四问共用一套判据）
     depth_guide_lines: list[str]
     depth_targets: tuple[str, ...]
@@ -73,6 +76,14 @@ class RouteOnlySource:
             "【我的长期档案】方括号里是类别，开头的 #数字 是这条档案的 id（id 只能从这里选）：",
         ]
         lines += brief.profile_lines or ["（一条都没有）"]
+
+        if brief.plan_context_lines:
+            lines += [
+                "",
+                "【这一轮针对的计划】候选要服务这个计划；与它无关但更值得做的事，也可以给，"
+                "但在 `why` 里说清与这个计划的关系：",
+            ]
+            lines += [f"- {line}" for line in brief.plan_context_lines]
 
         if brief.missing_labels:
             lines += [

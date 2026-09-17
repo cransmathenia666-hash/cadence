@@ -308,6 +308,52 @@ def get_plan(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_
     return tree
 
 
+# ---------- 计划列表与生命周期（T24 多计划，SPEC 决策 33 ③） ----------
+#
+# 默认只列**进行中**的计划；收尾（closed）与作废（void）的进历史、要 `include_inactive`
+# 才看得到。作废是台账的 void（理由必填），收尾是业务终态 closed——两者都让计划
+# 从默认列表里消失，但历史都留着。
+
+class PlanCloseIn(BaseModel):
+    reason: str | None = Field(default=None, description="为什么收尾（可选，进台账）")
+
+
+class PlanVoidIn(BaseModel):
+    reason: str = Field(min_length=1, description="为什么作废——进台账，必填")
+
+
+@app.get("/api/plans")
+def get_plans(
+    include_inactive: bool = False, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """列出计划（切换器用）。默认只给进行中的；`include_inactive=true` 连收尾/作废的一起给。"""
+    return {"plans": plan.list_plans(conn, include_inactive=include_inactive)}
+
+
+@app.post("/api/plans/{plan_id}/close")
+def post_plan_close(
+    plan_id: int, payload: PlanCloseIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """收尾一个计划：做完了，进历史，不再出现在默认列表里。可重复调用。"""
+    try:
+        return plan.close_plan(conn, plan_id, payload.reason)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
+
+
+@app.post("/api/plans/{plan_id}/void")
+def post_plan_void(
+    plan_id: int, payload: PlanVoidIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """作废一个计划：不算数了（垃圾计划清场）。理由必填，进台账。"""
+    try:
+        return plan.void_plan(conn, plan_id, payload.reason)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
+    except ledger.LedgerError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 # ---------- LLM 提供商与调用记账（T10） ----------
 #
 # 铁律（SPEC 第 10 节第 4 条）：密钥**只写不读**——进来的 api_key 只往库里落，
@@ -434,6 +480,10 @@ class RequestIn(BaseModel):
     raw_text: str = Field(
         min_length=1, description="你的原话，例如「我看到一个 Rust 异步编程教程」或「我不知道该学什么」"
     )
+    plan_id: int | None = Field(
+        default=None,
+        description="这一轮针对哪个计划（search 用）；不传 = 「新方向（不属于任何计划）」",
+    )
 
 
 class VerdictIn(BaseModel):
@@ -441,10 +491,16 @@ class VerdictIn(BaseModel):
 
     否决必须写理由（业务层判，缺理由回 400）：它会同时进 `reject_reason` 列与台账流水，
     并成为下一次「找」的禁区——理由写得越具体，禁区越管得住。
+
+    采纳要能落到一个计划上（SPEC 决策 33 ②）：候选自带的计划归属优先；归属为空
+    （「新方向」）时用 `plan_id` 指明进哪个计划，两者都没有就报 400——不偷偷落最新。
     """
 
     accept: bool = Field(description="true = 采纳，false = 否决")
     reason: str | None = Field(default=None, description="否决必填：进台账、并成为下次的禁区")
+    plan_id: int | None = Field(
+        default=None, description="采纳时用：候选没有计划归属时，指明进哪个计划"
+    )
 
 
 @app.get("/api/profile")
@@ -465,17 +521,21 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
     - `evaluate`（B 入口）：记一行输入 → 跑四问（最多调 2 次模型）→ 落一条 `pending` 提案。
     - `search`（A 入口，T13）：记一行输入 → 生成 3–5 条带排序的候选（最多调 2 次模型）
       → 落成 `proposed` 候选，等你在界面上采纳 / 否决。
+
+    `plan_id` 是这一轮针对的计划（SPEC 决策 33 ①）：带上它，「找」会把该计划的当前阶段
+    当上下文；不传 = 「新方向（不属于任何计划）」。
     """
-    request_id = advisor.record_request(conn, payload.kind, payload.raw_text)
+    request_id = advisor.record_request(conn, payload.kind, payload.raw_text, payload.plan_id)
     try:
         if payload.kind == "search":
-            found = advisor.find_candidates(conn, payload.raw_text)
+            found = advisor.find_candidates(conn, payload.raw_text, plan_id=payload.plan_id)
             candidate_ids = advisor.propose_candidates(
                 conn, request_id=request_id, result=found
             )
             return {
                 "request_id": request_id,
                 "kind": "search",
+                "plan_id": found["plan_id"],
                 "candidate_ids": candidate_ids,
                 "candidates": found["candidates"],
                 "recommended_start": found["recommended_start"],
@@ -518,7 +578,7 @@ def get_candidates(
 
 
 @app.post("/api/candidates/{candidate_id}/verdict",
-          responses={409: {"description": "这条候选已经裁定过了，或采纳落不了阶段（没有 active 计划 / 有同名未收尾阶段）"}})
+          responses={409: {"description": "这条候选已经裁定过了，或采纳落不了阶段（没有可落的计划 / 有同名未收尾阶段）"}})
 def post_candidate_verdict(
     candidate_id: int, payload: VerdictIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
@@ -526,12 +586,16 @@ def post_candidate_verdict(
 
     否决留痕（`reject_reason` + 台账流水），并让它的标题成为下一次「找」的禁区——
     这是成功标准 2 后半句「已被否决的候选不再出现」的入口。
-    采纳（2026-09-17 起）会在最新 active 计划里自动建一个同名阶段，响应带
-    `plan_id` / `node_id`；落不了阶段时整个动作失败（409），候选保持 proposed 可重试。
+    采纳落进**候选自带的计划归属**（SPEC 决策 33 ②）；归属为空时用 `plan_id` 指明，
+    两者都没有回 409 并保持 proposed 可重试——不偷偷落最新。
     """
     try:
         return advisor.decide_candidate(
-            conn, candidate_id, accept=payload.accept, reason=payload.reason
+            conn,
+            candidate_id,
+            accept=payload.accept,
+            reason=payload.reason,
+            plan_id=payload.plan_id,
         )
     except advisor.CandidateNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

@@ -1,0 +1,314 @@
+"""多计划与严格分开（T24，SPEC 决策 33 + 34）。
+
+覆盖四组：
+① 计划列表：默认只给进行中的，收尾 / 作废要 `include_inactive` 才看得到；
+② 收尾与作废：收尾是业务终态 `closed`（可重复调用）、作废走台账 `void`（理由必填）；
+③ 候选的计划归属：「找」带计划上下文进 prompt、候选随请求继承归属、`GET /api/candidates` 带出来；
+④ 候选过期：新一轮落库把**同计划**上一轮未裁定的标为 `expired`，过期 ≠ 否决（不进禁区）。
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi import HTTPException
+
+from app import advisor, db, ledger, llm, main, plan, providers
+from app.providers import find
+
+
+class ScriptedTransport:
+    """按脚本依次返回的假上游（与 test_candidates 里同一套写法）。"""
+
+    def __init__(self, *texts: str) -> None:
+        self._texts = list(texts)
+        self.seen: list[dict] = []
+
+    def __call__(self, url: str, headers: dict, payload: dict):
+        self.seen.append({"url": url, "headers": headers, "payload": payload})
+        if not self._texts:
+            raise AssertionError("假上游被多调了一次：脚本里的回答已经用完")
+        return 200, {
+            "choices": [{"message": {"content": self._texts.pop(0)}}],
+            "usage": {"prompt_tokens": 21, "completion_tokens": 13},
+        }
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    path = tmp_path / "test.db"
+    db.init(path)
+    connection = db.connect(path)
+    yield connection
+    connection.close()
+
+
+def add_profile(conn, category: str, content: str) -> int:
+    return ledger.create_active(
+        conn, "profile_item", {"category": category, "content": content}, actor="user"
+    )
+
+
+def make_provider(conn) -> int:
+    """建一家假 provider 并设为默认——「找」要解析默认 provider 才会走到假上游。"""
+    provider_id = llm.create_provider(
+        conn,
+        name="假提供商",
+        base_url="http://127.0.0.1:9999/v1",
+        api_key="sk-fake-1234567890abcd",
+        default_model="fake-model",
+    )
+    llm.update_provider(conn, provider_id, set_as_default=True)
+    return provider_id
+
+
+def make_plan(conn, goal: str) -> int:
+    return ledger.create_active(conn, "plan", {"goal": goal}, actor="user")
+
+
+def found_json(*titles: str) -> str:
+    """一份合格的「找」输出（依据 id 由调用方保证存在）。"""
+    return json.dumps(
+        {
+            "candidates": [
+                {
+                    "title": title,
+                    "kind": "project",
+                    "why": "依据不足：现有档案里没有直接相关的条目",
+                    "depth_target": "够用",
+                    "profile_item_ids": [],
+                }
+                for title in titles
+            ],
+            "recommended_start": titles[0],
+            "start_reason": "先做这个",
+        },
+        ensure_ascii=False,
+    )
+
+
+# ---------- ① 计划列表 ----------
+
+def test_list_plans_defaults_to_active_only(conn):
+    first = make_plan(conn, "学英语")
+    second = make_plan(conn, "学技术")
+    closed = make_plan(conn, "做完了的")
+    plan.close_plan(conn, closed)
+
+    active_only = plan.list_plans(conn)
+    assert [item["id"] for item in active_only] == [first, second]
+    assert active_only[0]["goal"] == "学英语"
+    assert active_only[0]["stages"] == 0 and active_only[0]["current_stage"] is None
+
+    everything = plan.list_plans(conn, include_inactive=True)
+    assert [item["id"] for item in everything] == [first, second, closed]
+    assert everything[-1]["status"] == "closed"
+
+
+def test_list_plans_carries_stage_progress(conn):
+    plan_id = make_plan(conn, "学技术")
+    stage_id = plan.add_node(conn, plan_id, "stage", "阶段 1")
+    task_id = plan.add_node(conn, plan_id, "task", "任务 A", parent_id=stage_id)
+    plan.check_task(conn, task_id)
+
+    listed = plan.list_plans(conn)[0]
+
+    assert listed["current_stage"] == {"id": stage_id, "title": "阶段 1"}
+    assert listed["stages"] == 1 and listed["stages_finished"] == 0  # 还差交付物
+
+
+# ---------- ② 收尾与作废 ----------
+
+def test_close_plan_is_idempotent_and_leaves_trace(conn):
+    plan_id = make_plan(conn, "做完了的")
+
+    first = plan.close_plan(conn, plan_id, reason="都做完了")
+    second = plan.close_plan(conn, plan_id)
+
+    assert first["changed"] is True and second["changed"] is False
+    assert plan.resolve_plan(conn, plan_id)["status"] == "closed"
+    assert ledger.history(conn, "plan", plan_id)[-1]["reason"] == "都做完了"
+    assert plan.list_plans(conn) == []  # 默认列表里不再出现
+
+
+def test_void_plan_needs_reason_and_removes_it_from_the_list(conn):
+    plan_id = make_plan(conn, "试建的垃圾")
+
+    with pytest.raises(plan.PlanError):
+        plan.void_plan(conn, plan_id, "   ")
+
+    plan.void_plan(conn, plan_id, "试建，不要了")
+
+    assert plan.list_plans(conn) == []
+    assert plan.list_plans(conn, include_inactive=True)[0]["status"] == "void"
+    assert ledger.history(conn, "plan", plan_id)[-1]["reason"] == "试建，不要了"
+    assert plan.resolve_plan(conn) is None  # 最新 active 计划里不再有它
+
+
+def test_plan_routes_map_missing_to_404_and_rules_to_400(conn):
+    plan_id = make_plan(conn, "活的")
+
+    with pytest.raises(HTTPException) as not_found:
+        main.post_plan_void(999, main.PlanVoidIn(reason="x"), conn)
+    assert not_found.value.status_code == 404
+    with pytest.raises(HTTPException) as no_reason:
+        main.post_plan_void(plan_id, main.PlanVoidIn(reason="  "), conn)
+    assert no_reason.value.status_code == 400
+    assert main.post_plan_close(plan_id, main.PlanCloseIn(reason=None), conn)["status"] == "closed"
+    assert main.get_plans(False, conn) == {"plans": []}
+
+
+# ---------- ③ 候选的计划归属 ----------
+
+def test_find_prompt_carries_the_plan_context(conn):
+    make_provider(conn)
+    add_profile(conn, "long_axis", "走 Web 方向")
+    project = make_plan(conn, "学技术")
+    stage_id = plan.add_node(conn, project, "stage", "阶段 1")
+    plan.add_node(conn, project, "task", "看完第 3 章", parent_id=stage_id)
+    transport = ScriptedTransport(found_json("学 FastAPI", "学 SQL", "学 Linux"))
+
+    advisor.find_candidates(conn, "我不知道学什么", plan_id=project, transport=transport)
+
+    prompt = transport.seen[0]["payload"]["messages"][-1]["content"]
+    assert "【这一轮针对的计划】" in prompt
+    assert "学技术" in prompt and "阶段 1" in prompt and "看完第 3 章" in prompt
+
+
+def test_find_without_plan_has_no_plan_section(conn):
+    make_provider(conn)
+    add_profile(conn, "long_axis", "走 Web 方向")
+    make_plan(conn, "学技术")
+    transport = ScriptedTransport(found_json("学 FastAPI", "学 SQL", "学 Linux"))
+
+    result = advisor.find_candidates(conn, "我不知道学什么", transport=transport)
+
+    prompt = transport.seen[0]["payload"]["messages"][-1]["content"]
+    assert "【这一轮针对的计划】" not in prompt
+    assert result["plan_id"] is None
+
+
+def test_candidates_inherit_the_plan_of_their_round(conn):
+    make_provider(conn)
+    add_profile(conn, "long_axis", "走 Web 方向")
+    project = make_plan(conn, "学技术")
+    transport = ScriptedTransport(found_json("学 FastAPI", "学 SQL", "学 Linux"))
+    found = advisor.find_candidates(conn, "我不知道学什么", plan_id=project, transport=transport)
+    request_id = advisor.record_request(conn, "search", "我不知道学什么", project)
+    advisor.propose_candidates(conn, request_id=request_id, result=found)
+
+    listed = advisor.list_candidates(conn)
+
+    assert listed["plan_id"] == project
+    assert all(item["plan_id"] == project for item in listed["candidates"])
+
+
+def test_find_rejects_a_plan_that_does_not_exist(conn):
+    make_provider(conn)
+    add_profile(conn, "long_axis", "走 Web 方向")
+    with pytest.raises(advisor.AdvisorError):
+        advisor.find_candidates(conn, "问一句", plan_id=999, transport=ScriptedTransport())
+
+
+# ---------- ④ 候选过期（SPEC 决策 34） ----------
+
+def test_new_round_expires_previous_undecided_in_the_same_plan(conn):
+    first_plan = make_plan(conn, "学技术")
+    second_plan = make_plan(conn, "学英语")
+    first_request = advisor.record_request(conn, "search", "第一轮", first_plan)
+    first_ids = advisor.propose_candidates(
+        conn,
+        request_id=first_request,
+        result={
+            "candidates": [
+                {"title": "旧候选 A", "kind": "project", "why": "w", "depth_target": "够用"},
+                {"title": "旧候选 B", "kind": "project", "why": "w", "depth_target": "够用"},
+            ],
+            "recommended_start": "旧候选 A",
+            "start_reason": "先做这个",
+            "source": {"name": "route_only", "networked": False},
+        },
+    )
+    advisor.decide_candidate(conn, first_ids[1], accept=False, reason="和主线无关")
+
+    # 另一个计划的轮次不受影响
+    other_request = advisor.record_request(conn, "search", "英语那轮", second_plan)
+    advisor.propose_candidates(
+        conn,
+        request_id=other_request,
+        result={
+            "candidates": [
+                {"title": "英语候选", "kind": "course", "why": "w", "depth_target": "够用"}
+            ],
+            "recommended_start": "英语候选",
+            "start_reason": "先做这个",
+            "source": {"name": "route_only", "networked": False},
+        },
+    )
+
+    # 同一计划再来一轮：上一轮未裁定的过期，已驳回的不动，别的计划的不动
+    second_request = advisor.record_request(conn, "search", "第二轮", first_plan)
+    advisor.propose_candidates(
+        conn,
+        request_id=second_request,
+        result={
+            "candidates": [
+                {"title": "新候选", "kind": "project", "why": "w", "depth_target": "够用"}
+            ],
+            "recommended_start": "新候选",
+            "start_reason": "先做这个",
+            "source": {"name": "route_only", "networked": False},
+        },
+    )
+
+    statuses = {
+        int(row["id"]): row["status"]
+        for row in conn.execute("SELECT id, status FROM candidate").fetchall()
+    }
+    assert statuses[first_ids[0]] == "expired"
+    assert statuses[first_ids[1]] == "rejected"  # 裁定过的不动
+    row = conn.execute(
+        "SELECT c.status FROM candidate c JOIN learning_request r ON r.id = c.request_id WHERE r.plan_id = ?",
+        (second_plan,),
+    ).fetchone()
+    assert row["status"] == "proposed"  # 别的计划不受影响
+
+
+def test_expired_candidates_do_not_enter_the_forbidden_zone(conn):
+    project = make_plan(conn, "学技术")
+    first_request = advisor.record_request(conn, "search", "第一轮", project)
+    advisor.propose_candidates(
+        conn,
+        request_id=first_request,
+        result={
+            "candidates": [
+                {"title": "过期过的方向", "kind": "project", "why": "w", "depth_target": "够用"}
+            ],
+            "recommended_start": "过期过的方向",
+            "start_reason": "先做这个",
+            "source": {"name": "route_only", "networked": False},
+        },
+    )
+    second_request = advisor.record_request(conn, "search", "第二轮", project)
+    advisor.propose_candidates(
+        conn,
+        request_id=second_request,
+        result={
+            "candidates": [
+                {"title": "新候选", "kind": "project", "why": "w", "depth_target": "够用"}
+            ],
+            "recommended_start": "新候选",
+            "start_reason": "先做这个",
+            "source": {"name": "route_only", "networked": False},
+        },
+    )
+
+    # 过期 ≠ 否决：禁区里只该有 rejected 的标题
+    assert "过期过的方向" not in advisor._rejected_titles(conn)
+
+
+def test_plan_context_lines_are_empty_without_a_plan():
+    brief = advisor._brief("问一句", {"items": [], "missing_categories": []}, [], None)
+    assert brief.plan_context_lines == []
+    assert find.describe(providers.find.DEFAULT_SOURCE)["networked"] is False

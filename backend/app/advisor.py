@@ -127,18 +127,45 @@ def read_profile(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def record_request(conn: sqlite3.Connection, kind: str, raw_text: str) -> int:
+def record_request(
+    conn: sqlite3.Connection, kind: str, raw_text: str, plan_id: int | None = None
+) -> int:
     """把你的这一轮输入记一行。
+
+    `plan_id` = 这一轮针对哪个计划；为空表示「新方向（不属于任何计划）」（SPEC 决策 33 ①）。
+    候选随请求继承这个归属，采纳时才知道该落进哪个计划。
 
     这张表是**追加式日志**、不是带状态机业务表，所以不经台账（`ledger` 只管有状态的
     对象）；和 `llm.record_call` 直接插一行记账是同一个道理。
     """
     cursor = conn.execute(
-        "INSERT INTO learning_request (kind, raw_text, created_at) VALUES (?, ?, ?)",
-        (kind, raw_text, now_iso()),
+        "INSERT INTO learning_request (kind, raw_text, plan_id, created_at) VALUES (?, ?, ?, ?)",
+        (kind, raw_text, plan_id, now_iso()),
     )
     conn.commit()
     return int(cursor.lastrowid)
+
+
+def plan_context(conn: sqlite3.Connection, plan_id: int | None) -> dict[str, Any] | None:
+    """这一轮「找」针对的计划：目标 + 当前阶段 + 还开着的任务。
+
+    带上它，候选才贴得上手头的计划（SPEC 决策 33 ① 的后半句）；为空表示「新方向」。
+    """
+    if plan_id is None:
+        return None
+    row = plan.resolve_plan(conn, plan_id)
+    if row is None:
+        raise AdvisorError(f"计划 id={plan_id} 不存在")
+    stage = plan.current_stage(conn, int(row["id"]))
+    return {
+        "plan_id": int(row["id"]),
+        "goal": row["goal"],
+        "current_stage": None if stage is None else {
+            "title": stage["title"],
+            "deliverable": stage["deliverable"],
+            "open_tasks": plan.stage_completion(conn, int(stage["id"]))["open_titles"],
+        },
+    }
 
 
 # ---------- 主链路 ----------
@@ -419,18 +446,36 @@ def _rejected_titles(conn: sqlite3.Connection) -> list[str]:
     return [str(row["title"]) for row in rows]
 
 
-def _brief(raw_text: str, profile: dict[str, Any], banned: list[str]) -> Brief:
+def _brief(
+    raw_text: str,
+    profile: dict[str, Any],
+    banned: list[str],
+    context: dict[str, Any] | None = None,
+) -> Brief:
     """把档案与判据组装成来源层要的输入（见 `providers/find.Brief`）。
 
-    组装留在 advisor 而不是来源层：档案长什么样、哪些类别空着、每档深度看哪几类，
-    这些都是「判」的知识；来源只管怎么把它讲给模型听。
+    组装留在 advisor 而不是来源层：档案长什么样、哪些类别空着、每档深度看哪几类、
+    这一轮针对哪个计划，这些都是「判」的知识；来源只管怎么把它讲给模型听。
     """
+    plan_lines: list[str] = []
+    if context is not None:
+        plan_lines.append(f"计划目标：{context['goal']}")
+        stage = context["current_stage"]
+        if stage is None:
+            plan_lines.append("这个计划还没有进行中的阶段（都收尾了或还没建）。")
+        else:
+            plan_lines.append(f"当前阶段：{stage['title']}")
+            if stage["deliverable"]:
+                plan_lines.append(f"该阶段要交的东西：{stage['deliverable']}")
+            if stage["open_tasks"]:
+                plan_lines.append("这个阶段还开着的任务：" + "、".join(stage["open_tasks"]))
     return Brief(
         raw_text=raw_text,
         profile_lines=[
             f"#{item['id']} [{item['category']}] {item['content']}" for item in profile["items"]
         ],
         missing_labels=[PROFILE_CATEGORIES[key] for key in profile["missing_categories"]],
+        plan_context_lines=plan_lines,
         depth_guide_lines=[
             f"{QUESTIONS[key]}：主要看 "
             + "、".join(PROFILE_CATEGORIES[name] for name in JUDGE_SOURCES[key])
@@ -448,12 +493,16 @@ def find_candidates(
     conn: sqlite3.Connection,
     raw_text: str,
     *,
+    plan_id: int | None = None,
     provider_id: int | None = None,
     model: str | None = None,
     transport: llm.Transport | None = None,
     source: find.Source | None = None,
 ) -> dict[str, Any]:
     """跑一次「我不知道该学什么」。**只回结果，不落库**——落库由 `propose_candidates` 负责。
+
+    `plan_id` 传了就带该计划的上下文（目标 / 当前阶段 / 还开着的任务）进 prompt，
+    候选更贴手头的计划（SPEC 决策 33 ①）；不传 = 「新方向」。
 
     与 `judge` 同一条纪律：不合格带原因重试一次，第二次仍不合格就抛 `AdvisorError`，
     绝不把一份凑合的清单一分成三份端上来。
@@ -465,10 +514,11 @@ def find_candidates(
             "（至少「长期主线」与「短期目标」），再来问"
         )
 
+    context = plan_context(conn, plan_id)
     chosen_source = source or find.DEFAULT_SOURCE
     allowed_ids = {item["id"] for item in profile["items"]}
     banned = _rejected_titles(conn)
-    messages = chosen_source.build_messages(_brief(raw_text, profile, banned))
+    messages = chosen_source.build_messages(_brief(raw_text, profile, banned, context))
 
     operation = llm.Operation(conn, TASK_FIND, transport=transport)
     text = operation.chat(messages, provider_id=provider_id, model=model)
@@ -499,6 +549,7 @@ def find_candidates(
         raise AdvisorError("内部状态异常：验收通过却没有解析出候选清单")
 
     return {
+        "plan_id": None if context is None else context["plan_id"],
         "candidates": [item.model_dump() for item in found.candidates],
         "recommended_start": found.recommended_start,
         "start_reason": found.start_reason,
@@ -564,6 +615,35 @@ def _check_find(
     return found, None
 
 
+def expire_previous_candidates(
+    conn: sqlite3.Connection, *, keep_request_id: int, plan_id: int | None
+) -> list[int]:
+    """新一轮「找」落库时，把**同一计划**上一轮还没裁定的候选标记为过期（SPEC 决策 34）。
+
+    过期 ≠ 否决：`_rejected_titles` 只取 `rejected`，所以过期的不进禁区，模型以后还能再推。
+    不传计划归属的那些轮（「新方向」）自成一组，互相之间也这么办。
+    """
+    rows = conn.execute(
+        """SELECT c.id FROM candidate c
+           JOIN learning_request r ON r.id = c.request_id
+           WHERE c.status = 'proposed' AND c.request_id != ?
+             AND r.plan_id IS ?""",
+        (keep_request_id, plan_id),
+    ).fetchall()
+    expired: list[int] = []
+    for row in rows:
+        ledger.set_status(
+            conn,
+            "candidate",
+            int(row["id"]),
+            "expired",
+            actor="agent",
+            reason=f"新一轮「找」（请求 #{keep_request_id}）落库，上一轮未裁定的候选自动过期",
+        )
+        expired.append(int(row["id"]))
+    return expired
+
+
 def propose_candidates(
     conn: sqlite3.Connection, *, request_id: int, result: dict[str, Any]
 ) -> list[int]:
@@ -572,6 +652,9 @@ def propose_candidates(
     走 `ledger.create_active`（同 `propose`）：候选也是台账里登记过的东西，
     将来 `GET /api/candidates` 与裁定动作都靠这套口径找得到它。
     `rank` 就是列表顺序——顺序即优先级，前端不再自己排。
+
+    落库的最后一步是**让上一轮过期**（SPEC 决策 34）：同一计划下没裁定过的旧候选
+    不再挂着等你，但也不进禁区——过期只是「这轮不算数了」。
     """
     ids: list[int] = []
     for rank, candidate in enumerate(result["candidates"], start=1):
@@ -596,23 +679,39 @@ def propose_candidates(
                 reason=reason,
             )
         )
+    request_row = conn.execute(
+        "SELECT plan_id FROM learning_request WHERE id = ?", (request_id,)
+    ).fetchone()
+    expire_previous_candidates(
+        conn,
+        keep_request_id=request_id,
+        plan_id=None if request_row is None else request_row["plan_id"],
+    )
     return ids
 
 
 def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> dict[str, Any]:
     """取某轮「找」的候选清单。不传 `request_id` 就取最近一轮有候选的那次请求。
 
-    返回里**带上状态**（`proposed` / `accepted` / `rejected`）：界面要能把「你已经否掉过哪些」
-    也显示出来——去重是「不再推荐」，不是「假装它没发生过」。
+    返回里**带上状态**（`proposed` / `accepted` / `rejected` / `expired`）：界面要能把
+    「你已经否掉过哪些」「哪些被新一轮顶掉了」也显示出来——去重是「不再推荐」，
+    不是「假装它没发生过」。同时带上这一轮的计划归属（`plan_id`，为空 = 新方向）。
     """
     if request_id is None:
         latest = conn.execute("SELECT request_id FROM candidate ORDER BY id DESC LIMIT 1").fetchone()
         request_id = int(latest["request_id"]) if latest is not None else None
     if request_id is None:
-        return {"request_id": None, "raw_text": None, "candidates": [], "recommended": None}
+        return {
+            "request_id": None,
+            "raw_text": None,
+            "plan_id": None,
+            "candidates": [],
+            "recommended": None,
+        }
 
     request_row = conn.execute(
-        "SELECT id, kind, raw_text, created_at FROM learning_request WHERE id = ?", (request_id,)
+        "SELECT id, kind, raw_text, plan_id, created_at FROM learning_request WHERE id = ?",
+        (request_id,),
     ).fetchone()
     rows = conn.execute(
         "SELECT id, title, kind, why, depth_target, rank, is_recommended, status, reject_reason"
@@ -620,10 +719,14 @@ def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> 
         (request_id,),
     ).fetchall()
     candidates = [dict(row) for row in rows]
+    plan_id = None if request_row is None else request_row["plan_id"]
+    for item in candidates:
+        item["plan_id"] = plan_id  # 候选随请求继承归属（SPEC 决策 33 ①）
     recommended = next((item for item in candidates if item["is_recommended"]), None)
     return {
         "request_id": request_id,
         "raw_text": None if request_row is None else request_row["raw_text"],
+        "plan_id": plan_id,
         "created_at": None if request_row is None else request_row["created_at"],
         "candidates": candidates,
         "recommended": recommended,
@@ -631,7 +734,12 @@ def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> 
 
 
 def decide_candidate(
-    conn: sqlite3.Connection, candidate_id: int, *, accept: bool, reason: str | None = None
+    conn: sqlite3.Connection,
+    candidate_id: int,
+    *,
+    accept: bool,
+    reason: str | None = None,
+    plan_id: int | None = None,
 ) -> dict[str, Any]:
     """采纳或否决一条候选。
 
@@ -639,11 +747,11 @@ def decide_candidate(
     表达（`accepted` / `rejected`），不动台账的生命周期列。否决必须写理由——它同时进
     `reject_reason` 列与台账流水，下次「找」把标题当禁区用。
 
-    采纳（2026-09-17 用户拍板）不再只记状态：候选是一条学习方向，自动落成**最新 active
-    计划**里的一个阶段（节点两级里阶段=一段有产出的方向，检查点=周打卡，候选对应前者）。
-    台账每个操作各自提交、没有请求级事务，所以「计划存在 / 无同名未收尾阶段」都**预检
-    在改候选状态之前**——失败时候选保持 proposed 可重试，绝不留下「已采纳却没建阶段」
-    的半截状态。
+    采纳落点**显式化**（SPEC 决策 33 ②，2026-09-17）：候选是一条学习方向，采纳时落成
+    一个阶段——落进**候选自带的计划归属**；归属为空（「新方向」）时必须由 `plan_id`
+    指明进哪个计划，否则报错，绝不「偷偷落最新」。台账每个操作各自提交、没有请求级事务，
+    所以「计划存在 / 无同名未收尾阶段」都**预检在改候选状态之前**——失败时候选保持
+    proposed 可重试，绝不留下「已采纳却没建阶段」的半截状态。
     """
     row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
     if row is None:
@@ -657,15 +765,12 @@ def decide_candidate(
     if not accept and not str(reason or "").strip():
         raise AdvisorError("否决必须写明理由——它会被当成禁区，下次「找」不再推荐它")
 
-    plan_id: int | None = None
+    target_plan_id: int | None = None
     if accept:
-        target_plan = plan.resolve_plan(conn, None)
-        if target_plan is None:
-            raise CandidateConflict("还没有 active 计划，采纳后阶段无处可落——先建一个计划再采纳")
-        plan_id = int(target_plan["id"])
+        target_plan_id = _landing_plan(conn, row, plan_id)
         try:
             # add_node 内部还会再查一次重名；这里提前查是为了把失败挡在改状态之前
-            plan.assert_no_open_duplicate(conn, plan_id, "stage", str(row["title"]))
+            plan.assert_no_open_duplicate(conn, target_plan_id, "stage", str(row["title"]))
         except plan.DuplicateNode as error:
             raise CandidateConflict(str(error)) from error
 
@@ -681,12 +786,44 @@ def decide_candidate(
 
     node_id: int | None = None
     if accept:
-        node_id = plan.add_node(conn, int(plan_id), "stage", str(row["title"]), actor="user")
+        node_id = plan.add_node(conn, target_plan_id, "stage", str(row["title"]), actor="user")
 
     return {
         "id": candidate_id,
         "status": target,
         "reject_reason": None if accept else reason,
-        "plan_id": plan_id,
+        "plan_id": target_plan_id,
         "node_id": node_id,
     }
+
+
+def _landing_plan(
+    conn: sqlite3.Connection, candidate: sqlite3.Row, explicit_plan_id: int | None
+) -> int:
+    """采纳该落进哪个计划（SPEC 决策 33 ②）。
+
+    顺序：候选自带的归属 > 调用方显式指定；两者都没有就报错（不许偷偷落最新）。
+    显式指定与归属不一致也报错——免得候选被落到别的计划里去。
+    """
+    request_row = conn.execute(
+        "SELECT plan_id FROM learning_request WHERE id = ?", (candidate["request_id"],)
+    ).fetchone()
+    inherited = None if request_row is None else request_row["plan_id"]
+    if inherited is not None and explicit_plan_id is not None and int(inherited) != int(explicit_plan_id):
+        raise CandidateConflict(
+            f"这条候选属于计划 #{inherited}，不能落到计划 #{explicit_plan_id}"
+        )
+    target = inherited if inherited is not None else explicit_plan_id
+    if target is None:
+        raise CandidateConflict(
+            "这条候选没有计划归属（「新方向」）——采纳时要指明进哪个计划，"
+            "或先建一个新计划再采纳"
+        )
+    plan_row = plan.resolve_plan(conn, int(target))
+    if plan_row is None:
+        raise CandidateConflict(f"计划 id={target} 不存在")
+    if plan_row["status"] != "active":
+        raise CandidateConflict(
+            f"计划 id={target} 已不是进行中（{plan_row['status']}），不能往里落阶段"
+        )
+    return int(target)

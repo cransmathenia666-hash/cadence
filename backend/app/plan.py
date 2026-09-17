@@ -596,6 +596,71 @@ def resolve_plan(conn: sqlite3.Connection, plan_id: int | None = None) -> sqlite
     return actives[-1] if actives else None
 
 
+# ---------- 计划的生命周期与列表（T24：多计划 + 严格分开，SPEC 决策 33） ----------
+
+def list_plans(conn: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, Any]]:
+    """列出计划。默认只给**进行中**的；`include_inactive=True` 连收尾 / 作废的一起给。
+
+    作废的计划不进默认列表，但行还在——「垃圾清得掉、做过的事查得到」。
+    每项带当前阶段与阶段进度，界面拿它做切换器，不用再逐个取计划树。
+    """
+    result: list[dict[str, Any]] = []
+    for row in conn.execute("SELECT * FROM plan ORDER BY id"):
+        if not include_inactive and row["status"] != "active":
+            continue
+        plan_id = int(row["id"])
+        stages = get_stages(conn, plan_id)
+        stage = current_stage(conn, plan_id)
+        result.append({
+            "id": plan_id,
+            "goal": row["goal"],
+            "status": row["status"],
+            "valid_from": row["valid_from"],
+            "current_stage": None if stage is None else {
+                "id": stage["id"],
+                "title": stage["title"],
+            },
+            "stages": len(stages),
+            "stages_finished": len([item for item in stages if stage_finished(conn, item)]),
+        })
+    return result
+
+
+def require_plan(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row:
+    """取一个计划，没有就报错（接口层翻成 404）。"""
+    row = resolve_plan(conn, plan_id)
+    if row is None:
+        raise PlanError(f"计划 id={plan_id} 不存在")
+    return row
+
+
+def close_plan(
+    conn: sqlite3.Connection, plan_id: int, reason: str | None = None, actor: str = "user"
+) -> dict[str, Any]:
+    """收尾一个计划（做完了）：进历史，不再出现在默认计划列表里。可重复调用。"""
+    row = require_plan(conn, plan_id)
+    if row["status"] in INVALID_STATUSES:
+        raise PlanError(f"计划 id={plan_id} 已经作废了，不能再收尾")
+    if row["status"] == "closed":
+        return {"plan_id": plan_id, "status": "closed", "changed": False}
+    ledger.set_status(
+        conn, "plan", plan_id, "closed", actor=actor,
+        reason=str(reason or "计划收尾").strip(),
+    )
+    return {"plan_id": plan_id, "status": "closed", "changed": True}
+
+
+def void_plan(conn: sqlite3.Connection, plan_id: int, reason: str, actor: str = "user") -> dict[str, Any]:
+    """作废一个计划（不算数了）。理由必填——台账的作废要回答「当时为什么扔」。"""
+    if not str(reason or "").strip():
+        raise PlanError("作废计划必须写一句理由——它进台账，回答「当时为什么扔」")
+    row = require_plan(conn, plan_id)
+    if row["status"] in INVALID_STATUSES:
+        raise PlanError(f"计划 id={plan_id} 已经作废过了")
+    ledger.void(conn, "plan", plan_id, reason=str(reason).strip(), actor=actor)
+    return {"plan_id": plan_id, "status": "void"}
+
+
 def _child_dict(conn: sqlite3.Connection, node: sqlite3.Row, today: date) -> dict[str, Any]:
     """阶段下挂的子节点（任务 / 周打卡）共用的展示形状。"""
     return {
