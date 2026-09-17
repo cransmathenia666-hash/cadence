@@ -22,9 +22,9 @@
 | 前端 P2 四页（`/`、`/new`、`/report`；T7–T9） | 通过 | E-21/E-22/E-24（行为与 lint/tsc）＋用户走查（E-28 轮回报） | 相应页面行为或 `lib/api.ts` 对应函数变更后失效；**样式未做** |
 | provider 管理页（T11） | 通过 | E-21/E-22/E-24/E-28（lint/tsc）＋用户手工走查 2026-09-15 | `providers/page.tsx`、那 5 个 provider 函数与 `Provider*` 类型变更后失效；**样式未做** |
 | 四问判断链路（T12） | 通过 | E-26、E-27（真实模型一次） | `advisor.py`、`/api/requests`、`/api/profile`、`RequestIn` 变更后失效；真实输出质量只见过一次 |
-| 候选清单页（T14 `/candidates`） | 通过（仅 lint/tsc + 三页 HTTP 200） | E-37 | `app/candidates/page.tsx` 的行为、或 `listCandidates` / `findCandidates` / `verdictCandidate` 变更后失效；**浏览器走查归用户** |
+| 候选清单页（T14 `/candidates`） | 通过 | E-37（前端只跑了 lint/tsc 与三页 HTTP 200） | `app/candidates/page.tsx` 的行为、或 `listCandidates` / `findCandidates` / `verdictCandidate` 变更后失效；**浏览器走查归用户** |
 | 提案裁定（T14 `/proposals` + 提案两条后端路由） | 通过 | E-37（pytest 216、smoke 9 步、lint/tsc） | `backend/app/proposals.py`、那两条路由与请求模型、`app/proposals/page.tsx`、`lib/api.ts` 的 `listProposals` / `decideProposal` 变更后失效；真实数据走查归用户 |
-| `/ask` 页两种形态 | **已退场（2026-09-17 删除）** | 历史证据 E-27/E-28/E-31/E-36 | 按 SPEC 决策 29 删除：`/candidates` 承接「找」、`/proposals` 承接「判」；本页不再存在于仓库 |
+| `/ask` 页两种形态 | 不适用 | 历史证据 E-27/E-28/E-31/E-36 | 2026-09-17 按 SPEC 决策 29 删除，已不在仓库：「找」归 `/candidates`、「判」归 `/proposals` |
 | 「找」候选清单与去重（T13） | 通过 | E-31（假上游）、E-33/E-34（真实模型两次） | `find_candidates` / `_check_find` / `decide_candidate`、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效 |
 | 档案录入（T22） | 通过 | E-29/E-30 | 那三条 profile 写路由与请求模型、`advisor.PROFILE_CATEGORIES` 变更后失效 |
 | 采纳自动落阶段（2026-09-17 用户拍板） | 通过 | E-36 | `decide_candidate`、verdict 路由或 `VerdictResult` 变更后失效 |
@@ -44,9 +44,8 @@
 
 候选队列（不影响当前目标）：
 
-- **T14 三个小问题的结论（2026-09-17 用户拍板）**：① 两个入口分清了——`/candidates` 只答「学什么方向」、`/proposals` 只答「这份资料要不要学」（后者不再能发起「找」，白跑一次判断的坑没了）；② `/ask` 页**删除**（SPEC 决策 29），两种形态分别被两个正式页承接；③ `start_reason` 仍未落库（候选表没有该列，加列属改表结构 = Ask first）——`/candidates` 重看库里的候选时因此**不显示依据 id** 与「建议从哪条开始」的理由，要看依据得重新问一轮（页面已注明）。
-- **新开放项：没有「改节点字段」的写入口**（2026-09-17 暴露）：台账的改写只对 `profile_item` 与 `plan` 开放，节点没有 `due_date` / `deliverable` 的修改入口。后果是「计划重排」提案批准后**只能记下方向，落不了地**（顺延 / 换交付物都得手工改库）。要做需同时定「改节点算不算台账的一次取代」——属改契约，未立项。
-- **真实库现状（2026-09-17 只读核对）**：**7 个计划全部 active**（id 1–7，含 `string`、`asdasdsadsad` 这类试建计划）、17 个节点、6 份报告、19 条候选、**5 条 pending 提案且一条都没裁定过**：`#1`/`#2` 是「后面没有更多阶段」的推进提案（指向计划 #3 与 #6，批准即**收尾那个计划**）、`#3`–`#5` 是三次四问判断（含用户误在 evaluate 形态问的那次「我现在要学习什么」）。注意：**采纳候选自动建的阶段会落在最新的 active 计划（现在是 #7「asdasdsadsad」）**——想让它落在正经计划里，先建一个正经计划。
+- **T14 的结论与后续开放项（2026-09-17 用户拍板）**：① 两个入口分清了——`/candidates` 只答「学什么方向」、`/proposals` 只答「这份资料要不要学」；`/ask` 删除（SPEC 决策 29）；② `start_reason` 仍未落库（候选表没这列，加列 = Ask first），重看旧候选时不显示依据 id 与推荐理由，要看依据得重问一轮；③ **没有「改节点字段」的写入口**——台账改写只对 `profile_item` / `plan` 开放，节点改不了 `due_date` / `deliverable`，故重排提案批准后只能记方向、落不了地；要做需先定「改节点算不算一次台账取代」（改契约，未立项）。
+- **真实库现状（2026-09-17 只读核对）**：**7 个计划全部 active**（id 1–7，含试建计划）、17 个节点、6 份报告、19 条候选、**5 条 pending 提案且一条未裁**：`#1`/`#2` 是「后面没有更多阶段」的推进提案（指向计划 #3 与 #6，批准即**收尾那个计划**）、`#3`–`#5` 是三次四问判断。注意：**采纳候选自动建的阶段落进最新 active 计划（现为 #7「asdasdsadsad」）**——想落进正经计划就先建一个。
 - **样式方案未决**：前端全部页面**无 CSS、无组件库**；`sort_order` 前端固定送 0，新建节点按 id 排。
 - **两个已知边界**：① 去重只做「去空白 + 转小写」归一化、不做模糊匹配——「学 Python」与「Python 基础」仍可能被当新候选（刻意的简单口径）；② 长输出慢（E-32/E-34）——候选清单 23–27 秒 / 4350–4975 token，最坏一次 `find` 约 6 分钟；聊天类超时 180 秒、体检 20 秒。要提速得压 prompt 输出长度，都未做。
 - **T12/T13 的约定**（T14 不得放松）：① 候选与提案别混——T13 落 `candidate`（`status='proposed'`）、四问落 `proposal(kind=material_judgment)`，前者在 `/candidates` 页采纳/否决、后者在 `/proposals` 页按 kind 分流裁定；② `proposal.kind` 新增取值 `material_judgment`（不加列、无迁移）；③ `profile_item.category` 约定词表 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis`（库内自由文本；表外值不丢，只是不算「缺失类别」）；④ 四问输出没给 `profile_item` id 又不说「依据不足」→ 一律判不合格。
@@ -74,13 +73,11 @@
 
 | 编号/日期 | 来源、操作与环境 | 留存/访问 | 结论 | 适用范围/失效条件 |
 |---|---|---|---|---|
-| E-01～E-04、E-06、E-07、E-09～E-12、E-14～E-17、E-20 | 已失效的旧证据（早期探活、P1 各轮 passed、临时库闭环与 due_date 校验、T19 连发、smoke、用户看到的旧版 422 形状、T7 联通页） | 命令与脚本仍在仓库内可复跑；联通用例页已被 T8 页面替换 | 均已失效 | 不要引用；后端现由 E-19 覆盖，前端由 E-21/E-22/E-24 覆盖（E-14 的 `422` 是旧数组形状，新形状见 E-19） |
 | E-05 / E-08 / E-13（用户库三类事实） | 用户亲手在 `/docs` 走通 P1 闭环（建计划→阶段→2 检查点→3 报告→`GET /api/plan`）；`tools/show_db.py` 只读自查；误建 `plan_node #7` 处置（转 `skipped`、理由入台账） | 用户库 `data/cadence.db` 留痕，可随时复查 | 通过：节点按状态机推进、落后量 5 天→0、产出 1 条 pending `stage_advance` 提案、`GET /api/plan` 七项与预测吻合；show_db 与已知事实逐项一致 | 不受代码变更影响；`plan.py` 变更后 E-08 需重看 |
 | E-19 / 2026-09-15 | 加完 CORS 后一次跑三样：`pytest -q`、`smoke_p1.py` 9 步、临时库起 uvicorn 发 10 组真实请求（5 组跨源 + 5 组错误路径） | 临时脚本与库已删；`data/` 只剩 `cadence.db` | 通过：合法来源两种写法回 `allow-origin`、非法来源静默不放行；**`422` 也带 `allow-origin`**；五条错误路径键集恒为 `{detail, errors}`、`detail` 恒为字符串 | 仅当 `config.py` 的 CORS 名单、`main.py` 两个错误处理器、或既有路由响应形状变更时失效；**新增互不相关路由、只改 tests 均不影响** |
 | E-21 / E-22 / E-24 / E-28（前端早期各轮） | `/report`、`/`、`/new`、`/providers` 各轮 `npm run lint` + `npx tsc --noEmit`，另有路由 HTTP 200 探查；E-28 轮为提交前全项目复跑，同轮用户回报 P2 四页走查通过 | 工程内，可复跑 | 通过：各轮均 exit=0；lint 曾拦下 `react-hooks/set-state-in-effect`（已改为 `.then` 回调里 setState） | **按行为写**：各页行为或其对应 `lib/api.ts` 函数变更后失效；新增互不相关的函数不影响。最近一次全项目复跑见 E-36 |
 | E-25 / 2026-09-15～16 | **真实 provider 首次打通**：commandcode 体检回 `403 error code: 1010`；用不带密钥的对照实验定位——无 UA 回 `403 1010`、换浏览器 UA 回服务商自己的 `401`；据此给 `llm.post_json` 加 `User-Agent`（+ `Accept`） | 对照命令见第 6 节；Cloudflare 1010 =「按浏览器指纹拒绝访问」 | 通过：改后同一代码路径拿到 `401`（服务商报错），已穿过 Cloudflare；用户真密钥体检由 E-27 结清 | `llm.post_json` 的请求头、或 provider 换家后失效。这类「门外被拦」假 provider 永远测不出 |
-| E-26 / 2026-09-16 | T12：`pytest -q`（160 passed：147 + 13 条 advisor 单测）与 `smoke_p1.py` 9 步（本轮动了契约与台账写入，按纪律加跑） | `backend/tests/test_advisor.py` 可复跑 | 通过：合格输出落 pending 提案且引用 id 真实存在；没给 id 又不说「依据不足」判不合格；首次不合格带原因重试一次；两次不合格抛错且不落提案；无档案不调模型；三反引号包裹的 json 代码块被容忍 | `advisor.py`、那两条新路由或 `RequestIn` 变更后失效。**只验假上游**；真实输出质量见 E-27 |
-| E-27 / 2026-09-16 | **真实模型端到端跑通一次**（用户操作，Agent 只读库核对）：`/ask` 提「我要不要学python？」→ 记账 `judge` 成功、549 进 / 598 出 token、5.5 秒；`proposal #3`（`material_judgment`）pending | 用户库可复查（`llm_call`、`proposal #3`） | 通过且质量符合设计：引用真实存在的 `#2` 并复述其内容；④ 明写「依据不足」且 id 为空。**真密钥体检同时得证** | 证的是这一条链路：`/api/requests` 契约、advisor prompt 与校验、`post_json` 请求头、provider id=3 配置；改任一处即失效。**只跑过 1 次** |
+| E-26 / E-27 / 2026-09-16 | T12 四问链路：`pytest -q`（160 passed：147 + 13 条 advisor 单测）与 `smoke_p1.py` 9 步（动了契约与台账写入，按纪律加跑）；随后**真实模型端到端跑通一次**（用户操作，Agent 只读库核对）：`/ask` 提「我要不要学python？」→ 记账 `judge` 成功、549 进 / 598 出 token、5.5 秒，`proposal #3`（`material_judgment`）pending | `backend/tests/test_advisor.py` 可复跑；用户库 `llm_call` 与 `proposal #3` 可复查 | 通过：合格输出落 pending 提案且引用 id 真实存在；**没给 id 又不说「依据不足」判不合格**；首次不合格带原因重试一次、两次不合格抛错且不落提案；无档案不调模型；三反引号包裹的 json 被容忍。真实那次质量符合设计（引用真实存在的 `#2` 并复述内容；④ 明写「依据不足」），**真密钥体检同时得证** | `advisor.py`、那两条路由、`RequestIn`、`post_json` 请求头、provider id=3 配置任一变更后失效。**真实输出质量只跑过 1 次** |
 | E-29 / E-30 / 2026-09-16 | T22 档案录入与防重复：`pytest -q`（177 → 181：+17 条录入 +4 条防重复）与 `smoke_p1.py` 9 步（动了契约语义，按纪律加跑）；提交 `163f24e`/`b09bc34`/`af759fa` | `backend/tests/test_profile_write.py` 可复跑 | 通过：五令牌外 422；取代/作废后旧值从 `GET /api/profile` 消失但台账留 before/after/理由；历史行再动 409；同类别同文本（含首尾空白差异）回 409 并指明已有 id；作废后重填不挡、不同类别不挡 | 那三条写路由与请求模型、`PROFILE_CATEGORIES`、或 `post_profile_item` 判重逻辑变更后失效 |
 | E-31 / 2026-09-16 | T13：`pytest -q`（199 passed：181 + 18 条候选单测）与 `smoke_p1.py` 9 步（动了契约）；提交 `ad1bf18`（后端）、`585166f`（前端） | `backend/tests/test_candidates.py` 可复跑 | 通过：3–5 条越界判不合格并带原因重试一次、两次不合格则不落一条；`rank` 即顺序、`is_recommended` 落在 `recommended_start` 那条；`why` 无依据又不说「依据不足」判不合格；**禁区命中即判不合格**（含空白/大小写变体）；否决缺理由报错、理由进 `reject_reason` 与台账；已裁定再改 409、不存在 404；`GET /api/candidates` 默认取最近一轮、无候选返回空 | `find_candidates` / `_check_find` / `decide_candidate`、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效。**只验假上游** |
 | E-32 / 2026-09-16 | 用户走查 T13 踩到读超时（连续两次在恰好 30 秒处 `TimeoutError`，记账 `#9/#10`）；修法：聊天类 `CHAT_TIMEOUT_SECONDS = 180`、体检 `CONNECTIVITY_TIMEOUT_SECONDS = 20`，超时消息补「等了多久 + 建议重试」；`pytest -q` 201 passed（+2 条回归）。提交 `ce265ac` | `backend/tests/test_llm.py` 可复跑；`llm_call` 记账可复查 | 通过：常量与 `post_json` 默认值一致且 ≥120 秒、体检短于聊天；超时抛 `LlmError` 且消息可操作；失败调用仍记账 | `llm.py` 超时常量、`post_json` 默认值或 `Operation.chat` 错误包装变更后失效。修的是「超时太紧」，不保证长清单必然一次成功 |
@@ -118,8 +115,6 @@ npm run lint       # ESLint，当前 exit=0
 ## 7. 给下一个 Agent 的启动提示
 
 1. 完整读取本文件并核对 Git、工作树与未提交改动；只读取当前目标（T14 已完工；下一步是 P4 触达与 Markdown 导出，或按用户指派）的源码、测试与规则。
-2. 证据能否沿用，看第 1 节的「证据依据」列与第 5 节每行的失效条件；没有触发条件不做全量复验。
-3. 开工任何新工作前，必须先报三句话计划并等确认。
-4. **探测一律指向临时库**（照 `tools/smoke_p1.py`：临时库 + 空闲端口），绝不拿 `data/cadence.db` 做实验——曾把契约探测打到真库、误建 `plan_node #7`。
-5. 遵守项目 `AGENTS.md`：教学协议、验证纪律、每次提交 ≤200 行有效改动、加依赖与改契约 Ask first。
-6. **没有事实变化就不更新；要更新时只做定点编辑（改受影响的行），不整份重写**；每次更新顺带执行**退休检查**：删已解除问题、已失效且无引用的证据行（git 即档案）、跨节重复叙述——细则见 `$maintain-project-handoff` 技能的 Validate and maintain 节。
+2. 证据能否沿用，看第 1 节的「证据依据」列与第 5 节每行的失效条件；没有触发条件不做全量复验。开工任何新工作前，必须先报三句话计划并等确认。
+3. **探测一律指向临时库**（照 `tools/smoke_p1.py`：临时库 + 空闲端口），绝不拿 `data/cadence.db` 做实验——曾把契约探测打到真库、误建 `plan_node #7`。遵守项目 `AGENTS.md`：教学协议、验证纪律、每次提交 ≤200 行有效改动、加依赖与改契约 Ask first。
+4. **没有事实变化就不更新交接文档；要更新时只做定点编辑**，每次更新顺带执行退休检查（删已解除问题、已失效且无引用的证据行、跨节重复叙述），并按 `AGENTS.md` 跑校验脚本至 errors=0、warnings=0。
