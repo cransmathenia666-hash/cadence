@@ -13,14 +13,19 @@ import {
 } from "@/lib/api";
 
 /**
- * 建计划与建节点。
+ * 建计划与建节点（T23 起三级：阶段 / 任务 / 周打卡）。
  *
- * 这两个写接口在 P1 时是"为了能在 /docs 里手工建计划"才加的，前端一直没有入口。
- * 这一页给它们一个入口——两级的结构校验仍然全在后端，前端只负责把参数送过去、
- * 把后端的错误显示出来（方案 C 的 detail 直接可读）。
+ * 这些写接口在 P1 时是"为了能在 /docs 里手工建计划"才加的。这一页给它们一个入口——
+ * 三级的结构校验仍然全在后端，前端只负责把参数送过去、把后端的错误显示出来。
  */
 
 const LOAD_FAILED = "取计划时出了意外错误";
+
+const LEVEL_LABELS: Record<NodeLevel, string> = {
+  stage: "阶段",
+  task: "任务",
+  checkpoint: "周打卡",
+};
 
 function messageOf(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback;
@@ -36,7 +41,7 @@ export default function NewPage() {
   const [goal, setGoal] = useState("");
 
   // 建节点的表单
-  const [level, setLevel] = useState<NodeLevel>("checkpoint");
+  const [level, setLevel] = useState<NodeLevel>("task");
   const [title, setTitle] = useState("");
   const [deliverable, setDeliverable] = useState("");
   const [parentId, setParentId] = useState("");
@@ -90,15 +95,15 @@ export default function NewPage() {
         planId,
         level,
         title,
-        // 只有检查点需要"所属阶段"；阶段带 parentId 会被后端判为 400
-        parentId: level === "checkpoint" ? Number(parentId) : null,
-        // 只有阶段用交付物
+        // 任务与检查点都要「所属阶段」；阶段带 parentId 会被后端判为 400
+        parentId: level === "stage" ? null : Number(parentId),
+        // 只有阶段用交付物描述
         deliverable: level === "stage" ? deliverable : null,
         dueDate: dueDate === "" ? null : dueDate,
       });
       setFeedback({
         ok: true,
-        text: `已建${level === "stage" ? "阶段" : "检查点"} #${created.id}：${created.title}`,
+        text: `已建${LEVEL_LABELS[level]} #${created.id}：${created.title}`,
       });
       setTitle("");
       setDeliverable("");
@@ -179,7 +184,17 @@ export default function NewPage() {
                   checked={level === "stage"}
                   onChange={() => setLevel("stage")}
                 />
-                阶段（可验证的交付物）
+                阶段（一段有产出的方向，带交付物）
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="level"
+                  value="task"
+                  checked={level === "task"}
+                  onChange={() => setLevel("task")}
+                />
+                任务（要干的活，打勾即完成）
               </label>
               <label>
                 <input
@@ -189,7 +204,7 @@ export default function NewPage() {
                   checked={level === "checkpoint"}
                   onChange={() => setLevel("checkpoint")}
                 />
-                检查点（周检查点）
+                周打卡（只管节奏，不影响阶段完成）
               </label>
             </fieldset>
 

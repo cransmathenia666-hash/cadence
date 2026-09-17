@@ -22,14 +22,17 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8
 /** 节点状态：与后端 NODE_STATUSES 一致。 */
 export type NodeStatus = "not_started" | "in_progress" | "done" | "stuck" | "skipped";
 
-/** 阶段进度：后端 stage_completion() 的返回。 */
+/** 阶段进度：后端 stage_completion() 的返回。只数任务（周打卡不进分母）。 */
 export type StageProgress = {
   stage_id: number;
   total: number;
   settled: number;
   done: number;
   skipped: number;
+  /** 有任务且全收尾（界面显示用；空阶段为 false）。 */
   complete: boolean;
+  /** 任务全部收尾——空集也算（完成判定的那一半）。 */
+  all_tasks_settled: boolean;
   open_titles: string[];
 };
 
@@ -43,15 +46,31 @@ export type Checkpoint = {
   lag_days: number | null;
 };
 
+/** 任务与检查点同形状（都是阶段下的子节点）。 */
+export type TaskNode = Checkpoint;
+
+/** 交付物提交（阶段上的独立动作，可重新提交）。 */
+export type DeliverableSubmission = {
+  url: string;
+  note: string;
+  created_at: string;
+};
+
 export type Stage = {
   id: number;
   title: string;
+  /** 计划时写下的交付物描述（不是提交物本身）。 */
   deliverable: string | null;
   due_date: string | null;
   status: NodeStatus;
   sort_order: number;
   lag_days: number | null;
   progress: StageProgress;
+  /** 2026-09-17 起的新判定：任务全收尾 + 交付物已提交。 */
+  finished: boolean;
+  /** 最新一次交付物提交；没交过就是 null。 */
+  deliverable_submission: DeliverableSubmission | null;
+  tasks: TaskNode[];
   checkpoints: Checkpoint[];
 };
 
@@ -199,8 +218,8 @@ export async function submitReport(input: {
 
 // ---------- 建计划与建节点（写接口） ----------
 
-/** 节点层级：阶段=可验证交付物，检查点=周检查点。与后端 NodeIn.level 一致。 */
-export type NodeLevel = "stage" | "checkpoint";
+/** 节点层级：阶段=可验证交付物，检查点=周打卡，任务=要干的活。与后端 NodeIn.level 一致。 */
+export type NodeLevel = "stage" | "checkpoint" | "task";
 
 /** 建计划的回执。 */
 export type CreatedPlan = { id: number; goal: string };
@@ -218,10 +237,10 @@ export async function createPlan(goal: string): Promise<CreatedPlan> {
 }
 
 /**
- * 建一个阶段或检查点。
+ * 建一个阶段、检查点（周打卡）或任务。
  *
- * 两级结构的一致性（阶段不能带 parentId；检查点必须指向同一计划里的阶段）由后端把关，
- * 这里只管把参数送过去——前端不重复实现业务规则。
+ * 三级结构的一致性（阶段不能带 parentId；检查点与任务必须指向同一计划里的阶段）
+ * 由后端把关，这里只管把参数送过去——前端不重复实现业务规则。
  *
  * `dueDate` 必须是**零填充的 ISO 日期**（如 `2026-09-30`）：后端只认这种写法，
  * `2026-9-3` 会被 `422` 拒掉。HTML 的 `input type="date"` 正好产出这个格式。
@@ -593,6 +612,53 @@ export async function verdictCandidate(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ accept, reason: reason ?? null }),
+  });
+}
+
+// ---------- 任务与交付物（T23 三级结构） ----------
+
+/** 打勾 / 跳过的回执。`proposal_id` 不为空 = 这一步让阶段完成、顺势产出了推进提案。 */
+export type TaskActionResult = {
+  node_id: number;
+  node_status_before: string;
+  node_status: string;
+  proposal_id: number | null;
+};
+
+/** 任务打勾：一步到完成（不写理由）。只对任务层有效（对阶段/周打卡回 400）。 */
+export async function checkTask(nodeId: number): Promise<TaskActionResult> {
+  return request<TaskActionResult>(`/api/plan/nodes/${nodeId}/check`, { method: "POST" });
+}
+
+/** 跳过任务：跳过算完成的一种，但**必须写一句理由**（缺理由回 400）。 */
+export async function skipTask(nodeId: number, reason: string): Promise<TaskActionResult> {
+  return request<TaskActionResult>(`/api/plan/nodes/${nodeId}/skip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** 提交交付物的回执。`submission_id` 每次提交都不同（重提交 = 新行，旧值留痕）。 */
+export type DeliverableResult = {
+  submission_id: number;
+  node_id: number;
+  url: string;
+  note: string;
+  created_at: string;
+  proposal_id: number | null;
+};
+
+/** 提交阶段的交付物：独立动作，可重新提交。只对阶段有效。 */
+export async function submitDeliverable(
+  nodeId: number,
+  url: string,
+  note: string,
+): Promise<DeliverableResult> {
+  return request<DeliverableResult>(`/api/plan/nodes/${nodeId}/deliverable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, note }),
   });
 }
 
