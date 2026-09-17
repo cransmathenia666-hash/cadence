@@ -162,3 +162,15 @@ CREATE TABLE IF NOT EXISTS task_model_map (
   model       TEXT,
   updated_at  TEXT
 );
+
+-- 交付物提交：阶段上的独立动作（决策 32）。每次提交落一行——重提交 = 新行，
+-- 旧值天然留痕；「当前交付物」= 最新那一行。不进 report 表：报告说的是
+-- 「这一周怎么样」，交付物说的是「这个阶段交出了什么」，两件事。
+CREATE TABLE IF NOT EXISTS deliverable_submission (
+  id         INTEGER PRIMARY KEY,
+  node_id    INTEGER NOT NULL,
+  url        TEXT    NOT NULL,
+  note       TEXT    NOT NULL,
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliverable_node ON deliverable_submission (node_id, created_at);

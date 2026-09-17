@@ -137,17 +137,31 @@ def test_report_can_reopen_a_done_node(conn):
     ]
 
 
-def test_report_on_last_checkpoint_produces_advance_proposal(conn):
-    """成功标准 1 后半：最后一条检查点完成时，产出「是否进入下一阶段」提案。"""
+def test_checkpoint_report_produces_no_advance_proposal(conn):
+    """周打卡退居节奏职能：报告不再决定阶段完成（SPEC 决策 30/32）。"""
     _, _, checkpoints = make_plan(conn, checkpoints=(("检查点 1", None),))
 
-    result = plan.submit_report(conn, checkpoints[0], "done", note="做完了")
+    result = plan.submit_report(conn, checkpoints[0], "done", note="这周做完了")
+
+    assert result["proposal_id"] is None
+    assert ledger.fetch_active(conn, "proposal") == []
+
+
+def test_finishing_tasks_and_deliverable_produces_advance_proposal(conn):
+    """成功标准 1 后半（新判定）：任务全部打勾 + 交付物已提交 → 「是否进入下一阶段」提案。"""
+    plan_id, stage_id, _ = make_plan(conn, checkpoints=())
+    task_id = plan.add_node(conn, plan_id, "task", "看完第 3 章", parent_id=stage_id)
+
+    plan.check_task(conn, task_id)
+    assert ledger.fetch_active(conn, "proposal") == []  # 还差交付物
+
+    result = plan.submit_deliverable(conn, stage_id, "https://example.com/repo", "接口能读写了")
 
     assert result["proposal_id"] is not None
     proposal = conn.execute(
         "SELECT kind, payload FROM proposal WHERE id = ?", (result["proposal_id"],)).fetchone()
     assert proposal["kind"] == "stage_advance"
-    assert json.loads(proposal["payload"])["stage_id"] is not None
+    assert json.loads(proposal["payload"])["stage_id"] == stage_id
 
 
 def test_report_on_open_stage_produces_no_proposal(conn):
@@ -284,11 +298,13 @@ def test_current_stage_skips_settled_stages(conn):
     second = ledger.create_active(
         conn, "plan_node",
         {"plan_id": plan_id, "level": "stage", "title": "阶段 2", "sort_order": 20}, actor="user")
-    done_checkpoint = ledger.create_active(
+    task_id = ledger.create_active(
         conn, "plan_node",
-        {"plan_id": plan_id, "parent_id": first, "level": "checkpoint", "title": "检查点 1"},
+        {"plan_id": plan_id, "parent_id": first, "level": "task", "title": "任务 1"},
         actor="user")
-    plan.submit_report(conn, done_checkpoint, "done", note="做完了")
+    # 新判定：任务打勾 + 交付物提交，阶段 1 才算做完
+    plan.check_task(conn, task_id)
+    plan.submit_deliverable(conn, first, "https://example.com/repo", "阶段 1 的交付物")
 
     tree = plan.plan_tree(conn, plan_id=plan_id, today=TODAY)
 
@@ -357,6 +373,8 @@ def test_weekly_on_track_when_reported_this_week(conn):
     """按时：本周有报告、没有过期未完成的节点。"""
     plan_id, stage_id, checkpoints = make_plan(
         conn, checkpoints=(("检查点 1", "2026-09-30"), ("检查点 2", None)))
+    task_id = plan.add_node(conn, plan_id, "task", "看完第 3 章", parent_id=stage_id)
+    plan.check_task(conn, task_id)
     plan.submit_report(conn, checkpoints[0], "done", note="做完了", at="2026-09-16T20:00:00+08:00")
 
     status = plan.weekly_status(conn, today=TODAY_IS_SUNDAY)
@@ -366,6 +384,8 @@ def test_weekly_on_track_when_reported_this_week(conn):
     assert status["behind_reason"] is None
     assert [r["note"] for r in status["reports_this_week"]] == ["做完了"]
     assert status["current_stage"]["id"] == stage_id
+    # 阶段进度按任务算（周打卡不进分母）
+    assert status["stage_progress"]["total"] == 1
     assert status["stage_progress"]["done"] == 1
 
 
@@ -571,13 +591,15 @@ def test_legacy_voided_stage_is_not_current_stage(conn):
     assert plan.current_stage(conn, plan_id) is None
 
 
-def test_legacy_voided_checkpoint_does_not_count_as_settled(conn):
-    """作废的检查点要从「阶段进度」的分母里消失，不能靠充数把阶段做完。"""
-    _, stage_id, checkpoints = make_plan(conn, checkpoints=(("检查点 1", None), ("检查点 2", None)))
-    plan.submit_report(conn, checkpoints[0], "done", note="做完了")
-    void_row(conn, checkpoints[1])
+def test_legacy_voided_task_does_not_count_as_settled(conn):
+    """作废的任务要从「阶段进度」的分母里消失，不能靠充数把阶段做完。"""
+    plan_id, stage_id, _ = make_plan(conn, checkpoints=())
+    done_task = plan.add_node(conn, plan_id, "task", "任务 A", parent_id=stage_id)
+    voided_task = plan.add_node(conn, plan_id, "task", "任务 B", parent_id=stage_id)
+    plan.check_task(conn, done_task)
+    void_row(conn, voided_task)
 
     completion = plan.stage_completion(conn, stage_id)
 
     assert completion["total"] == 1
-    assert completion["complete"] is True
+    assert completion["all_tasks_settled"] is True

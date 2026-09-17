@@ -212,13 +212,16 @@ def transition_node(
 
 
 def stage_completion(conn: sqlite3.Connection, stage_id: int) -> dict[str, Any]:
-    """阶段完成判定：它的检查点是不是都收尾了。
+    """阶段的任务完成度：只数**任务**层（周打卡不参与阶段完成判定，SPEC 决策 30/32）。
 
-    「收尾」= 完成或跳过。跳过是你裁定过的结果，不该把阶段永远卡在那里。
+    「收尾」= 完成（打勾）或跳过。跳过是你裁定过的结果，不该把阶段永远卡在那里。
+    `all_tasks_settled` 在「没有任务」时为 True——空集天然满足，老/空阶段不被卡死；
+    `complete` 保留「有任务且全收尾」的口径，只给界面显示用。
     """
     nodes = conn.execute(
         f"""SELECT id, title, status FROM plan_node
-           WHERE parent_id = ? AND {not_invalid()} ORDER BY sort_order, id""",
+           WHERE parent_id = ? AND level = 'task' AND {not_invalid()}
+           ORDER BY sort_order, id""",
         (stage_id,),
     ).fetchall()
     settled = [node for node in nodes if node["status"] in SETTLED_STATUSES]
@@ -228,10 +231,35 @@ def stage_completion(conn: sqlite3.Connection, stage_id: int) -> dict[str, Any]:
         "settled": len(settled),
         "done": len([node for node in nodes if node["status"] == "done"]),
         "skipped": len([node for node in nodes if node["status"] == "skipped"]),
-        # 没有检查点的阶段不算完成，避免空阶段自动触发推进提案
         "complete": bool(nodes) and len(settled) == len(nodes),
+        "all_tasks_settled": len(settled) == len(nodes),
         "open_titles": [node["title"] for node in nodes if node["status"] not in SETTLED_STATUSES],
     }
+
+
+def deliverable_submission(conn: sqlite3.Connection, stage_id: int) -> sqlite3.Row | None:
+    """阶段最新一次交付物提交；一次都没提交过就返回 None。
+
+    重提交 = 新行，所以「当前值」永远是最新那一行，历史全在表里与台账流水里。
+    """
+    return conn.execute(
+        """SELECT * FROM deliverable_submission
+           WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1""",
+        (stage_id,),
+    ).fetchone()
+
+
+def stage_finished(conn: sqlite3.Connection, stage: sqlite3.Row) -> bool:
+    """阶段是否完成（2026-09-17 起的新判定，SPEC 决策 30）：
+
+    ① 阶段自己到了终态，或 ② **全部任务打勾/跳过 且 交付物已提交**。
+    没有任务的阶段 = 任务条件天然满足（空集），只看交付物——老/空阶段不被卡死。
+    """
+    if stage["status"] in SETTLED_STATUSES:
+        return True
+    if not stage_completion(conn, int(stage["id"]))["all_tasks_settled"]:
+        return False
+    return deliverable_submission(conn, int(stage["id"])) is not None
 
 
 def _next_stage(conn: sqlite3.Connection, stage: sqlite3.Row) -> sqlite3.Row | None:
@@ -271,22 +299,23 @@ def maybe_stage_advance_proposal(
         raise PlanError(f"只有阶段节点才会产出推进提案，id={stage_id} 是 {stage['level']}")
 
     result = stage_completion(conn, stage_id)
-    if not result["complete"]:
+    if not stage_finished(conn, stage):
         return None
     if _pending_stage_proposal(conn, stage_id) is not None:
         return None
 
+    submission = deliverable_submission(conn, stage_id)
     next_stage = _next_stage(conn, stage)
     if next_stage is None:
         question = (
-            f"阶段「{stage['title']}」的检查点已全部收尾"
-            f"（完成 {result['done']} / 跳过 {result['skipped']}），"
+            f"阶段「{stage['title']}」的任务全部完成、交付物已提交"
+            f"（任务完成 {result['done']} / 跳过 {result['skipped']}），"
             f"后面没有更多阶段了，是否收尾这个计划？"
         )
     else:
         question = (
-            f"阶段「{stage['title']}」的检查点已全部收尾"
-            f"（完成 {result['done']} / 跳过 {result['skipped']}），"
+            f"阶段「{stage['title']}」的任务全部完成、交付物已提交"
+            f"（任务完成 {result['done']} / 跳过 {result['skipped']}），"
             f"是否进入下一阶段「{next_stage['title']}」？"
         )
 
@@ -299,6 +328,7 @@ def maybe_stage_advance_proposal(
         "settled": result["settled"],
         "done": result["done"],
         "skipped": result["skipped"],
+        "deliverable_url": None if submission is None else submission["url"],
         "question": question,
     }
     return ledger.create_active(
@@ -373,6 +403,97 @@ def submit_report(
         "node_status_before": before,
         "node_status": target,
         "proposal_id": proposal_id,
+    }
+
+
+# ---------- 任务与交付物（2026-09-17 起的三级结构，SPEC 决策 30–32） ----------
+
+def _require_level(conn: sqlite3.Connection, node_id: int, level: str, action: str) -> sqlite3.Row:
+    """动作只认自己的层级：打勾/跳过只对任务，交付物只对阶段。"""
+    node = get_node(conn, node_id)
+    if node is None:
+        raise PlanError(f"节点 id={node_id} 不存在")
+    if node["level"] != level:
+        raise PlanError(f"id={node_id} 是 {node['level']}，「{action}」只对 {level} 用")
+    return node
+
+
+def _propose_after_child_settles(conn: sqlite3.Connection, node: sqlite3.Row) -> int | None:
+    """子节点收尾后看看它所属阶段是不是也完成了；是就产出推进提案（任务/报告共用）。"""
+    parent = get_node(conn, int(node["parent_id"])) if node["parent_id"] is not None else None
+    if parent is None or parent["level"] != "stage":
+        return None
+    return maybe_stage_advance_proposal(conn, int(parent["id"]))
+
+
+def check_task(conn: sqlite3.Connection, node_id: int, actor: str = "user") -> dict[str, Any]:
+    """任务打勾：一步到完成，不写理由（决策 31）。迁移仍走状态机与台账。"""
+    node = _require_level(conn, node_id, "task", "打勾")
+    before = node["status"]
+    assert_transition(before, "done")
+    ledger.set_status(conn, "plan_node", node_id, "done", actor=actor, reason="打勾完成")
+    return {
+        "node_id": node_id,
+        "node_status_before": before,
+        "node_status": "done",
+        "proposal_id": _propose_after_child_settles(conn, node),
+    }
+
+
+def skip_task(
+    conn: sqlite3.Connection, node_id: int, reason: str, actor: str = "user"
+) -> dict[str, Any]:
+    """任务跳过：跳过算完成的一种，但必须写一句理由——它是裁定，要留痕。"""
+    if not str(reason or "").strip():
+        raise PlanError("跳过任务必须写一句理由——它进台账，回答「当时为什么不做」")
+    node = _require_level(conn, node_id, "task", "跳过")
+    before = node["status"]
+    assert_transition(before, "skipped")
+    ledger.set_status(
+        conn, "plan_node", node_id, "skipped", actor=actor, reason=str(reason).strip()
+    )
+    return {
+        "node_id": node_id,
+        "node_status_before": before,
+        "node_status": "skipped",
+        "proposal_id": _propose_after_child_settles(conn, node),
+    }
+
+
+def submit_deliverable(
+    conn: sqlite3.Connection, node_id: int, url: str, note: str, actor: str = "user"
+) -> dict[str, Any]:
+    """提交交付物：阶段上的独立动作（决策 32）。
+
+    可重新提交——每次落一行（旧值天然留痕），「当前交付物」= 最新那一行。
+    提交后照例看看阶段是不是就此完成，是就产出推进提案。
+    """
+    if not str(url or "").strip():
+        raise PlanError("交付物要填链接——仓库、能访问的 URL、录屏都行")
+    if not str(note or "").strip():
+        raise PlanError("交付物要写一句话说明")
+    _require_level(conn, node_id, "stage", "提交交付物")
+
+    cleaned_url, cleaned_note = str(url).strip(), str(note).strip()
+    timestamp = now_iso()
+    cursor = conn.execute(
+        "INSERT INTO deliverable_submission (node_id, url, note, created_at) VALUES (?, ?, ?, ?)",
+        (node_id, cleaned_url, cleaned_note, timestamp),
+    )
+    submission_id = int(cursor.lastrowid)
+    ledger.log_event(
+        conn, "plan_node", node_id, "deliverable_submit", None, cleaned_url, cleaned_note, actor
+    )
+    # 提交行与台账流水一起落盘：这次没有状态迁移，set_status 不一定会写东西
+    conn.commit()
+
+    return {
+        "submission_id": submission_id,
+        "node_id": node_id,
+        "url": cleaned_url,
+        "note": cleaned_note,
+        "created_at": timestamp,
+        "proposal_id": maybe_stage_advance_proposal(conn, node_id),
     }
 
 
@@ -455,10 +576,8 @@ def plan_lag(conn: sqlite3.Connection, plan_id: int, today: date) -> dict[str, A
 # ---------- 计划全貌（GET /api/plan 的数据形状） ----------
 
 def stage_is_settled(conn: sqlite3.Connection, stage: sqlite3.Row) -> bool:
-    """阶段是否收尾：阶段自己到了终态，或它的检查点已经全收尾。"""
-    if stage["status"] in SETTLED_STATUSES:
-        return True
-    return stage_completion(conn, int(stage["id"]))["complete"]
+    """阶段是否收尾——判定规则见 `stage_finished`（任务全收尾 + 交付物已提交）。"""
+    return stage_finished(conn, stage)
 
 
 def current_stage(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row | None:
@@ -477,7 +596,8 @@ def resolve_plan(conn: sqlite3.Connection, plan_id: int | None = None) -> sqlite
     return actives[-1] if actives else None
 
 
-def _checkpoint_dict(conn: sqlite3.Connection, node: sqlite3.Row, today: date) -> dict[str, Any]:
+def _child_dict(conn: sqlite3.Connection, node: sqlite3.Row, today: date) -> dict[str, Any]:
+    """阶段下挂的子节点（任务 / 周打卡）共用的展示形状。"""
     return {
         "id": node["id"],
         "title": node["title"],
@@ -504,11 +624,12 @@ def plan_tree(
 
     stages = []
     for stage in get_stages(conn, int(plan_row["id"])):
-        checkpoints = conn.execute(
+        children = conn.execute(
             f"""SELECT * FROM plan_node
                WHERE parent_id = ? AND {not_invalid()} ORDER BY sort_order, id""",
             (stage["id"],),
         ).fetchall()
+        submission = deliverable_submission(conn, int(stage["id"]))
         stages.append({
             "id": stage["id"],
             "title": stage["title"],
@@ -518,7 +639,20 @@ def plan_tree(
             "sort_order": stage["sort_order"],
             "lag_days": node_lag_days(conn, stage, today),
             "progress": stage_completion(conn, int(stage["id"])),
-            "checkpoints": [_checkpoint_dict(conn, cp, today) for cp in checkpoints],
+            "finished": stage_finished(conn, stage),
+            "deliverable_submission": None if submission is None else {
+                "url": submission["url"],
+                "note": submission["note"],
+                "created_at": submission["created_at"],
+            },
+            "tasks": [
+                _child_dict(conn, node, today) for node in children if node["level"] == "task"
+            ],
+            "checkpoints": [
+                _child_dict(conn, node, today)
+                for node in children
+                if node["level"] == "checkpoint"
+            ],
         })
 
     current = current_stage(conn, int(plan_row["id"]))

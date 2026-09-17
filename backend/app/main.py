@@ -66,11 +66,11 @@ class PlanIn(BaseModel):
 
 class NodeIn(BaseModel):
     plan_id: int
-    level: Literal["stage", "checkpoint"]
+    level: Literal["stage", "checkpoint", "task"]
     title: str = Field(min_length=1)
-    parent_id: int | None = Field(default=None, description="检查点必填：所属阶段")
+    parent_id: int | None = Field(default=None, description="检查点 / 任务必填：所属阶段")
     deliverable: str | None = Field(default=None, description="阶段用：可验证的交付物")
-    due_date: date | None = Field(default=None, description="计划完成日，写 ISO 日期（如 2026-09-30）")
+    due_date: date | None = Field(default=None, description="计划完成日，写 ISO 日期（如 2026-09-30）；不带就不进落后量")
     sort_order: int = 0
 
 
@@ -185,23 +185,24 @@ def create_plan(payload: PlanIn, conn: sqlite3.Connection = Depends(get_conn)) -
 @app.post("/api/plan/nodes", status_code=201,
           responses={409: {"description": "同一层级下已有未收尾的同名节点（多半是重复提交）"}})
 def create_node(payload: NodeIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """建一个阶段或检查点。
+    """建一个阶段、检查点（周打卡）或任务。
 
-    两级结构的一致性由后端把关，不信前端：阶段不能有 parent_id，
-    检查点必须有 parent_id、且指向同一个计划里的某个阶段。
+    三级结构的一致性由后端把关，不信前端：阶段不能有 parent_id；
+    检查点与任务必须有 parent_id、且指向同一个计划里的某个阶段。
     重复提交（前端双击、请求重发）由 `plan.add_node` 挡下并返回 409。
     """
     if plan.resolve_plan(conn, payload.plan_id) is None:
         raise HTTPException(status_code=404, detail=f"计划 id={payload.plan_id} 不存在")
 
-    if payload.level == "checkpoint":
+    if payload.level in ("checkpoint", "task"):
+        kind = "检查点" if payload.level == "checkpoint" else "任务"
         if payload.parent_id is None:
-            raise HTTPException(status_code=400, detail="检查点必须指定 parent_id（所属阶段）")
+            raise HTTPException(status_code=400, detail=f"{kind}必须指定 parent_id（所属阶段）")
         parent = plan.get_node(conn, payload.parent_id)
         if parent is None or parent["level"] != "stage":
             raise HTTPException(status_code=400, detail="parent_id 必须指向一个阶段节点")
         if int(parent["plan_id"]) != payload.plan_id:
-            raise HTTPException(status_code=400, detail="检查点必须和所属阶段在同一个计划里")
+            raise HTTPException(status_code=400, detail=f"{kind}必须和所属阶段在同一个计划里")
     elif payload.parent_id is not None:
         raise HTTPException(status_code=400, detail="阶段节点不能有 parent_id")
 
@@ -225,6 +226,59 @@ def create_node(payload: NodeIn, conn: sqlite3.Connection = Depends(get_conn)) -
     except ledger.LedgerError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": node_id, "level": payload.level, "title": payload.title.strip()}
+
+
+# ---------- 任务与交付物（三级结构，SPEC 决策 30–32） ----------
+#
+# 三个动作各认自己的层级：打勾 / 跳过只对任务，提交交付物只对阶段。
+# 状态迁移与留痕归 `plan.py`（状态机 + 台账），这里只翻译 404 / 400。
+
+class TaskSkipIn(BaseModel):
+    reason: str = Field(min_length=1, description="为什么跳过——进台账，必填")
+
+
+class DeliverableIn(BaseModel):
+    url: str = Field(min_length=1, description="交付物链接：仓库 / URL / 录屏都行")
+    note: str = Field(min_length=1, description="一句话说明这份交付物")
+
+
+def _require_node(conn: sqlite3.Connection, node_id: int) -> None:
+    if plan.get_node(conn, node_id) is None:
+        raise HTTPException(status_code=404, detail=f"节点 id={node_id} 不存在")
+
+
+@app.post("/api/plan/nodes/{node_id}/check")
+def post_task_check(node_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """任务打勾：一步到完成、不写理由（决策 31）。只对任务层有效。"""
+    _require_node(conn, node_id)
+    try:
+        return plan.check_task(conn, node_id)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan/nodes/{node_id}/skip")
+def post_task_skip(
+    node_id: int, payload: TaskSkipIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """跳过任务：跳过算完成的一种，但必须写一句理由（它是裁定，要留痕）。"""
+    _require_node(conn, node_id)
+    try:
+        return plan.skip_task(conn, node_id, payload.reason)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan/nodes/{node_id}/deliverable", status_code=201)
+def post_deliverable(
+    node_id: int, payload: DeliverableIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """提交阶段的交付物：独立动作、可重新提交（旧值留痕）。只对阶段有效。"""
+    _require_node(conn, node_id)
+    try:
+        return plan.submit_deliverable(conn, node_id, payload.url, payload.note)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.post("/api/report", status_code=201)

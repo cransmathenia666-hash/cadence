@@ -178,9 +178,10 @@ def test_approving_the_last_stage_advance_closes_the_plan(conn):
     """「后面没有更多阶段」那种推进提案，批准才是真有动作：计划收尾。"""
     plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
     stage_id = plan.add_node(conn, plan_id, "stage", "收尾阶段")
-    checkpoint_id = plan.add_node(conn, plan_id, "checkpoint", "本周检查点", parent_id=stage_id)
-    # 唯一的检查点做完 → 阶段收尾 → 自动产出「后面没有更多阶段」的推进提案
-    plan.submit_report(conn, checkpoint_id, "done", "做完了")
+    task_id = plan.add_node(conn, plan_id, "task", "收尾任务", parent_id=stage_id)
+    # 任务打勾 + 交付物提交 → 阶段完成 → 自动产出「后面没有更多阶段」的推进提案
+    plan.check_task(conn, task_id)
+    plan.submit_deliverable(conn, stage_id, "https://example.com/repo", "做完了")
     row = conn.execute("SELECT id, payload FROM proposal").fetchone()
     assert json.loads(row["payload"])["next_stage_id"] is None  # 确实是最后一段
 

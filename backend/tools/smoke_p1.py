@@ -1,4 +1,4 @@
-"""P1 闭环冒烟：一条命令走完「建计划 → 建节点 → 提交报告 → 看落后量 → 产出提案」。
+"""P1 闭环冒烟：一条命令走完「建计划 → 建阶段 → 建任务 → 打勾 → 交交付物 → 看落后量 → 产出提案」。
 
 为什么要有它：手点 `/docs` 要五六次；复制 PowerShell 又会踩两个坑——
 `$` 被终端吃掉、中文按老编码发出去变乱码。这个脚本用标准库 `urllib` 直接发请求，
@@ -8,8 +8,11 @@
 **不碰你 `data/cadence.db` 里的真实数据**。
 对着已在跑的服务跑也可以（`--base-url`），但那种情况下它会写进那个服务的库。
 
-顺带覆盖 T19（防重复提交）的两半：检查点刚建好、还没收尾时再建同名 -> 期望 409；
-等它被报成 done（收尾）之后再建同名 -> 期望 201（这是规则的另一半：已收尾的不挡路）。
+顺带覆盖 T19（防重复提交）的两半：任务刚建好、还没完成时再建同名 -> 期望 409；
+等它完成之后再建同名 -> 期望 201（这是规则的另一半：已收尾的不挡路）。
+
+2026-09-17 起（T23）走三级结构：阶段完成 = 全部任务打勾/跳过 **且** 交付物已提交；
+周打卡只做节奏，不参与完成判定（最后一步用报告证明它不额外产提案）。
 """
 
 from __future__ import annotations
@@ -133,52 +136,60 @@ def main() -> int:
         })
         checker.step(2, "建阶段", status, stage)
 
-        status, checkpoint = request(base, "POST", "/api/plan/nodes", {
-            "plan_id": plan["id"], "parent_id": stage["id"], "level": "checkpoint",
-            "title": f"检查点 · 冒烟 {stamp}", "due_date": overdue,
+        status, task = request(base, "POST", "/api/plan/nodes", {
+            "plan_id": plan["id"], "parent_id": stage["id"], "level": "task",
+            "title": f"任务 · 冒烟 {stamp}", "due_date": overdue,
         })
-        checker.step(3, f"建检查点（到期日故意设在 5 天前：{overdue}）", status, checkpoint)
-        checker.expect("建检查点状态码", status, 201)
+        checker.step(3, f"建任务（到期日故意设在 5 天前：{overdue}）", status, task)
+        checker.expect("建任务状态码", status, 201)
 
-        # T19 的前一半：节点还开着时，同名应当被挡下
+        # T19 的前一半：任务还开着时，同名应当被挡下
         status, blocked = request(base, "POST", "/api/plan/nodes", {
-            "plan_id": plan["id"], "parent_id": stage["id"], "level": "checkpoint",
-            "title": f"检查点 · 冒烟 {stamp}",
+            "plan_id": plan["id"], "parent_id": stage["id"], "level": "task",
+            "title": f"任务 · 冒烟 {stamp}",
         })
-        checker.step(4, "趁它还没收尾，再建一次同名检查点（T19 应挡下）", status, blocked)
+        checker.step(4, "趁它还没完成，再建一次同名任务（T19 应挡下）", status, blocked)
         checker.expect("重复创建状态码", status, 409)
 
         status, tree = request(base, "GET", f"/api/plan?plan_id={plan['id']}")
-        checker.step(5, "取计划：应看到落后 5 天", status, tree["lag"])
+        checker.step(5, "取计划：应看到落后 5 天（任务带了日期才进落后量）", status, tree["lag"])
         checker.expect("落后天数", tree["lag"]["lag_days"], 5)
         checker.expect("behind", tree["lag"]["behind"], True)
 
-        status, first = request(base, "POST", "/api/report", {
-            "node_id": checkpoint["id"], "status": "partial", "note": "冒烟：做了一半",
-        })
-        checker.step(6, "提交「部分完成」报告", status, first)
-        checker.expect("节点状态", first["node_status"], "in_progress")
+        status, checked = request(base, "POST", f"/api/plan/nodes/{task['id']}/check")
+        checker.step(6, "任务打勾", status, checked)
+        checker.expect("任务状态", checked["node_status"], "done")
+        checker.expect("只打勾时还不产提案（差交付物）", checked["proposal_id"], None)
 
-        status, second = request(base, "POST", "/api/report", {
-            "node_id": checkpoint["id"], "status": "done", "note": "冒烟：做完了",
-            "artifact_url": "https://example.com/smoke",
+        status, delivered = request(base, "POST", f"/api/plan/nodes/{stage['id']}/deliverable", {
+            "url": "https://example.com/smoke", "note": "冒烟：交付物提交",
         })
-        checker.step(7, "提交「完成」报告（阶段因此收尾）", status, second)
-        checker.expect("节点状态", second["node_status"], "done")
-        checker.expect("是否产出推进提案", second["proposal_id"] is not None, True)
+        checker.step(7, "提交交付物（阶段因此完成，产推进提案）", status, delivered)
+        checker.expect("交付物提交状态码", status, 201)
+        checker.expect("是否产出推进提案", delivered["proposal_id"] is not None, True)
 
         status, tree_after = request(base, "GET", f"/api/plan?plan_id={plan['id']}")
         checker.step(8, "再取计划：落后量应回到 0", status, tree_after["lag"])
         checker.expect("落后天数", tree_after["lag"]["lag_days"], 0)
         checker.expect("当前阶段（都收尾了）", tree_after["current_stage"], None)
 
-        # T19 的后一半：同一个标题，但旧的那条已经收尾了，应当放行
+        # T19 的后一半：同一个标题，但旧的那条已经完成了，应当放行
         status, reuse = request(base, "POST", "/api/plan/nodes", {
-            "plan_id": plan["id"], "parent_id": stage["id"], "level": "checkpoint",
-            "title": f"检查点 · 冒烟 {stamp}",
+            "plan_id": plan["id"], "parent_id": stage["id"], "level": "task",
+            "title": f"任务 · 冒烟 {stamp}",
         })
-        checker.step(9, "它已收尾后再建同名（应当放行）", status, reuse)
-        checker.expect("已收尾后重建状态码", status, 201)
+        checker.step(9, "它已完成后再建同名（应当放行）", status, reuse)
+        checker.expect("已完成后再建状态码", status, 201)
+
+        status, checkpoint = request(base, "POST", "/api/plan/nodes", {
+            "plan_id": plan["id"], "parent_id": stage["id"], "level": "checkpoint",
+            "title": f"周打卡 · 冒烟 {stamp}",
+        })
+        status, weekly = request(base, "POST", "/api/report", {
+            "node_id": checkpoint["id"], "status": "done", "note": "冒烟：本周打卡",
+        })
+        checker.step(10, "建周打卡并提交报告（只管节奏，不参与完成判定）", status, weekly)
+        checker.expect("周打卡报告不额外产提案", weekly["proposal_id"], None)
 
         print()
         if checker.failures:
@@ -186,7 +197,7 @@ def main() -> int:
             for failure in checker.failures:
                 print(f"  - {failure}")
             return 1
-        print("结论：9 步全部符合预期，P1 闭环在这台机器上跑得通")
+        print("结论：10 步全部符合预期，P1 闭环在这台机器上跑得通")
         return 0
     finally:
         if server is not None:
