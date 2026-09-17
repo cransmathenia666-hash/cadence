@@ -1,11 +1,11 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-16（T13 候选清单与去重完成：后端 `ad1bf18`、前端 `/ask` 两种形态 `585166f`）
+> 最近更新：2026-09-17（采纳自动落阶段：候选裁定通过后自动在最新 active 计划建同名阶段，`ff8a0d8`）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`、T12 `f08f75b`、T11+`/ask` `882cf69`、交接 E-28 `7dec7aa`、档案录入 `163f24e`/`b09bc34`、防重复 `af759fa`、T13 `ad1bf18`/`585166f`｜无远端｜未提交改动只剩用户三件（见第 3 节）与 `.dsh-vision-toolkit/`（非本项目产物，未动）
+> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`、T12 `f08f75b`、T11+`/ask` `882cf69`、交接 E-28 `7dec7aa`、档案录入 `163f24e`/`b09bc34`、防重复 `af759fa`、T13 `ad1bf18`/`585166f`、采纳自动落阶段 `ff8a0d8`｜无远端｜未提交改动：无（仅 `.dsh-vision-toolkit/` 未跟踪，非本项目产物，见第 3 节）
 > 其他工作树：无
-> 当前唯一目标：**P3（决策入口）收尾**——T10、T11、T12、T13（候选清单）、T22（档案录入）已完成，**只剩 T14**（候选与提案的正式前端：`/candidates` 与 `/proposals` 两个页面）。P1、P2 已完成（走查已过）
-> 下一条动作：做 T14（候选与提案的前端交互）——注意 T13 已在 `/ask` 页做了候选的临时展示与就地采纳/否决，T14 要做的是**正式页面 + 提案裁定**（`proposal.kind` 有 `material_judgment` / `stage_advance` / `profile_change` / `plan_replan`，裁定界面按 kind 分流）
+> 当前唯一目标：**P3（决策入口）收尾**——T10、T11、T12、T13（候选清单）、T22（档案录入）已完成，**只剩 T14**（候选与提案的正式前端：`/candidates` 与 `/proposals` 两个页面）。P1、P2 已完成（走查已过）；T14 的设计题「采纳后是否自动落计划」已拍板并先行完成（采纳即自动建阶段，E-36）
+> 下一条动作：做 T14（候选与提案的前端交互）——注意 T13 已在 `/ask` 页做了候选的临时展示与就地采纳/否决（**采纳现会自动建阶段**，E-36），T14 要做的是**正式页面 + 提案裁定**（`proposal.kind` 有 `material_judgment` / `stage_advance` / `profile_change` / `plan_replan`，裁定界面按 kind 分流）
 
 ## 1. 当前状态
 
@@ -33,22 +33,22 @@
 
 **目标：P3（决策入口）收尾——T10、T11、T12、T13、T22 已完成，只剩 T14。** 完成定义对应 SPEC 第 9 节成功标准 2 与 3：输入「我不知道该学什么」得到 3–5 条带排序的候选（**后端与临时入口已实现**，真实模型走查待用户）；输入「我发现了某个资料」得到能指回长期档案字段的四问判断（E-27 已跑通）。两者都由 LLM 产出**待裁定的结果**，经用户裁定后才落库。
 
-**P3 进度：** T10 已完成——`llm.py` + 6 条接口（providers 增删改查、连通性体检、`llm-calls` 记账）；密钥**只写不读**、每次调用落一行账、**同一操作最多 3 次调用**。T11 已完成——`frontend/app/providers/page.tsx` 一页装下列表（掩码）、增、改、删、测连通性、设为默认，并附「查看调用记账」面板。T12 已完成——`backend/app/advisor.py` 的四问判断 + `POST /api/requests`(evaluate) + `GET /api/profile`。T22 已完成——档案三条写入口（全走台账）+ `/profile` 页。T13 已完成——`providers/find.py`（甲档 `route_only`，不联网）+ `advisor.find_candidates`/`propose_candidates`/`decide_candidate` + `POST /api/requests`(search) + `GET /api/candidates` + `POST /api/candidates/{id}/verdict`；候选与四问共用可回溯底线，去重是硬保证（禁区命中判不合格重试，两次仍命中则不落一条）。`/ask` 页已能切换两种形态并就地采纳/否决。**只剩 T14**：`/candidates` 与 `/proposals` 两个正式页面（提案裁定按 `kind` 分流）。
+**P3 进度：** T10 已完成——`llm.py` + 6 条接口（providers 增删改查、连通性体检、`llm-calls` 记账）；密钥**只写不读**、每次调用落一行账、**同一操作最多 3 次调用**。T11 已完成——`frontend/app/providers/page.tsx` 一页装下列表（掩码）、增、改、删、测连通性、设为默认，并附「查看调用记账」面板。T12 已完成——`backend/app/advisor.py` 的四问判断 + `POST /api/requests`(evaluate) + `GET /api/profile`。T22 已完成——档案三条写入口（全走台账）+ `/profile` 页。T13 已完成——`providers/find.py`（甲档 `route_only`，不联网）+ `advisor.find_candidates`/`propose_candidates`/`decide_candidate` + `POST /api/requests`(search) + `GET /api/candidates` + `POST /api/candidates/{id}/verdict`；候选与四问共用可回溯底线，去重是硬保证（禁区命中判不合格重试，两次仍命中则不落一条）。`/ask` 页已能切换两种形态并就地采纳/否决。**2026-09-17 用户拍板「采纳自动落节点」并已实现（E-36）**：采纳 = 候选转 `accepted` + 在最新 active 计划里自动建一个同名阶段（预检前置：无 active 计划或同名未收尾阶段时 409、候选保持 proposed 可重试；否决不建节点）。**只剩 T14**：`/candidates` 与 `/proposals` 两个正式页面（提案裁定按 `kind` 分流）。
 
-**本轮不做 / 下一步：** 触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）不在本轮。接着做 **T14（候选与提案的前端交互）**——T13 已在 `/ask` 页做了候选的临时展示与就地裁决，T14 要做正式页面，并补上**提案裁定**（`GET /api/proposals` 与 `POST /api/proposals/{id}/decide` 这两条路由**后端还没有**，属 T14 的后端部分）。样式方案仍待用户（走查已过）。
+**本轮不做 / 下一步：** 触达与 Markdown 导出（P4）、台账拆列（方案 A，触发条件见 SPEC 第 17 节第 2 条）不在本轮。接着做 **T14（候选与提案的前端交互）**——T13 已在 `/ask` 页做了候选的临时展示与就地裁决（采纳现会自动建阶段，E-36），T14 要做正式页面，并补上**提案裁定**（`GET /api/proposals` 与 `POST /api/proposals/{id}/decide` 这两条路由**后端还没有**，属 T14 的后端部分）。样式方案仍待用户（走查已过）。
 
 ## 3. 当前开放问题
 
 无阻塞。**待用户亲手做的只剩一件事**：② 有空时独立复核一次 `pytest -q`（预期 `199 passed`）与 `tools\smoke_p1.py`（预期 9 步全绿）。**已完成**：① P2 四页浏览器走查——用户 2026-09-16 回报「前端体验没有问题」；T11 的 `/providers` 用户 2026-09-15 回报走查成功；**真实 provider 与真实模型**用户 2026-09-16 已跑通（见 E-27）——E-25 的「真密钥待回报」那条已经不欠了。
 
-**T13 的真实走查已完成**（E-33 前半句 + E-34 后半句）：清单质量与去重各由真实模型验过一次。**待用户亲手做的只剩一件事**：② 有空时独立复核一次 `pytest -q`（预期 `201 passed`）与 `tools\smoke_p1.py`（预期 9 步全绿）。**已完成**：① P2 四页浏览器走查——用户 2026-09-16 回报「前端体验没有问题」；T11 的 `/providers` 用户 2026-09-15 回报走查成功；**真实 provider 与真实模型**用户 2026-09-16 已跑通（见 E-27）——E-25 的「真密钥待回报」那条已经不欠了。
+**T13 的真实走查已完成**（E-33 前半句 + E-34 后半句）：清单质量与去重各由真实模型验过一次。**待用户亲手做的只剩一件事**：② 有空时独立复核一次 `pytest -q`（预期 `204 passed`）与 `tools\smoke_p1.py`（预期 9 步全绿）。**已完成**：① P2 四页浏览器走查——用户 2026-09-16 回报「前端体验没有问题」；T11 的 `/providers` 用户 2026-09-15 回报走查成功；**真实 provider 与真实模型**用户 2026-09-16 已跑通（见 E-27）——E-25 的「真密钥待回报」那条已经不欠了。
 
 候选队列（不影响当前目标）：
 
 - **P2 代码已完成、走查已过（用户 2026-09-16 回报「前端体验没有问题」）**：`frontend/app/` 下四个页面——`/` 计划表（T8）、`/new` 建计划与建节点、`/report` 提交报告。**样式完全没做**（无 CSS、无组件库，样式方案仍未决）；`sort_order` 前端固定送 0，所以新建节点的顺序按 id 排。
 - **调用记账前端已接上（2026-09-16 补做）**：`GET /api/llm-calls` 不再是"只能在 `/docs` 看"——`/providers` 页底部加了一个「查看调用记账」按钮（**点才拉，不自动请求**），展示按周汇总 + 最近流水（provider_id 会对着本页已加载的列表换成名字，删掉的 provider 回退成 `#id`，因为账是故意留着的）。前端因此**不再有缺口**：13 条接口里只剩 `GET /api/health` 没接。
 - **去重的边界（T13，别当成漏网）**：禁区比对只做「去空白 + 转小写」的归一化（`advisor._normalize_title`），**不做模糊匹配**——「学 Python」与「Python 基础」这种换个说法的同一件事仍可能被当成新候选。这是刻意留的简单口径（判据要一眼看懂）；真被绕烦了再加，届时属于改业务规则。
-- **T13 留下的三个欠账（T14 前先知道）**：① 真实模型已跑通一次（E-33），但**清单质量与去重效果各只见过一次**，谈不上稳定；② **`start_reason` 没落库**：候选表没有存它的列（加列属改表结构，属 Ask first），所以那句「建议先从这条开始」只存在于提交当刻的响应里，以及推荐那条候选的**台账 create 事件理由**里；页面刷新后只能靠 `is_recommended` 标出是哪条、说不出为什么。③ **采纳只记状态**（`status='accepted'`），**不会**自动生成计划或节点——从候选到计划表仍要手工去 `/new` 建；「采纳之后该不该自动落计划」是 T14 要正面回答的设计问题，未定。
+- **T13 留下的三个欠账（T14 前先知道）**：① 真实模型已跑通一次（E-33），但**清单质量与去重效果各只见过一次**，谈不上稳定；② **`start_reason` 没落库**：候选表没有存它的列（加列属改表结构，属 Ask first），所以那句「建议先从这条开始」只存在于提交当刻的响应里，以及推荐那条候选的**台账 create 事件理由**里；页面刷新后只能靠 `is_recommended` 标出是哪条、说不出为什么。③ **采纳已会自动落阶段**（2026-09-17 用户拍板「接纳自动 post nodes」，E-36）：采纳 = 候选转 `accepted` + 在最新 active 计划里自动建**同名阶段**；没有 active 计划、或那个计划里已有同名未收尾阶段时回 409，候选保持 proposed 可重试。重名口径与手工建节点一致：只挡**未收尾**的同名阶段，收尾过的不算。
 - **长输出很慢，超时已放宽**（2026-09-16，E-32）：候选清单实测 23 秒 / 4350 token，原来 30 秒的读超时把它掐断过。现在聊天类 180 秒、体检 20 秒；**最坏一次 `find` 约 6 分钟**（两次调用）。要提速得从 prompt 上压输出长度，本轮没做。
 - **候选没有提案**：T13 落的是 `candidate` 行（`status='proposed'`），不是 `proposal`。四问（T12）落的是 `proposal(kind=material_judgment)`——两者不要混：候选等你在 `/ask` 页或 T14 页面上采纳/否决，提案等裁定界面按 `kind` 分流。
 - **`/ask` 页现在承担两种形态**（判断资料 + 找方向），它是 T14 之前的临时入口；T14 做正式页面时这一页是留是删没有定，删之前先确认正式页面能覆盖这两种入口。
@@ -109,13 +109,14 @@
 | E-33 / 2026-09-16 | **真实模型跑通「找」的第一次**（用户操作，Agent 只读记账核对）：用户在 `/ask` 页以 search 形态问了一次，模型回了清单且用户看到了；随后否决了清单里**第一条与最后一条**（`candidate.status='rejected'`） | 数据在用户库 `data/cadence.db` 可复查 | 通过（部分）：**成功标准 2 的前半句首次由真实模型满足**——3–5 条候选、带排序与建议起点都来自真 provider（id=3，`deepseek/deepseek-v4.1-flash`）。**后半句（否决过的不再出现）尚未验到**：第二次请求没跑完就超时了（见 E-32），修好后需重跑 | 证的是这一条链路：`/api/requests`(search)、`providers/find.py` 的 prompt、`advisor._check_find` 的校验与落库。改任一处即失效。**未覆盖**：模型是否会顽固地再推禁区（那正是重问要再试一次的原因） |
 | E-34 / 2026-09-17 | **去重的真实检验通过**（用户操作，Agent 只读记账与候选表核对）：请求 3（search）落候选 #1–#5，用户否决 #1 与 #5（`reject_reason` 是「1」）；请求 7（search）再问一次，落候选 #6–#10，**两条禁区标题一条都没出现**。同轮记账 `llm_call #12`：find 成功、**26.7 秒**、输出 **4975 tokens**（比超时那次的 4350 还长，离旧的 30 秒线只差 3 秒——E-32 的修法确有必要）。用户另采纳了 #6（`accepted`，按设计**不**进禁区） | 用户库 `data/cadence.db` 的 `candidate`、`learning_request`、`llm_call` 三张表可复查 | 通过：**成功标准 2 的后半句首次由真实模型满足**——否决过的候选在重问时不再出现（字面口径）。补记：用户自行验证时曾在 `evaluate` 形态下问「我现在要学习什么」（请求 6，`llm_call #11` judge 成功 703 tokens），说明两个入口的区别不够明显，已记入 T14 待办 | 证的是「否决 → 禁区 → 重问不出现」这条链路（`_rejected_titles`、prompt 禁区段、`_check_find` 比对）。**未覆盖**：换个说法的同一件事是否漏过（归一化只做去空白与大小写）；样本仅一轮 |
 | E-35 / 2026-09-17 | 记账里发现 `llm_call #12` 输出 4975 token、26.7 秒 | 同上 | 观察记录：候选清单的生成时长与 token 量都在往上走，接近旧超时线；**提示**：想提速得从 prompt 压输出长度，本轮未做 | 仅记录趋势，不是验收 |
+| E-36 / 2026-09-17 | **采纳自动落阶段**（用户拍板「接纳自动 post nodes」，方案经其确认后实现）：`advisor.decide_candidate` 采纳时在最新 active 计划里建同名阶段（预检前置），响应新增 `plan_id`/`node_id`，`/ask` 页采纳提示改为「已在计划 #N 建了阶段 #M」。验证：`pytest -q` **204 passed**（+3：采纳建阶段 / 无计划拒采纳 / 同名拒采纳）+ `tools\smoke_p1.py` 9 步全绿（动了台账写入语义，按纪律加跑）；前端 `npm run lint` 与 `npx tsc --noEmit` 均 exit=0。提交 `ff8a0d8` | `backend/tests/test_candidates.py` 可复跑 | 通过：采纳 → 候选 `accepted` 且最新 active 计划里出现同名 `stage` 节点（台账紧随 create 事件）；无 active 计划或同名未收尾阶段 → `CandidateConflict`（HTTP 409）且候选保持 `proposed`、不建节点；否决不建节点（`plan_id`/`node_id` 为 null） | `advisor.decide_candidate`、那条 verdict 路由、或 `lib/api.ts` 的 `VerdictResult` 与 `/ask` 页采纳分支变更后失效。**顺带把 E-28/E-31 里 `/ask` 行为结论的 lint/tsc 部分重新覆盖了一遍** |
 
 ## 6. 启动、验收与上下文
 
 ```powershell
 cd D:\cadence\backend
 .\.venv\Scripts\python.exe -m app.db init         # 建库（可重复执行）
-.\.venv\Scripts\python.exe -m pytest -q           # 预期 160 passed
+.\.venv\Scripts\python.exe -m pytest -q           # 预期 204 passed
 # 验「能不能穿过 Cloudflare」（用假密钥，只看放不放行，不碰真密钥——E-25 就是这个实验）：
 #   .\.venv\Scripts\python.exe -c "from app import llm; print(llm.post_json('https://api.commandcode.ai/provider/v1/chat/completions', {'Authorization': 'Bearer dummy'}, llm._chat_payload('deepseek/deepseek-v4.1-flash', [{'role':'user','content':'ping'}]))[0])"
 #   预期 401（服务商自己报的错）；若回 403 + error code: 1010，说明请求头又被门外拦了
@@ -133,7 +134,7 @@ npm run lint       # ESLint，当前 exit=0
 
 **端口与服务**：后端 8000、前端 3000，各占一个终端窗口；本轮结束时两个端口都是**空闲**的。
 
-**待用户执行的验收**：见第 3 节——现在只剩独立复核 `pytest -q`（预期 `160 passed`）与冒烟 9 步那一件；P2 走查与真实 provider 均已回报（E-28、E-27）。旧的「用 `due_date = 2026-14-15` 建节点应回 `422`」已在 E-19 验过，不必重做。
+**待用户执行的验收**：见第 3 节——现在只剩独立复核 `pytest -q`（预期 `204 passed`）与冒烟 9 步那一件；P2 走查与真实 provider 均已回报（E-28、E-27）。旧的「用 `due_date = 2026-14-15` 建节点应回 `422`」已在 E-19 验过，不必重做。
 
 **热加载与停服务**：`--reload` 只监听 Python 文件（改 `sql/schema.sql` 不触发），且没装 `watchfiles`（走轮询）。**停服务别只杀父进程**：`--reload` 会派生父子两个进程，`job_kill` 也只杀 PowerShell 外壳；正确做法是 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端换成 3000）找出 PID 再 `Stop-Process`。
 
