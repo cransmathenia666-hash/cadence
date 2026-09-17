@@ -23,7 +23,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import advisor, config, db, ledger, llm, plan
+from . import advisor, config, db, ledger, llm, plan, proposals
 
 app = FastAPI(
     title="cadence",
@@ -484,6 +484,59 @@ def post_candidate_verdict(
     except advisor.CandidateConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except advisor.AdvisorError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+# ---------- 待裁定提案（T14：提案裁定页的后端） ----------
+#
+# 提案是「AI / 规则算出结论、但只有你点头才算数」的东西（SPEC 第 8 节铁律）。
+# 四类 kind 的来源与「批准」各自的含义写在 `app/proposals.py` 的模块说明里，
+# 这里只收参数、把领域错误翻成状态码：不存在 404、已裁定过 409、规则拒绝 400。
+
+
+class ProposalDecideIn(BaseModel):
+    """裁定一条提案。
+
+    `approved=False` 必须写理由（业务层判，缺理由回 400）。`option` 只在批准
+    `plan_replan` 时用：从提案给出的三个方向里选一个（`reduce_scope` / `postpone` /
+    `swap_deliverable`），选中的方向进台账——它回答「当时选了哪条出路」。
+    """
+
+    approved: bool = Field(description="true = 批准（可能带副作用），false = 驳回")
+    reason: str | None = Field(default=None, description="驳回必填；批准时可选，都进台账")
+    option: str | None = Field(default=None, description="批准 plan_replan 时必填：选中的那个方向")
+
+
+@app.get("/api/proposals")
+def get_proposals(kind: str | None = None, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """待裁定提案，按提出顺序排；`kind` 传了就只取那一类（四类之一）。"""
+    return proposals.list_pending(conn, kind)
+
+
+@app.post("/api/proposals/{proposal_id}/decide",
+          responses={409: {"description": "这条提案已经裁定过了，或目标计划已收尾"}})
+def post_proposal_decide(
+    proposal_id: int, payload: ProposalDecideIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """批准 / 驳回一条提案。
+
+    批准不必都改东西：`effect` 字段说明这一次到底动了什么——`plan_closed` 是唯一
+    的结构性动作（「后面没有更多阶段」的推进提案获准 = 计划收尾），`replan_recorded`
+    只记下你选的重排方向，`recorded_only` 就是纯记账。驳回只留痕，不改任何业务数据。
+    """
+    try:
+        return proposals.decide(
+            conn,
+            proposal_id,
+            approved=payload.approved,
+            reason=payload.reason,
+            option=payload.option,
+        )
+    except proposals.ProposalNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except proposals.ProposalConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except proposals.ProposalError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
