@@ -1,11 +1,11 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-17（T23 任务层与交付物验收完工：三级结构、打勾/跳过、交付物提交、阶段完成判定改写；计划类数据按用户指示物理清库）
+> 最近更新：2026-09-18（T24 多计划与严格分开完工：计划列表/收尾/作废、候选带计划归属、采纳落点显式化、候选过期）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`；近期：T12 `f08f75b`、T11+`/ask` `882cf69`、T13 `ad1bf18`/`585166f`、T22 `163f24e`/`b09bc34`、防重复 `af759fa`、超时放宽 `ce265ac`、采纳自动落阶段 `ff8a0d8`、T14 `d1fa80f`/`124634d`、规格落盘 `5a8af21`、清库工具 `3316714`、T23 后端 `3a6854b`、T23 前端 `b18b732`｜无远端｜未提交改动：`AGENTS.md` 一行（另一会话）；`.dsh-vision-toolkit/` 与 `.zcode/` 未跟踪，非本项目产物
+> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`；近期：T12 `f08f75b`、T11+`/ask` `882cf69`、T13 `ad1bf18`/`585166f`、T22 `163f24e`/`b09bc34`、防重复 `af759fa`、超时放宽 `ce265ac`、采纳自动落阶段 `ff8a0d8`、T14 `d1fa80f`/`124634d`、规格落盘 `5a8af21`、清库工具 `3316714`、T23 `3a6854b`/`b18b732`、T24 后端 `9f68eab`、T24 前端 `b6c20ec`｜无远端｜未提交改动：`AGENTS.md` 一行（另一会话）；`.dsh-vision-toolkit/` 与 `.zcode/` 未跟踪，非本项目产物
 > 其他工作树：无
-> 当前唯一目标：**按 SPEC 决策 30–36 施工**——T23（三级结构）已完工；下一步 T24 多计划（决策 33），T25「找」加宽（决策 35）可随时插队
-> 下一条动作：① 用户走查计划表三级界面（`/new` 建阶段与任务 → 打勾 / 跳过 / 提交交付物 → 看阶段完成与推进提案）；② T24 多计划四项（追加契约路由，开工前说清范围）
+> 当前唯一目标：**按 SPEC 决策 30–36 施工**——T23（三级结构）、T24（多计划）已完工；下一步 T25「找」加宽（决策 35），随后 T26 对话式规划（决策 36）
+> 下一条动作：① 用户走查三级界面与多计划（建两个计划 → 切换 → 收尾/作废 → `/candidates` 选计划提问 → 采纳落对计划）；② T25「找」加宽（反馈流水进 prompt + 追问槽位）
 
 ## 1. 当前状态
 
@@ -28,16 +28,17 @@
 | 「找」候选清单与去重（T13） | 通过 | E-31（假上游）、E-33/E-34（真实模型两次） | `find_candidates` / `_check_find` / `decide_candidate`、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效 |
 | 档案录入（T22） | 通过 | E-29/E-30 | 那三条 profile 写路由与请求模型、`advisor.PROFILE_CATEGORIES` 变更后失效 |
 | 采纳自动落阶段（2026-09-17 用户拍板） | 通过 | E-36 | `decide_candidate`、verdict 路由或 `VerdictResult` 变更后失效 |
+| 多计划与严格分开（T24：计划列表/收尾/作废 + 候选归属 + 落点显式化 + 候选过期） | 通过 | E-39（pytest 244、smoke 10 步、lint/tsc） | `plan.list_plans`/`close_plan`/`void_plan`、`db._ADDED_COLUMNS` 那条加列、`advisor` 的归属与过期逻辑、`find.py` 的计划上下文段、那三条计划路由、计划切换器与 `/candidates` 页面变更后失效；**浏览器走查归用户** |
 | 三级结构：任务层 + 交付物验收（T23） | 通过 | E-38（pytest 229、smoke 10 步、lint/tsc） | `plan.py` 的判定与三个动作（`stage_completion` / `stage_finished` / `check_task` / `skip_task` / `submit_deliverable`）、`main.py` 那三条动作路由、`deliverable_submission` 表、计划表组件与 `/new` 页变更后失效；**浏览器走查归用户** |
 | SPEC 第 9 节真实使用验收 | 未验证 | 标准 1、5 的后端部分由 E-19 与 E-38 覆盖 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
 
-**目标：按 SPEC 决策 30–36 施工。** T23（三级结构，决策 30–32）已完工并提交；下一个是 T24 多计划（决策 33），T25「找」加宽（决策 35）可随时插队；对话式规划（决策 36）与 P4 在后。
+**目标：按 SPEC 决策 30–36 施工。** T23（三级结构）、T24（多计划）已完工并提交；下一个是 T25「找」加宽（决策 35），随后 T26 对话式规划（决策 36）与 P4。
 
-**P3 已完成**：T10 provider 管理与调用记账（密钥只写不读、每次调用落一行账、同一操作最多 3 次调用）；T11 `/providers` 页；T12 四问判断（`advisor.py` + `POST /api/requests`(evaluate) + `GET /api/profile`）；T13 候选清单与去重（`providers/find.py` + `find_candidates` / `decide_candidate` + 两条候选路由；去重是硬保证——禁区命中判不合格、重试仍命中则不落一条）；T22 档案三条写入口 + `/profile` 页；采纳自动建同名阶段（E-36）；**T14 候选页与提案裁定页（E-37）**；**T23 三级结构（E-38）**——`plan_node.level` 加 `task`、阶段完成 = 任务全打勾/跳过 + 交付物已提交、打勾/跳过/提交交付物三个动作、新表 `deliverable_submission`、计划表分「任务 / 周打卡」两组。
+**已完成（P3 + P3.5 前两项）**：T10 provider 管理与记账、T11 `/providers` 页、T12 四问判断、T13 候选清单与去重、T14 候选页与提案裁定页 + 提案两条路由、T22 档案三条写入口 + `/profile` 页、采纳自动建同名阶段（E-36）、**T23 三级结构**（`task` 层；阶段完成 = 任务全打勾/跳过 且 交付物已提交；打勾/跳过/交付物三个动作；新表 `deliverable_submission`）、**T24 多计划**（计划列表 + 收尾/作废门；候选带归属并把当前阶段带进 prompt；采纳落点显式；同计划上一轮未裁定候选自动过期）。
 
-**本轮不做 / 下一步**：T24 多计划四项（决策 33：候选带计划归属、落点显式化、`GET /api/plans` + 作废门、界面切换器）；T25「找」加宽（决策 35）；对话式规划（决策 36）；P4 触达与导出（需用户给 SMTP 授权码）。样式方案仍待用户定。
+**本轮不做 / 下一步**：T25「找」加宽（决策 35：反馈流水进 prompt + 追问槽位）；T26 对话式规划（决策 36，含决策 6 修订）；P4 触达与导出（需用户给 SMTP 授权码）。样式方案仍待用户定。
 
 ## 3. 当前开放问题
 
@@ -46,12 +47,10 @@
 候选队列（不影响当前目标）：
 
 - **两个仍有的事**：① `start_reason` 未落库（候选表没这列，加列 = Ask first），重看旧候选看不到依据 id 与推荐理由，要依据得重问一轮；② **没有「改节点字段」的写入口**（台账改写只对 `profile_item` / `plan` 开放），节点建好后改不了 `due_date` / `deliverable`，故重排提案批准后只能记方向——要做需先定「改节点算不算一次台账取代」（改契约，未立项）。
-- **真实库现状（2026-09-17）**：计划类数据已按用户指示**物理清库**（`tools/wipe_plan_data.py`，备份在 `data/cadence.db.bak-20260917-234923`，可回退）；库里只剩长期档案 9 条、provider 3 家、调用记账 17 条。老计划 / 提案 / 候选全没了——这是用户为三级结构选「不做老数据兼容」的直接后果，别拿旧数量去对账。
-- **两个已知边界**：① 去重只做「去空白 + 转小写」归一化、不做模糊匹配——「学 Python」与「Python 基础」仍可能被当新候选（刻意的简单口径）；② 长输出慢（E-32/E-34）——候选清单 23–27 秒 / 4350–4975 token，最坏一次 `find` 约 6 分钟；超时 180 秒 / 体检 20 秒。要提速得压 prompt，未做。
-- **T12/T13 的约定**：① 候选与提案别混——前者在 `/candidates` 裁定、后者在 `/proposals` 按 `kind` 分流；② `profile_item.category` 约定词表 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis`（库内自由文本；表外值不丢，只是不算「缺失类别」）；③ 四问输出没给 `profile_item` id 又不说「依据不足」→ 一律判不合格。
-- **档案现状与写入口径**（T22）：五类已补齐（清库未动档案）。写入口径：`category` 只收五个约定令牌（表外 422）；取代/作废必填理由；同类别同文本回 409 并指明已有 id（判重只看当前有效条目）。#4/#5 是修复前留下的重复，**未清**——想让档案干净去 `/profile` 作废一条。
-- **只能操作「最新建的那个有效计划」**（T24 将改）：契约没有列出计划的接口，前端只能拿 `GET /api/plan` 不传参的「最新 active 计划」；`/new` 已写明「将建在 计划 #N 里」。T24 加 `GET /api/plans` 后解决。用户库现有 3 个计划，另两个界面够不着。
-- **样式方案未决 + 零散口径**：前端全部页面**无 CSS、无组件库**；`sort_order` 前端固定送 0（新建节点按 id 排）。零散口径：`POST /api/report` 无防重复（连点落两条，正解是前端禁用按钮）；框架生成的 `404`/`405` 文案仍是英文（形状已统一）；provider 的「地址/模型」界面上清不成空（留空 = 不改，要清只能改库）；`ledger.fetch_active` 实际取「初始业务状态」（候选只回 `proposed`、提案只回 `pending`），名字误导但行为没错；前端 effect 里同步 setState 会被 `react-hooks/set-state-in-effect` 拦——取数写成 `.then(回调)` 里 setState。**P4 前与远景**：P4 前需用户提供邮箱 SMTP 授权码；SPEC 第 17 节第 3 条记着「档案自动提炼」愿景（agent 读本地原始库、走 pending 提案 + 用户裁定），不阻塞当前目标。
+- **真实库现状**：计划类数据已按用户指示**物理清库**（`tools/wipe_plan_data.py`，备份 `data/cadence.db.bak-20260917-234923` 可回退）；库里只剩长期档案 9 条、provider 3 家、调用记账 17 条——用户为三级结构选了「不做老数据兼容」，别拿旧数量去对账。
+- **两个已知边界**：① 去重只做「去空白 + 转小写」，不做模糊匹配——换个说法的同一件事仍可能被当新候选（刻意简单）；② 长输出慢（E-32/E-34）：候选清单 23–27 秒 / 4350–4975 token，最坏一次 `find` 约 6 分钟，超时 180 秒 / 体检 20 秒。要提速得压 prompt，未做。
+- **口径与约定**：① 候选与提案别混——前者在 `/candidates` 裁定、后者在 `/proposals` 按 `kind` 分流；② `profile_item.category` 只收 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis` 五个约定令牌（库内自由文本，表外 422）；取代/作废必填理由；同类别同文本回 409 并指明已有 id；③ 四问输出没给 `profile_item` id 又不说「依据不足」→ 一律判不合格；④ 档案 #4/#5 是修复前留下的重复，**未清**——想让档案干净去 `/profile` 作废一条；⑤ **`/report` 只列「最新 active 计划」的节点**（T24 按决策未动它）——多计划下想给别的计划报报告，先从该计划页面进去。
+- **样式方案未决 + 零散口径**：前端全部页面**无 CSS、无组件库**。零散口径：`POST /api/report` 无防重复（正解是前端禁用按钮）；框架生成的 `404`/`405` 文案仍是英文；provider 的「地址/模型」清不成空（留空 = 不改）；`ledger.fetch_active` 取的是「初始业务状态」（名字误导、行为没错）；前端 effect 里同步 setState 会被 `react-hooks/set-state-in-effect` 拦（取数写成 `.then` 回调）。**远景**：SPEC 第 17 节第 3 条记着「档案自动提炼」愿景，不阻塞当前目标。
 
 ## 4. 稳定边界与重新打开条件
 
@@ -76,21 +75,22 @@
 | E-19 / 2026-09-15 | 加完 CORS 后一次跑三样：`pytest -q`、`smoke_p1.py` 9 步、临时库起 uvicorn 发 10 组真实请求（5 组跨源 + 5 组错误路径） | 临时脚本与库已删；`data/` 只剩 `cadence.db` | 通过：合法来源两种写法回 `allow-origin`、非法来源静默不放行；**`422` 也带 `allow-origin`**；五条错误路径键集恒为 `{detail, errors}`、`detail` 恒为字符串 | 仅当 `config.py` 的 CORS 名单、`main.py` 两个错误处理器、或既有路由响应形状变更时失效；**新增互不相关路由、只改 tests 均不影响** |
 | E-21 / E-22 / E-24 / E-28（前端早期各轮） | `/report`、`/`、`/new`、`/providers` 各轮 `npm run lint` + `npx tsc --noEmit`，另有路由 HTTP 200 探查；E-28 轮为提交前全项目复跑，同轮用户回报 P2 四页走查通过 | 工程内，可复跑 | 通过：各轮均 exit=0；lint 曾拦下 `react-hooks/set-state-in-effect`（已改为 `.then` 回调里 setState） | **按行为写**：各页行为或其对应 `lib/api.ts` 函数变更后失效；新增互不相关的函数不影响。最近一次全项目复跑见 E-36 |
 | E-25 / 2026-09-15～16 | **真实 provider 首次打通**：commandcode 体检回 `403 error code: 1010`；用不带密钥的对照实验定位——无 UA 回 `403 1010`、换浏览器 UA 回服务商自己的 `401`；据此给 `llm.post_json` 加 `User-Agent`（+ `Accept`） | 对照命令见第 6 节；Cloudflare 1010 =「按浏览器指纹拒绝访问」 | 通过：改后同一代码路径拿到 `401`（服务商报错），已穿过 Cloudflare；用户真密钥体检由 E-27 结清 | `llm.post_json` 的请求头、或 provider 换家后失效。这类「门外被拦」假 provider 永远测不出 |
-| E-26 / E-27 / 2026-09-16 | T12 四问链路：`pytest -q`（160 passed：147 + 13 条 advisor 单测）与 `smoke_p1.py` 9 步（动了契约与台账写入，按纪律加跑）；随后**真实模型端到端跑通一次**（用户操作，Agent 只读库核对）：`/ask` 提「我要不要学python？」→ 记账 `judge` 成功、549 进 / 598 出 token、5.5 秒，`proposal #3`（`material_judgment`）pending | `backend/tests/test_advisor.py` 可复跑；用户库 `llm_call` 与 `proposal #3` 可复查 | 通过：合格输出落 pending 提案且引用 id 真实存在；**没给 id 又不说「依据不足」判不合格**；不合格带原因重试一次、两次不合格抛错且不落提案；无档案不调模型。真实那次质量符合设计（引用了真实存在的 `#2`；④ 明写「依据不足」），**真密钥体检同时得证** | `advisor.py`、那两条路由、`RequestIn`、`post_json` 请求头、provider id=3 配置任一变更后失效。**真实输出质量只跑过 1 次** |
+| E-26 / E-27 / 2026-09-16 | T12 四问链路：`pytest -q`（160 passed：147 + 13 条 advisor 单测）与 `smoke_p1.py` 9 步（动了契约与台账写入，按纪律加跑）；随后**真实模型端到端跑通一次**（用户操作，Agent 只读库核对）：`/ask` 提「我要不要学python？」→ 记账 `judge` 成功、549 进 / 598 出 token、5.5 秒，`proposal #3`（`material_judgment`）pending | `backend/tests/test_advisor.py` 可复跑；用户库 `llm_call` 与 `proposal #3` 可复查 | 通过：合格输出落 pending 提案且引用 id 真实存在；**没给 id 又不说「依据不足」判不合格**；不合格带原因重试一次、两次不合格抛错且不落提案；无档案不调模型。真实那次质量符合设计，**真密钥体检同时得证** | `advisor.py`、那两条路由、`RequestIn`、`post_json` 请求头、provider id=3 配置任一变更后失效。**真实输出质量只跑过 1 次** |
 | E-29 / E-30 / 2026-09-16 | T22 档案录入与防重复：`pytest -q`（177 → 181：+17 条录入 +4 条防重复）与 `smoke_p1.py` 9 步（动了契约语义，按纪律加跑）；提交 `163f24e`/`b09bc34`/`af759fa` | `backend/tests/test_profile_write.py` 可复跑 | 通过：五令牌外 422；取代/作废后旧值从 `GET /api/profile` 消失但台账留痕；历史行再动 409；同类别同文本回 409 并指明已有 id；作废后重填不挡、不同类别不挡 | 那三条写路由与请求模型、`PROFILE_CATEGORIES`、或 `post_profile_item` 判重逻辑变更后失效 |
 | E-31 / 2026-09-16 | T13：`pytest -q`（199 passed：181 + 18 条候选单测）与 `smoke_p1.py` 9 步（动了契约）；提交 `ad1bf18`（后端）、`585166f`（前端） | `backend/tests/test_candidates.py` 可复跑 | 通过：3–5 条越界判不合格并带原因重试、两次不合格不落一条；`rank` 即顺序、`is_recommended` 落在 `recommended_start`；`why` 无依据又不说「依据不足」判不合格；**禁区命中即判不合格**（含空白/大小写变体）；否决缺理由报错、理由进 `reject_reason` 与台账；已裁定 409、不存在 404；`GET /api/candidates` 取最近一轮、无候选返回空 | `find_candidates` / `_check_find` / `decide_candidate`、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效。**只验假上游** |
 | E-32 / 2026-09-16 | 用户走查 T13 踩到读超时（连续两次在恰好 30 秒处 `TimeoutError`，记账 `#9/#10`）；修法：聊天类 `CHAT_TIMEOUT_SECONDS = 180`、体检 `CONNECTIVITY_TIMEOUT_SECONDS = 20`，超时消息补「等了多久 + 建议重试」；`pytest -q` 201 passed（+2 条回归）。提交 `ce265ac` | `backend/tests/test_llm.py` 可复跑；`llm_call` 记账可复查 | 通过：常量与 `post_json` 默认值一致且 ≥120 秒、体检短于聊天；超时抛 `LlmError` 且消息可操作；失败调用仍记账 | `llm.py` 超时常量、`post_json` 默认值或 `Operation.chat` 错误包装变更后失效。修的是「超时太紧」，不保证长清单必然一次成功 |
 | E-33 / E-34 / 2026-09-17 | **真实模型「找」两次**（用户操作，Agent 只读库核对）：请求 3 落候选 #1–#5，用户否决 #1/#5（理由「1」）；请求 7 再问落 #6–#10，**两条禁区标题一条都没出现**；用户采纳 #6（按设计不进禁区）。记账 `llm_call #12`：26.7 秒、输出 4975 token | 用户库 `candidate` / `learning_request` / `llm_call` 可复查 | 通过：成功标准 2 前半句（3–5 条带排序、真 provider）由 E-33 满足；后半句（否决过的不再出现，字面口径）由 E-34 满足 | 证的是「否决 → 禁区 → 重问不出现」链路（`_rejected_titles`、prompt 禁区段、`_check_find`）。**未覆盖**：换说法的同一件事是否漏过（归一化只做去空白与小写）；样本仅两轮 |
 | E-36 / 2026-09-17 | **采纳自动落阶段**（用户拍板，方案经确认后实现）：`decide_candidate` 采纳时在最新 active 计划建同名阶段（预检前置）；响应新增 `plan_id`/`node_id`；`/ask` 采纳提示改为「已在计划 #N 建了阶段 #M」。`pytest -q` 204 passed（+3 条）、`smoke_p1.py` 9 步、前端 lint/tsc exit=0。提交 `ff8a0d8` | `backend/tests/test_candidates.py` 可复跑 | 通过：采纳 → 候选 `accepted` 且计划里出现同名 `stage`（台账紧随 create 事件）；无 active 计划或同名未收尾阶段 → `CandidateConflict`（409）且候选保持 `proposed`、不建节点；否决不建节点 | `decide_candidate`、verdict 路由、`VerdictResult` 或 `/ask` 采纳分支变更后失效 |
-| E-37 / 2026-09-17 | **T14：提案两条后端路由（提交 `d1fa80f`）＋两个正式页与 `/ask` 退场（提交 `124634d`）**。后端：`pytest -q` **216 passed**（+12 条提案单测）、`smoke_p1.py` 9 步（动了契约，按纪律加跑）；前端：`npm run lint` 与 `npx tsc --noEmit` 均 exit=0，`/`、`/candidates`、`/proposals` 在 dev 服务上均返回 200（**不是浏览器验证**）。另用运行中的后端只读验 `GET /api/proposals` 能列出真实库里那 5 条 pending 提案 | `backend/tests/test_proposals.py` 可复跑；提案数据在用户库可复查 | 通过：只列 pending、payload 解成对象、可按 kind 过滤、坏 JSON 不炸整页；裁定落 `accepted`/`rejected` 并补 `decided_at`；驳回缺理由 400、已裁定 409、不存在 404、批准重排未选/选错方向 400（验不过时保持 pending）；批准「最后一段」→ 计划真 `closed`（唯一结构性动作），其余只记账；重排方向进台账 | `proposals.py`、那两条路由与 `ProposalDecideIn`、两个新页面、`lib/api.ts` 的 `listProposals`/`decideProposal` 变更后失效。**只验假上游**（提案 payload 手写 + 真实生产者各打一遍）；**浏览器走查归用户** |
-| E-38 / 2026-09-17 | **T23 三级结构与交付物验收**（用户拍板，规格见 SPEC 决策 30–32）：`plan_node.level` 加 `task`；阶段完成 = 任务全打勾/跳过 **且** 交付物已提交（`stage_finished`）；打勾 / 跳过（必填理由）/ 提交交付物三个动作与三条路由；新表 `deliverable_submission`（重提交 = 新行留痕）；推进提案文案改「任务全部完成、交付物已提交」；计划表分「任务 / 周打卡」两组。验证：`pytest -q` **229 passed**（新增 `test_task_layer.py` 10 条：判定组合矩阵、层级校验与留痕、交付物重提交、落后量、路由状态码；另改写 8 条踩旧判定的旧用例）、`smoke_p1.py` **10 步全绿**（三级流程：建任务→打勾→交交付物→产提案→周打卡不产提案）、前端 lint/tsc exit=0、`/` 与 `/new` 返回 200（非浏览器验证）。提交 `3a6854b`/`b18b732`；规格落盘 `5a8af21`；清库工具 `3316714` | `backend/tests/test_task_layer.py` 可复跑；`tools\smoke_p1.py` 可复跑 | 通过：四组合判定（有/无任务 × 交付物已交/未交）全部符合新规则；无任务阶段任务条件天然满足、只看交付物；周打卡不参与判定（报告它不产提案）；跳过算完成且理由进台账；交付物只对阶段、重提交留痕、当前值 = 最新一行；打勾/跳过只对任务（层级不符 400、不存在 404） | `plan.py` 的判定与三个动作、那三条路由、`deliverable_submission` 表、计划表组件与 `/new`、`lib/api.ts` 的 `checkTask`/`skipTask`/`submitDeliverable` 变更后失效。**老数据兼容不做**——用户选了物理清库（备份在 `data/cadence.db.bak-20260917-234923`）；**浏览器走查归用户** |
+| E-37 / 2026-09-17 | **T14：提案两条后端路由（`d1fa80f`）＋两个正式页与 `/ask` 退场（`124634d`）**。后端 `pytest -q` **216 passed**（+12 条）、`smoke_p1.py` 9 步；前端 lint/tsc exit=0、`/`、`/candidates`、`/proposals` 均 200（非浏览器验证） | `backend/tests/test_proposals.py` 可复跑 | 通过：只列 pending、payload 解成对象、可按 kind 过滤；裁定落 `accepted`/`rejected` 并补 `decided_at`；驳回缺理由 400、已裁定 409、不存在 404、批错方向 400（验不过时保持 pending）；批准「最后一段」→ 计划真 `closed`，其余只记账 | `proposals.py`、那两条路由与 `ProposalDecideIn`、两个新页面、`api.ts` 的 `listProposals`/`decideProposal` 变更后失效。**只验假上游**；**浏览器走查归用户** |
+| E-38 / 2026-09-17 | **T23 三级结构与交付物验收**（规格见 SPEC 决策 30–32）：`plan_node.level` 加 `task`；阶段完成 = 任务全打勾/跳过 **且** 交付物已提交；打勾 / 跳过（必填理由）/ 提交交付物三个动作与三条路由；新表 `deliverable_submission`（重提交 = 新行）；推进提案文案改「任务全部完成、交付物已提交」。验证：`pytest -q` **229 passed**（新增 `test_task_layer.py` 10 条 + 改写 8 条旧用例）、`smoke_p1.py` **10 步全绿**（三级流程）、前端 lint/tsc exit=0。提交 `3a6854b`/`b18b732`；规格落盘 `5a8af21`；清库工具 `3316714` | `backend/tests/test_task_layer.py` 可复跑 | 通过：四组合判定符合新规则；无任务阶段只看交付物；周打卡不参与判定；跳过算完成且理由进台账；交付物只对阶段、重提交留痕、当前值 = 最新一行；打勾/跳过只对任务（层级不符 400、不存在 404） | `plan.py` 判定与三个动作、那三条路由、`deliverable_submission` 表、计划表组件与 `/new`、`api.ts` 三个函数变更后失效。**老数据不做兼容**（物理清库，备份 `.bak-20260917-234923`）；**浏览器走查归用户** |
+| E-39 / 2026-09-18 | **T24 多计划与严格分开**（规格见 SPEC 决策 33–34）：`db.init` 加列迁移（`learning_request.plan_id`）；`plan.list_plans`/`close_plan`/`void_plan` + 三条路由；「找」把计划上下文（目标/当前阶段/开着任务）带进 prompt；候选随请求继承归属；采纳落点 = 归属计划（无归属须显式 `plan_id`，否则 409）；同计划上一轮未裁定候选自动过期。验证：`pytest -q` **244 passed**（新增 `test_plans.py` 12 条 + 改写 3 条）、`smoke_p1.py` 10 步全绿、lint/tsc exit=0、`/`、`/new`、`/candidates` 200（非浏览器验证）。提交 `9f68eab`/`b6c20ec` | `backend/tests/test_plans.py` 可复跑 | 通过：默认列表只给进行中；收尾幂等进历史；作废理由必填且从列表消失；归属随请求传递并可带出；落归属计划、无归属不指明 409 且保持 `proposed`、冲突/不存在/已收尾一律拒；同计划上一轮未裁定的过期、已裁定的不动、别的计划不受影响、过期不进禁区 | `list_plans`/`close_plan`/`void_plan`、加列迁移、`advisor` 归属与过期逻辑、`find.py` 计划上下文段、三条计划路由、计划切换器与 `/candidates` 变更后失效。**浏览器走查归用户** |
 
 ## 6. 启动、验收与上下文
 
 ```powershell
 cd D:\cadence\backend
 .\.venv\Scripts\python.exe -m app.db init         # 建库（可重复执行）
-.\.venv\Scripts\python.exe -m pytest -q           # 预期 229 passed
+.\.venv\Scripts\python.exe -m pytest -q           # 预期 244 passed
 .\.venv\Scripts\python.exe tools\show_db.py       # 只读看库：计划树 / 报告 / 台账 / 提案
 .\.venv\Scripts\python.exe tools\smoke_p1.py      # 闭环冒烟：自起临时库跑 10 步，不动真实数据
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000   # 开发用：改代码自动重启
