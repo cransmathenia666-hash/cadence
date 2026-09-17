@@ -4,6 +4,8 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.9 变更（2026-09-18）**：T25（「找」加宽）与 T26（对话式规划与蓝图）**完工**，各带实施记录；SPEC 决策 35/36 标已实现、第 11 节契约表补三条 plan-chat 路由与 `selected`。
+
 **v0.8 变更（2026-09-18）**：T25/T26 补入「实现要点」（反馈流水的上限与位置、追问槽位形状、对话轮数与历史存储、蓝图 payload、树=版本的取代语义、勾选部分采纳后剩余处理）——SPEC 决策 6/35/36 同步写死，新窗口可照做无需再问。
 
 **v0.7 变更（2026-09-17）**：新增 P3.5 一节（排在 P4 之前）——T23 任务层与交付物验收（三级结构，**取代 T4 定下的旧完成判定**：阶段完成＝周检查点全部收尾 → 任务全打勾/跳过 + 交付物已提交）、T24 多计划与严格分开、T25 「找」的加宽、T26 对话式规划与蓝图。对应 SPEC 决策 30–36。
@@ -128,16 +130,17 @@
   - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/app/advisor.py`、`backend/tests/test_plans.py`、`frontend/app/page.tsx`、`frontend/app/candidates/page.tsx`、`frontend/app/new/page.tsx`、`frontend/lib/api.ts`
   - 实施记录（2026-09-18）：`db.init` 增加列迁移（`learning_request.plan_id`，老库自动追平）；`plan.list_plans` / `close_plan` / `void_plan` + 三条路由；`advisor` 把计划上下文（目标/当前阶段/还开着的任务）组装进「找」的 prompt、候选随请求继承归属、`decide_candidate` 按「归属 > 显式 plan_id」落点（冲突/缺失/已收尾一律 409 且保持 proposed）、`expire_previous_candidates` 实现决策 34（同计划上一轮未裁定自动过期，不进禁区）；前端加计划切换器与管理区、`/candidates` 选计划与「新建计划并采纳」、`/new` 选落点。`pytest -q` 244 passed + `smoke_p1.py` 10 步全绿 + lint/tsc exit=0。提交 `9f68eab`（后端）、`b6c20ec`（前端）。**`/report` 按决策未动**：它仍只列「最新 active 计划」的节点。
 
-- [ ] **T25 「找」的加宽（独立小步，可插队提前）**
+- [x] **T25 「找」的加宽（独立小步，可插队提前）**
   - Acceptance：按 SPEC 决策 35——① 反馈流水（否决理由、采纳/否决记录、每轮清单按时间）进 prompt；② 输出 schema 加可选「追问槽位」，追问必须说清缺哪类信息，否则判不合格（延续「依据不足」纪律）
   - Verify：单测覆盖反馈流水组装与追问槽位的校验；`pytest -q`；真实模型走查归用户
-  - Files：`backend/app/advisor.py`、`backend/app/providers/find.py`、`backend/tests/test_candidates.py`
+  - Files：`backend/app/advisor.py`、`backend/app/providers/find.py`、`backend/tests/test_candidates.py`、`frontend/app/candidates/page.tsx`、`frontend/lib/api.ts`
+  - 实施记录（2026-09-18）：① 反馈流水 = `advisor._feedback_block`（最近 5 轮 `search` 请求：时间 / 计划归属 / 候选标题 / 每条候选的裁定结果与否决理由原文，按时间正序，字符上限 1200、超出从最旧截断；`proposed` 不进这段——「你还没表态」不是反馈；四问请求不进）；条数与上限是常量 `FEEDBACK_ROUNDS` / `FEEDBACK_CHAR_LIMIT`，便于按实测调；经 `Brief.feedback_lines` 交来源层，插在档案段之后、「硬性要求」之前。② 追问槽位 = 可选 `Clarify{question, missing}`；`missing` 必须点名五类档案之一（中文名或英文 token，词表 `CLARIFY_KEYS`），空泛追问判不合格；**追问不替代清单**（仍要 3–5 条）、**不额外增加调用**（仍 1 次 + 最多 1 次重试）；不落库、不加列，只在当次响应里返回。③ 界面把追问显示在清单上方，并标出本轮带上了几轮流水。`pytest -q` 274 passed（244 + 10 条新用例）+ `smoke_p1.py` 10 步全绿（动了响应契约）。提交 `4d8594f`（后端）、`1562da6`（前端）。**未覆盖**：真实模型对反馈流水的利用效果（走查归用户）；条数与上限只按「别让 prompt 更慢」定了常量，未实测调优。
 
-- [ ] **T26 对话式规划与蓝图（含决策 6 修订）**
+- [x] **T26 对话式规划与蓝图（含决策 6 修订）**
   - Acceptance：按 SPEC 决策 36——采纳候选后触发多轮对话问清意向（形态「方案一」：保留候选层）；沿对话生成该方向的树（计划 / 阶段 / 任务）；**树 = 版本**（一个计划同时只有一份待裁定蓝图，新版落库时旧版自动取代、留痕）；裁定支持**勾选部分采纳**；决策 6 修订落进 SPEC。实现前先定两件技术细节：对话历史存哪、蓝图提案的 `kind` 与 payload 形状
   - Verify：单测覆盖蓝图提案落库与裁定（勾选部分落库、未勾选部分的处理）、版本取代留痕；契约新增路由同步 SPEC 第 11 节；真实模型走查归用户
-  - Files：`backend/app/blueprint.py`（或并入 `advisor.py`）、`backend/app/main.py`、`backend/tests/test_blueprint.py`、`frontend/app/candidates/page.tsx`（或新页）、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 6）
-  - 实现要点（2026-09-18 钉死，新窗口照此做）：① 对话 = 每轮 1 次调用、整段上限 **6 轮**（用户随时可说「够了，出方案」）、每轮问 1–3 个问题、历史累计**字符上限 4000**（超出从最早截断）；历史存**新表 `plan_chat`**（plan_id / candidate_id / role / content / created_at，追加式、不经台账，同 `learning_request` 先例）。② 蓝图 = 一条 `proposal`（`kind=plan_blueprint`），payload = `{plan_id, candidate_id, goal, stages:[{title, deliverable, why, tasks:[{title, due_date}]}]}`。③ **树 = 版本**：同一计划同时只有一份 `pending` 蓝图，新版生成时把旧的标为**业务终态 `superseded`**——**不要**对提案调台账的 void/supersede（决策 22 明令禁止），业务终态的先例是候选的 `expired`；`superseded` 不进任何禁区、不影响裁定记录。④ 裁定走 `/api/proposals/{id}/decide`，请求新增 `selected`（勾中的阶段/任务索引），**没勾的部分直接丢弃**（蓝图版本化，想要可以再出一版）。⑤ 批准后用 `plan.add_node` 建树（阶段 → 任务），`deliverable` 写进阶段；建树同样要过防重复闸。⑥ SPEC 决策 6 已同步修订（计划对话 + 生成蓝图两个新调用场景、整段 6 轮 + 生成 1 次），不要再动它。⑦ 前端：在 `/candidates` 采纳后就地展开对话区（消息列表 + 输入框 + 「够了，出方案」）；蓝图进 `/proposals` 按 `kind` 分流渲染（树 + 勾选框）。
+  - Files：`backend/app/blueprint.py`、`backend/app/proposals.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/tests/test_blueprint.py`、`frontend/app/candidates/page.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 6/35/36）
+  - 实施记录（2026-09-18）：新增 `backend/app/blueprint.py` 装两条链路（对话 + 蓝图）。**对话**：`plan_chat` 表（plan_id + candidate_id + role + content，追加式、不经台账）；前提是候选已采纳（否则 409）；每轮 1 次调用、**不重试**（决策 6 修订），整段上限 6 轮（按用户发的话数），历史字符上限 4000 从最早截断（最新一句永远留着）；输出 `{questions(≤3), ready, note}`，既不 ready 又没问题判不合格；助手那侧存 JSON 原文、喂回下一轮时渲染成人话。**蓝图**：`kind=plan_blueprint`，payload 按决策 36 的形状；生成前必须聊过一轮（`can_generate`）；1 次调用 + 不合格带原因重试 1 次；`due_date` 非法判不合格（不悄悄吞）。**树 = 版本**：先建新版再把同计划旧的 pending 标成业务终态 `superseded`（不碰台账生命周期列），被取代的不能再裁。**批准 = 按勾选建树**：`selected` 形如 `["0","1.2"]`（阶段整段 / 单件任务，从 0 起），没勾的直接丢弃，不传 = 整份；`effect=blueprint_built` 且回执带 `built`。**实现时定下的三件事**：① 计划归属复用 `advisor.landing_plan`（原 `_landing_plan` 转为公开）——采纳落点与对话/蓝图归属必须是同一个答案；② 蓝图里与已有阶段**同名**的条目**复用**那条阶段（采纳时自动建的），任务挂到它下面、不重复建，它要交的东西写不进去（改节点字段的写入口不存在）→ 在 `built.notes` 里明说；③ 重名任务 / 下标超界 / 计划已收尾全部在**建之前**查完（台账无请求级事务，验不过就一个节点都不建、提案保持 pending 可重裁）。另把 `advisor._extract_json` 转为公开的 `extract_json` 共用同一套 JSON 取法。`pytest -q` **274 passed**（254 + 20 条新用例）、`smoke_p1.py` 10 步全绿、lint/tsc exit=0；真实库已跑 `python -m app.db init` 追上 `plan_chat` 表。提交 `d24bb58`（后端）、`3ee63b6`（前端）。**未覆盖**：真实模型跑对话与蓝图（走查归用户）；蓝图里「第一版就有同名阶段」这条只由单测覆盖。
 
 ## P4 触达兜底
 
