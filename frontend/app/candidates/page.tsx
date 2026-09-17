@@ -323,6 +323,13 @@ export default function CandidatesPage() {
                       本次禁区（你否决过的，模型不许再推）：{fresh.banned_titles.join("、")}
                     </>
                   )}
+                  {fresh.feedback_lines.length > 0 && (
+                    <>
+                      <br />
+                      上一轮还带上了 {fresh.feedback_lines.length} 轮「找」的流水（连你的否决理由原文）
+                      ——不需要你复述，它自己记得。
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -333,6 +340,19 @@ export default function CandidatesPage() {
               )}
             </small>
           </p>
+
+          {fresh?.clarify != null && (
+            <p>
+              <strong>模型想先问你一句：</strong>
+              {fresh.clarify.question}
+              <br />
+              <small>
+                它说缺的是：{fresh.clarify.missing}。把答案写进上面那个输入框、再要一轮，
+                清单会带着你的回答重给一遍。
+                （追问只在问的那当刻的响应里，不落库；下面这份清单这一轮照给。）
+              </small>
+            </p>
+          )}
 
           <ol>
             {rows.map((row) => {

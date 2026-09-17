@@ -582,11 +582,18 @@ export type FindResult = {
   /** 「建议先从哪条开始」的那条标题（一字不差复制自 candidates）。 */
   recommended_start: string;
   start_reason: string;
+  /**
+   * 追问槽位（SPEC 决策 35 ②）：模型觉得档案里缺了某类信息时先问的一句。
+   * **不落库**——只在这次响应里出现，你回答的那句话就是下一轮的输入。
+   */
+  clarify: { question: string; missing: string } | null;
   /** 候选来源自述。`networked: false` = 甲档（不联网，只给路线建议）。 */
   source: { name: string; networked: boolean };
   profile_basis: ProfileBasis;
   /** 这次被当成禁区的标题（你以前否决过的）。 */
   banned_titles: string[];
+  /** 发进 prompt 的反馈流水（最近几轮「找」与你的表态），已按上限截好。 */
+  feedback_lines: string[];
   calls: number;
 };
 
