@@ -119,10 +119,11 @@
   - Files：`backend/sql/schema.sql`、`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/test_task_layer.py`、`frontend/components/plan-tree.tsx`、`frontend/app/new/page.tsx`、`frontend/lib/api.ts`
   - 实施记录（2026-09-17）：旧判定改写完成——`stage_completion` 只数任务层、`stage_finished` = 任务全收尾 + 交付物已提交（空任务阶段天然满足）；新增 `check_task` / `skip_task`（必填理由）/ `submit_deliverable` 与三条路由；新表 `deliverable_submission`（重提交 = 新行）；推进提案文案改「任务全部完成、交付物已提交」并带 `deliverable_url`；计划表分「任务 / 周打卡」两组、任务可打勾/跳过、阶段可提交与重提交交付物。**老数据不做兼容**：用户选了物理清库（`tools/wipe_plan_data.py`，备份 `data/cadence.db.bak-20260917-234923`）。`pytest -q` 229 passed + `smoke_p1.py` 10 步全绿 + lint/tsc exit=0。提交 `3a6854b`（后端）、`b18b732`（前端）；浏览器走查归用户。
 
-- [ ] **T24 多计划与严格分开**
+- [x] **T24 多计划与严格分开**
   - Acceptance：按 SPEC 决策 33 四条落地——① 候选带计划归属（提问时选计划，或「新方向（不属于任何计划）」）；② 采纳落到候选归属计划，无归属时显式选「进哪个计划 / 新建一个」（**改掉「落最新计划」**）；③ `GET /api/plans` + 计划作废/收尾路由（台账对 plan 的 void/supersede 本就开放），默认只列进行中、作废进历史留理由；④ 界面加计划切换器（首页 / `/new` / `/candidates`）；`/report` 不动
   - Verify：单测覆盖归属传递、无归属时的显式落点、作废后 `GET /api/plans` 不再列出；契约变更同步 SPEC 第 11 节；浏览器走查归用户
   - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/app/advisor.py`、`backend/tests/test_plans.py`、`frontend/app/page.tsx`、`frontend/app/candidates/page.tsx`、`frontend/app/new/page.tsx`、`frontend/lib/api.ts`
+  - 实施记录（2026-09-18）：`db.init` 增加列迁移（`learning_request.plan_id`，老库自动追平）；`plan.list_plans` / `close_plan` / `void_plan` + 三条路由；`advisor` 把计划上下文（目标/当前阶段/还开着的任务）组装进「找」的 prompt、候选随请求继承归属、`decide_candidate` 按「归属 > 显式 plan_id」落点（冲突/缺失/已收尾一律 409 且保持 proposed）、`expire_previous_candidates` 实现决策 34（同计划上一轮未裁定自动过期，不进禁区）；前端加计划切换器与管理区、`/candidates` 选计划与「新建计划并采纳」、`/new` 选落点。`pytest -q` 244 passed + `smoke_p1.py` 10 步全绿 + lint/tsc exit=0。提交 `9f68eab`（后端）、`b6c20ec`（前端）。**`/report` 按决策未动**：它仍只列「最新 active 计划」的节点。
 
 - [ ] **T25 「找」的加宽（独立小步，可插队提前）**
   - Acceptance：按 SPEC 决策 35——① 反馈流水（否决理由、采纳/否决记录、每轮清单按时间）进 prompt；② 输出 schema 加可选「追问槽位」，追问必须说清缺哪类信息，否则判不合格（延续「依据不足」纪律）
