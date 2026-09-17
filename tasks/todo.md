@@ -113,10 +113,11 @@
 
 ## P3.5 结构与流程改造（2026-09-17 定，排在 P4 之前）
 
-- [ ] **T23 任务层与交付物验收（P1 骨架改造；取代 T4 的旧完成判定）**
+- [x] **T23 任务层与交付物验收（P1 骨架改造；取代 T4 的旧完成判定）**
   - Acceptance：结构变三级（计划 → 阶段 → { 任务…、周打卡… }），`plan_node.level` 增 `task`（数据库无约束、不用迁移）；**阶段完成判定 = 全部任务打勾完成或跳过 且 交付物已提交**，满足后才自动产「进下一阶段」提案（文案「任务全部完成、交付物已提交」）；**没有任务的阶段**按「任务条件天然满足」只看交付物；任务一键打勾（走台账）、可跳过（跳过算完成、理由必填）、截止日期可选（带了才进落后量）；交付物提交是阶段上的独立动作（链接 + 一句话，可重新提交、旧值留痕，单独存 `deliverable_submission` 表）；**周打卡不再参与阶段完成判定**（退为周报 / 落后提醒 / P4 触达的节奏职能）；界面：计划表阶段下分两组（任务 / 周打卡）、任务行有打勾按钮、阶段上有「提交交付物」按钮与状态，`/new` 可建任务（选所属阶段）
   - Verify：单测覆盖完成判定四组合（有/无任务 × 交付物已交/未交）、打勾与跳过路径、落后量只吃带日期的任务、交付物重提交留痕；`pytest -q` + `tools\smoke_p1.py`（动了契约与台账写入）；前端 lint 与 tsc exit=0（浏览器走查归用户）
   - Files：`backend/sql/schema.sql`、`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/test_task_layer.py`、`frontend/components/plan-tree.tsx`、`frontend/app/new/page.tsx`、`frontend/lib/api.ts`
+  - 实施记录（2026-09-17）：旧判定改写完成——`stage_completion` 只数任务层、`stage_finished` = 任务全收尾 + 交付物已提交（空任务阶段天然满足）；新增 `check_task` / `skip_task`（必填理由）/ `submit_deliverable` 与三条路由；新表 `deliverable_submission`（重提交 = 新行）；推进提案文案改「任务全部完成、交付物已提交」并带 `deliverable_url`；计划表分「任务 / 周打卡」两组、任务可打勾/跳过、阶段可提交与重提交交付物。**老数据不做兼容**：用户选了物理清库（`tools/wipe_plan_data.py`，备份 `data/cadence.db.bak-20260917-234923`）。`pytest -q` 229 passed + `smoke_p1.py` 10 步全绿 + lint/tsc exit=0。提交 `3a6854b`（后端）、`b18b732`（前端）；浏览器走查归用户。
 
 - [ ] **T24 多计划与严格分开**
   - Acceptance：按 SPEC 决策 33 四条落地——① 候选带计划归属（提问时选计划，或「新方向（不属于任何计划）」）；② 采纳落到候选归属计划，无归属时显式选「进哪个计划 / 新建一个」（**改掉「落最新计划」**）；③ `GET /api/plans` + 计划作废/收尾路由（台账对 plan 的 void/supersede 本就开放），默认只列进行中、作废进历史留理由；④ 界面加计划切换器（首页 / `/new` / `/candidates`）；`/report` 不动
