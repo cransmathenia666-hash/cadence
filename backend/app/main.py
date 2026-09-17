@@ -524,6 +524,9 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
 
     `plan_id` 是这一轮针对的计划（SPEC 决策 33 ①）：带上它，「找」会把该计划的当前阶段
     当上下文；不传 = 「新方向（不属于任何计划）」。
+
+    `clarify` 是「找」的追问槽位（SPEC 决策 35 ②）：模型觉得档案缺了某类信息时会先问一句。
+    它**不落库**——只在这次响应里给你，你回答的那句话就是下一轮的输入。
     """
     request_id = advisor.record_request(conn, payload.kind, payload.raw_text, payload.plan_id)
     try:
@@ -540,9 +543,11 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
                 "candidates": found["candidates"],
                 "recommended_start": found["recommended_start"],
                 "start_reason": found["start_reason"],
+                "clarify": found["clarify"],
                 "source": found["source"],
                 "profile_basis": found["profile_basis"],
                 "banned_titles": found["banned_titles"],
+                "feedback_lines": found["feedback_lines"],
                 "calls": found["calls"],
             }
         result = advisor.judge(conn, payload.raw_text)

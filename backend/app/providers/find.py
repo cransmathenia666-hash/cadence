@@ -35,8 +35,13 @@ class Brief:
     # 这一轮针对的计划（目标 / 当前阶段 / 还开着的任务），已由 advisor 拼成现成行；
     # 为空 = 「新方向（不属于任何计划）」（SPEC 决策 33 ①）
     plan_context_lines: list[str]
+    # 最近几轮「找」的流水（时间 / 计划归属 / 候选标题 / 我的表态与否决理由原文），
+    # 已由 advisor 按条数与字符上限截好（SPEC 决策 35 ①）
+    feedback_lines: list[str]
     # 每档深度主要看哪几类档案，来自 advisor.JUDGE_SOURCES（与四问共用一套判据）
     depth_guide_lines: list[str]
+    # 追问槽位的 missing 允许点名的词（五类各自的中文名与英文 token），来自 advisor.CLARIFY_KEYS
+    clarify_keys: tuple[str, ...]
     depth_targets: tuple[str, ...]
     kinds: tuple[str, ...]
     min_candidates: int
@@ -97,6 +102,16 @@ class RouteOnlySource:
         lines += ["", "【建议深度分四档，各自主要看哪几类档案（与四问判据同一套）】"]
         lines += [f"- {line}" for line in brief.depth_guide_lines]
 
+        if brief.feedback_lines:
+            lines += [
+                "",
+                "【我最近几轮的「找」与我的表态】否决理由是我原样留下的，它比「否决」两个字有用得多：",
+            ]
+            lines += brief.feedback_lines
+            lines += [
+                "别再推我已经否决或已经过期的那几条；采纳过的那条也别再重复推（要推就推它的下一步）。",
+            ]
+
         lines += [
             "",
             "【硬性要求】",
@@ -113,9 +128,18 @@ class RouteOnlySource:
             "- `recommended_start`：从上面这些候选里挑一条作为起点，**一字不差**复制它的 `title`"
             "（复制错一个字会被判为不合格）。",
             "- `start_reason`：为什么先从这个开始，一句话。",
+            "- 可选 `clarify`：如果你觉得档案里缺了某类信息、先问一句能让我下一轮答得更好，"
+            '就加上 `{"question": "你要问我的那一句", "missing": "缺的是哪一类档案信息"}`。'
+            "`missing` 必须点名其中一类（"
+            + " / ".join(brief.clarify_keys)
+            + "），不许写空泛的话——"
+            "像「你想学什么」这种把问题抛回给我的追问会被判为不合格。",
+            "- **`clarify` 不能替代清单**：带追问的这一轮照样要给满 "
+            f"{brief.min_candidates}–{brief.max_candidates} 条候选。没有要追问的就不要给这个字段。",
             "- 只输出一个 JSON 对象，不要解释、不要 Markdown 代码块。形状："
             '{"candidates": [{"title": "...", "kind": "...", "why": "...", "depth_target": "...",'
-            ' "profile_item_ids": [数字, ...]}, ...], "recommended_start": "...", "start_reason": "..."}',
+            ' "profile_item_ids": [数字, ...]}, ...], "recommended_start": "...", "start_reason": "..."'
+            '[, "clarify": {"question": "...", "missing": "..."}]}',
         ]
 
         if brief.banned_titles:

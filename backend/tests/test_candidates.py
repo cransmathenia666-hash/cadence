@@ -72,18 +72,24 @@ def candidate(title: str, ids: list[int], *, why: str | None = None, kind="conce
     }
 
 
-def list_json(candidates: list[dict], *, start: str | None = None, reason="先把基础补齐") -> str:
-    return json.dumps(
-        {
-            "candidates": candidates,
-            "recommended_start": start or candidates[0]["title"],
-            "start_reason": reason,
-        },
-        ensure_ascii=False,
-    )
+def list_json(
+    candidates: list[dict],
+    *,
+    start: str | None = None,
+    reason="先把基础补齐",
+    clarify: dict | None = None,
+) -> str:
+    payload = {
+        "candidates": candidates,
+        "recommended_start": start or candidates[0]["title"],
+        "start_reason": reason,
+    }
+    if clarify is not None:
+        payload["clarify"] = clarify
+    return json.dumps(payload, ensure_ascii=False)
 
 
-def four(ids: list[int], **overrides) -> str:
+def four(ids: list[int], *, clarify: dict | None = None, **overrides) -> str:
     """一份合格的四条候选——最常用的底稿。"""
     return list_json(
         [
@@ -91,7 +97,8 @@ def four(ids: list[int], **overrides) -> str:
             candidate("HTTP 与后端接口", ids, **overrides),
             candidate("SQLite 与数据持久化", ids, **overrides),
             candidate("部署一个能访问的小项目", ids, depth="够用", kind="project", **overrides),
-        ]
+        ],
+        clarify=clarify,
     )
 
 
@@ -482,3 +489,188 @@ def test_list_candidates_without_any_search_is_empty_not_an_error(conn):
         "candidates": [],
         "recommended": None,
     }
+
+
+# ---------- 反馈流水（T25：SPEC 决策 35 ①） ----------
+#
+# 这一段回答的是「我上次为什么不要那条」——光有禁区（标题不许重复）不足以让模型知道
+# 我的偏好，所以把最近几轮的表态连理由原文一起发过去。
+
+def settle(
+    conn, request_id: int, title: str, status: str, reason: str | None = None
+) -> int:
+    """造一条指定状态的候选——不裁定就落不了反馈流水，这里直接把它推到终态。"""
+    candidate_id = ledger.create_active(
+        conn,
+        "candidate",
+        {"request_id": request_id, "title": title, "why": "w", "depth_target": "够用", "rank": 1},
+        actor="agent",
+        reason="测试用",
+    )
+    if status == "rejected":
+        advisor.decide_candidate(conn, candidate_id, accept=False, reason=reason or "不想学")
+    elif status == "accepted":
+        # 采纳要落进候选自带的归属计划（决策 33 ②）；归属为空就现建一个
+        inherited = conn.execute(
+            "SELECT plan_id FROM learning_request WHERE id = ?", (request_id,)
+        ).fetchone()["plan_id"]
+        plan_id = inherited or ledger.create_active(
+            conn, "plan", {"goal": f"为「{title}」建的计划"}, actor="user"
+        )
+        advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)
+    elif status == "expired":
+        ledger.set_status(conn, "candidate", candidate_id, "expired", actor="agent", reason="过期")
+    return candidate_id
+
+
+def prompt_of(transport: ScriptedTransport) -> str:
+    return transport.seen[0]["payload"]["messages"][-1]["content"]
+
+
+def test_feedback_carries_verdicts_reasons_and_skips_the_undecided(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    plan_id = ledger.create_active(conn, "plan", {"goal": "学英语"}, actor="user")
+    attributed = advisor.record_request(conn, "search", "上一轮", plan_id)
+    settle(conn, attributed, "已否决的方向", "rejected", "和主线无关")
+    settle(conn, attributed, "已采纳的方向", "accepted")
+    settle(conn, attributed, "过期的方向", "expired")
+    settle(conn, attributed, "还没表态的方向", "proposed")
+    free = advisor.record_request(conn, "search", "更早那轮")
+    settle(conn, free, "新方向里的候选", "rejected", "太贵")
+
+    transport = ScriptedTransport(four([axis]))
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+    prompt = prompt_of(transport)
+
+    assert "已否决的方向（已否决：和主线无关）" in prompt  # 理由原文，不是只有「否决」两个字
+    assert "已采纳的方向（已采纳）" in prompt
+    assert "过期的方向（已过期（我没表态，不算否决））" in prompt
+    assert "还没表态的方向" not in prompt  # 你还没表态的，不当反馈喂回去
+    assert f"计划 #{plan_id}" in prompt  # 每轮带计划归属
+    assert "新方向（不属于任何计划）" in prompt
+    # 时间正序：先提的那轮在前，后提的那轮在后
+    lines = result["feedback_lines"]
+    assert "已否决的方向" in lines[0] and f"计划 #{plan_id}" in lines[0]
+    assert "新方向里的候选" in lines[1]
+
+
+def test_feedback_keeps_only_the_last_five_rounds(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    for index in range(1, 7):  # 六轮，只该记住后五轮
+        request_id = advisor.record_request(conn, "search", f"第 {index} 轮")
+        settle(conn, request_id, f"方向{index}", "rejected", f"理由{index}")
+
+    transport = ScriptedTransport(four([axis]))
+    advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+    prompt = prompt_of(transport)
+
+    assert "方向1（" not in prompt  # 最老那一轮被挤出窗口
+    assert all(f"方向{index}（" in prompt for index in range(2, 7))
+
+
+def test_feedback_is_truncated_from_the_oldest_by_char_limit(conn):
+    """整段超过 1200 字符时从最旧截断——越近的表态越该被记住。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    long_reason = "理由" * 100  # 一条理由就 200 字，五行必定超上限
+    for index in range(1, 7):
+        request_id = advisor.record_request(conn, "search", f"第 {index} 轮")
+        settle(conn, request_id, f"方向{index}", "rejected", long_reason)
+
+    transport = ScriptedTransport(four([axis]))
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+    lines = result["feedback_lines"]
+
+    assert len(lines) < 6  # 真的截了
+    assert "方向6（" in lines[-1] and "方向1（" not in "".join(lines)  # 留最新、丢最旧
+    assert sum(len(line) for line in lines) <= advisor.FEEDBACK_CHAR_LIMIT
+
+
+def test_feedback_ignores_four_question_rounds(conn):
+    """四问（evaluate）记录不进这段——它回答的是「这份资料值不值得学」，不是方向偏好。
+
+    注意它的标题仍会进**禁区**（`_rejected_titles` 只看候选状态、不看请求类别）：
+    禁区的口径是「我否决过这个」，与它从哪个入口来无关。这里钉的是反馈流水那一段。
+    """
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    evaluate = advisor.record_request(conn, "evaluate", "我看了一个教程")
+    settle(conn, evaluate, "四问那一轮的候选", "rejected", "不要")
+
+    transport = ScriptedTransport(four([axis]))
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+
+    assert result["feedback_lines"] == []
+
+
+# ---------- 追问槽位（T25：SPEC 决策 35 ②） ----------
+
+def test_clarify_rides_along_without_replacing_the_list(conn):
+    """追问不能替代清单：带追问的那一轮照样给满候选，且它**不落库**。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    asked = {"question": "你现在每周能稳定投入几小时？", "missing": "当前状态"}
+    transport = ScriptedTransport(four([axis], clarify=asked))
+
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+
+    assert result["attempts"] == 1
+    assert len(result["candidates"]) == 4
+    assert result["clarify"] == asked
+    assert "clarify" in prompt_of(transport)  # 这个槽位真写进了 prompt
+
+    request_id = advisor.record_request(conn, "search", "问过")
+    advisor.propose_candidates(conn, request_id=request_id, result=result)
+    assert "clarify" not in advisor.list_candidates(conn)  # 只活在当次响应里
+    row = conn.execute("SELECT * FROM candidate LIMIT 1").fetchone()
+    assert "clarify" not in row.keys()  # 没为它建列
+
+
+@pytest.mark.parametrize(
+    "clarify",
+    [
+        {"question": "你想学什么？", "missing": "还不清楚"},  # 空泛追问
+        {"question": "你想学什么？", "missing": "很多方面"},  # 没点名任何一类档案
+    ],
+)
+def test_vague_clarify_is_unqualified_and_gets_one_retry(conn, clarify):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(four([axis], clarify=clarify), four([axis]))
+
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+
+    assert result["attempts"] == 2
+    assert result["clarify"] is None  # 第二次没追问，就干净地没有
+    assert "没说清缺哪类档案信息" in transport.seen[1]["payload"]["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize(
+    "clarify",
+    [
+        {"question": "   ", "missing": "当前状态"},
+        {"question": "想问你一件事", "missing": "  "},
+    ],
+)
+def test_clarify_needs_both_fields(conn, clarify):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(four([axis], clarify=clarify), four([axis]))
+
+    assert advisor.find_candidates(conn, "我不知道该学什么", transport=transport)["attempts"] == 2
+
+
+def test_clarify_accepts_the_english_token_too(conn):
+    """中文名或英文 token 都算点名——判据宽松的那一面也钉住。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(
+        four([axis], clarify={"question": "你的作息是怎样的？", "missing": "life_habit"})
+    )
+
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+
+    assert result["attempts"] == 1
+    assert result["clarify"]["missing"] == "life_habit"

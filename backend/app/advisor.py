@@ -404,6 +404,31 @@ CANDIDATE_KINDS: tuple[str, ...] = ("concept", "doc", "project", "course")
 MIN_CANDIDATES = 3
 MAX_CANDIDATES = 5
 
+# 反馈流水（SPEC 决策 35 ①）：把最近几轮「找」的结果连着你的表态发进下一轮 prompt。
+# 条数与字符上限写成常量，便于按实测调整——候选清单本来就慢（23–27 秒 / 约 5000 token），
+# 这段是这轮新增的唯一负担，所以卡得比模型上下文紧得多：宁少说，不多烧。
+FEEDBACK_ROUNDS = 5
+FEEDBACK_CHAR_LIMIT = 1200
+
+# 只有这三种状态的候选进反馈流水：`proposed` 是「你还没表态」，喂回去等于让模型
+# 自己给自己打分。过期与否决分开说——过期**不是**否决（决策 34），它只是「上一轮不算数了」。
+FEEDBACK_STATUSES: tuple[str, ...] = ("accepted", "rejected", "expired")
+
+_VERDICT_LABELS = {
+    "accepted": "已采纳",
+    "rejected": "已否决",
+    "expired": "已过期（我没表态，不算否决）",
+}
+
+# 追问槽位里「缺哪类信息」必须点名的词（SPEC 决策 35 ②）。判据刻意宽松：中文名或英文
+# token 都算，只要能看出问的是哪一类档案就行。为什么要卡这一条：不点名就成「你想学什么」
+# 那种空泛追问——它把问题原样抛回给你，等于什么都没说。
+CLARIFY_KEYS: tuple[str, ...] = tuple(
+    name
+    for token, label in PROFILE_CATEGORIES.items()
+    for name in (label.split("（")[0].strip(), token)
+)
+
 
 class Candidate(BaseModel):
     """一条候选。`why` 与四问的 `answer` 同一条底线：要么指回档案，要么明说依据不足。"""
@@ -415,14 +440,87 @@ class Candidate(BaseModel):
     profile_item_ids: list[int] = Field(default_factory=list)
 
 
+class Clarify(BaseModel):
+    """追问槽位（SPEC 决策 35 ②）：信息不够时先问一句——但清单照给。
+
+    `missing` 要说清缺的是哪一类档案信息（校验见 `_clarify_problem`）。
+    **不落库**：它只在当次响应里出现（同 `start_reason` 的处理），你回答的内容就是
+    下一轮的输入，不需要为它建表加列。
+    """
+
+    question: str = Field(min_length=1)
+    missing: str = Field(min_length=1)
+
+
 class FoundList(BaseModel):
-    """一次「找」的输出。条数越界会被 Pydantic 直接拦住（不补齐、不截断）。"""
+    """一次「找」的输出。条数越界会被 Pydantic 直接拦住（不补齐、不截断）。
+
+    `clarify` 可选：**追问不能替代清单**——带追问的那一轮仍必须给满 3–5 条。
+    """
 
     candidates: list[Candidate] = Field(
         min_length=MIN_CANDIDATES, max_length=MAX_CANDIDATES
     )
     recommended_start: str = Field(min_length=1)
     start_reason: str = Field(min_length=1)
+    clarify: Clarify | None = None
+
+
+def _feedback_lines(conn: sqlite3.Connection) -> list[str]:
+    """最近几轮「找」的流水，按时间正序（最早的一轮在前）。
+
+    每行一条请求：时间 / 计划归属 / 这一轮每条候选的标题与裁定结果（否决带理由原文）。
+    只取 `search` 那一类请求——四问（`evaluate`）记录不进这段（决策 35 ①）：那问的是
+    「一份资料值不值得学」，和「别给我推什么方向」不是一回事。一轮里要是一句表态都还没有，
+    这一轮就没有可说的，跳过。
+    """
+    rounds = conn.execute(
+        "SELECT id, plan_id, created_at FROM learning_request"
+        " WHERE kind = 'search' ORDER BY id DESC LIMIT ?",
+        (FEEDBACK_ROUNDS,),
+    ).fetchall()
+
+    lines: list[str] = []
+    for request in reversed(rounds):  # 时间正序
+        rows = conn.execute(
+            f"""SELECT title, status, reject_reason FROM candidate
+                WHERE request_id = ? AND status IN ({', '.join('?' * len(FEEDBACK_STATUSES))})
+                ORDER BY rank, id""",
+            (request["id"], *FEEDBACK_STATUSES),
+        ).fetchall()
+        if not rows:
+            continue
+        scope = "新方向（不属于任何计划）" if request["plan_id"] is None else f"计划 #{request['plan_id']}"
+        items: list[str] = []
+        for row in rows:
+            verdict = _VERDICT_LABELS.get(str(row["status"]), str(row["status"]))
+            reason = str(row["reject_reason"] or "").strip()
+            if str(row["status"]) == "rejected" and reason:
+                verdict = f"{verdict}：{reason}"  # 理由原文——它比「否决」两个字有用得多
+            items.append(f"{row['title']}（{verdict}）")
+        lines.append(f"- {_short_time(str(request['created_at']))}｜{scope}｜" + "；".join(items))
+    return lines
+
+
+def _feedback_block(conn: sqlite3.Connection) -> list[str]:
+    """反馈流水那一段，已按 `FEEDBACK_CHAR_LIMIT` **从最旧截断**（决策 35 ①）。
+
+    从最新往回收，收不下就丢掉更旧的——越近的表态越该被记住。单行就超上限时
+    仍然留它（一条真实表态好过一片空白），这也是这道闸只保证「通常不超」的原因。
+    """
+    kept: list[str] = []
+    used = 0
+    for line in reversed(_feedback_lines(conn)):
+        if kept and used + len(line) > FEEDBACK_CHAR_LIMIT:
+            break
+        kept.insert(0, line)
+        used += len(line)
+    return kept
+
+
+def _short_time(iso: str) -> str:
+    """把 ISO 时间压成「2026-09-18 10:23」——精确到分钟足够，还省 prompt 字符。"""
+    return iso.replace("T", " ")[:16]
 
 
 def _normalize_title(title: str) -> str:
@@ -450,12 +548,13 @@ def _brief(
     raw_text: str,
     profile: dict[str, Any],
     banned: list[str],
+    feedback: list[str],
     context: dict[str, Any] | None = None,
 ) -> Brief:
     """把档案与判据组装成来源层要的输入（见 `providers/find.Brief`）。
 
     组装留在 advisor 而不是来源层：档案长什么样、哪些类别空着、每档深度看哪几类、
-    这一轮针对哪个计划，这些都是「判」的知识；来源只管怎么把它讲给模型听。
+    这一轮针对哪个计划、最近表态过什么，这些都是「判」的知识；来源只管怎么把它讲给模型听。
     """
     plan_lines: list[str] = []
     if context is not None:
@@ -476,6 +575,7 @@ def _brief(
         ],
         missing_labels=[PROFILE_CATEGORIES[key] for key in profile["missing_categories"]],
         plan_context_lines=plan_lines,
+        feedback_lines=feedback,
         depth_guide_lines=[
             f"{QUESTIONS[key]}：主要看 "
             + "、".join(PROFILE_CATEGORIES[name] for name in JUDGE_SOURCES[key])
@@ -483,6 +583,7 @@ def _brief(
         ],
         depth_targets=DEPTH_TARGETS,
         kinds=CANDIDATE_KINDS,
+        clarify_keys=CLARIFY_KEYS,
         min_candidates=MIN_CANDIDATES,
         max_candidates=MAX_CANDIDATES,
         banned_titles=banned,
@@ -518,7 +619,10 @@ def find_candidates(
     chosen_source = source or find.DEFAULT_SOURCE
     allowed_ids = {item["id"] for item in profile["items"]}
     banned = _rejected_titles(conn)
-    messages = chosen_source.build_messages(_brief(raw_text, profile, banned, context))
+    feedback = _feedback_block(conn)
+    messages = chosen_source.build_messages(
+        _brief(raw_text, profile, banned, feedback, context)
+    )
 
     operation = llm.Operation(conn, TASK_FIND, transport=transport)
     text = operation.chat(messages, provider_id=provider_id, model=model)
@@ -553,15 +657,36 @@ def find_candidates(
         "candidates": [item.model_dump() for item in found.candidates],
         "recommended_start": found.recommended_start,
         "start_reason": found.start_reason,
+        # 追问只在当次响应里给（决策 35 ②）：不落库、下次提问看不到它，
+        # 你回答的那句话本身就是下一轮的输入。
+        "clarify": None if found.clarify is None else found.clarify.model_dump(),
         "source": find.describe(chosen_source),
         "profile_basis": {
             "total": len(profile["items"]),
             "missing_categories": profile["missing_categories"],
         },
         "banned_titles": banned,
+        "feedback_lines": feedback,
         "attempts": attempts,
         "calls": operation.used,
     }
+
+
+def _clarify_problem(clarify: Clarify) -> str | None:
+    """追问槽位的验收：说清了缺哪类档案信息才放行（决策 35 ②）。
+
+    刻意**不**要求被追问的那一类此刻真的空着：档案里有一条不等于它够用，
+    模型想问细一点是正当的；要堵的是「你想学什么」这种把问题原样抛回来的空泛追问。
+    """
+    if not clarify.question.strip() or not clarify.missing.strip():
+        return "clarify 的 question 与 missing 缺一不可——缺一个就别给 clarify"
+    if not any(name in clarify.missing for name in CLARIFY_KEYS):
+        return (
+            f"clarify 的 missing「{clarify.missing}」没说清缺哪类档案信息——"
+            f"missing 要点名其中一类：{'、'.join(CLARIFY_KEYS)}。"
+            "空泛的追问（例如「你想学什么」）不算合格"
+        )
+    return None
 
 
 def _check_find(
@@ -583,6 +708,11 @@ def _check_find(
             for item in error.errors()
         )
         return None, f"字段不合格（{details}）"
+
+    if found.clarify is not None:
+        problem = _clarify_problem(found.clarify)
+        if problem is not None:
+            return None, problem
 
     cited = {item_id for candidate in found.candidates for item_id in candidate.profile_item_ids}
     unknown = sorted(cited - allowed_ids)
