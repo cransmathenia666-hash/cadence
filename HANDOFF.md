@@ -1,6 +1,6 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-18（**T25「找」加宽与 T26 对话式规划都完工**——278 passed、冒烟 10 步；真实库已跑 `db.init` 追上 `plan_chat` 表）
+> 最近更新：2026-09-18（**T25「找」加宽与 T26 对话式规划都完工**——279 passed、冒烟 10 步；真实库已跑 `db.init` 追上 `plan_chat` 表）
 > 仓库根目录：`D:\cadence`
 > 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`；近期：T12 `f08f75b`、T11+`/ask` `882cf69`、T13 `ad1bf18`/`585166f`、T22 `163f24e`/`b09bc34`、防重复 `af759fa`、超时放宽 `ce265ac`、采纳自动落阶段 `ff8a0d8`、T14 `d1fa80f`/`124634d`、规格落盘 `5a8af21`、清库工具 `3316714`、T23 `3a6854b`/`b18b732`、T24 `9f68eab`/`b6c20ec`、T25 `4d8594f`/`1562da6`、T26 `d24bb58`/`3ee63b6`｜无远端｜未提交改动：无（`.dsh-vision-toolkit/` 与 `.zcode/` 未跟踪，非本项目产物）
 > 其他工作树：无
@@ -30,7 +30,7 @@
 | 采纳自动落阶段（2026-09-17 用户拍板） | 通过 | E-36 | `decide_candidate`、verdict 路由或 `VerdictResult` 变更后失效 |
 | 多计划与严格分开（T24） | 通过 | E-39 | `plan.list_plans`/`close_plan`/`void_plan`、`db._ADDED_COLUMNS` 那条加列、`advisor` 的归属与过期逻辑、`find.py` 的计划上下文段、那三条计划路由、计划切换器与 `/candidates` 页面变更后失效；**浏览器走查归用户** |
 | 三级结构：任务层 + 交付物验收（T23） | 通过 | E-38 | `plan.py` 的判定与三个动作（`stage_completion` / `stage_finished` / `check_task` / `skip_task` / `submit_deliverable`）、`main.py` 那三条动作路由、`deliverable_submission` 表、计划表组件与 `/new` 页变更后失效；**浏览器走查归用户** |
-| 对话式规划与蓝图（T26） | 通过 | E-41 | `backend/app/blueprint.py`、`proposals.decide` 的蓝图分支与 `ProposalDecideIn.selected`、`blueprint.resolve_plan` / `thread_plan` 的归属解析、`plan_chat` 表、`/candidates` 对话区与 `/proposals` 的蓝图渲染变更后失效；**真实模型未跑，走查归用户** |
+| 对话式规划与蓝图（T26） | 通过 | E-41 | `backend/app/blueprint.py`、`proposals.decide` 的蓝图分支与 `ProposalDecideIn.selected`、`blueprint.resolve_plan` 的归属解析、`plan_chat` 表、`/candidates` 对话区与 `/proposals` 的蓝图渲染变更后失效；**真实模型未跑，走查归用户** |
 | SPEC 第 9 节真实使用验收 | 未验证 | 标准 1、5 的后端部分由 E-19 与 E-38 覆盖 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
@@ -50,7 +50,7 @@
 - **两个仍有的事**：① `start_reason` 未落库（候选表没这列，加列 = Ask first），重看旧候选看不到依据 id 与推荐理由，要依据得重问一轮；② **没有「改节点字段」的写入口**（台账改写只对 `profile_item` / `plan` 开放），节点建好后改不了 `due_date` / `deliverable`，故重排提案批准后只能记方向——**T26 也吃了这条**：蓝图复用已有阶段时，那阶段的 `deliverable` 写不进去（在裁定回执里明说）；要做需先定「改节点算不算一次台账取代」（改契约，未立项）。
 - **真实库现状**：计划类数据已按用户指示**物理清库**（工具 `tools/wipe_plan_data.py`，备份 `.bak-20260917-234923` 可回退）；库里只剩长期档案 9 条、provider 3 家、调用记账 17 条——用户为三级结构选了「不做老数据兼容」，别拿旧数量去对账。**2026-09-18 已跑 `db.init`** 补 `plan_chat` 表。
 - **两个已知边界**：① 去重只做「去空白 + 转小写」，不做模糊匹配——换个说法的同一件事仍可能被当新候选（刻意简单）；② 长输出慢（E-32/E-34）：候选清单 23–27 秒 / 约 5000 token，最坏一次 `find` 约 6 分钟；超时 180 秒 / 体检 20 秒。要提速得压 prompt，未做——T25 新加的反馈流水已按 1200 字符上限卡住，但**没有实测调优**。
-- **口径与约定**：① 候选与提案别混——前者在 `/candidates` 裁定、后者在 `/proposals` 按 `kind` 分流（`plan_blueprint` 是树 + 勾选框）；② `profile_item.category` 只收 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis` 五个约定令牌（库内自由文本，表外 422）；取代/作废必填理由；同类别同文本回 409 并指明已有 id；③ 四问输出没给 `profile_item_id` id 又不说「依据不足」→ 一律判不合格；④ 档案 #4/#5 是修复前留下的重复，**未清**——想让档案干净去 `/profile` 作废一条；⑤ **`/report` 只列「最新 active 计划」的节点**（T24 按决策未动它）——多计划下想给别的计划报报告，先从该计划页面进去；⑥ 规划对话与蓝图都要「候选已采纳」当前提，不勾 = 整份采纳、一个都没勾回 400；**计划归属按「调用方说明 > 已有对话记着的 > 候选自带」解析**——「新方向」候选的落点只活在采纳当刻，刷新后靠 `plan_chat` 认账（2026-09-18 修的真实 bug）。
+- **口径与约定**：① 候选与提案别混——前者在 `/candidates` 裁定、后者在 `/proposals` 按 `kind` 分流（`plan_blueprint` 是树 + 勾选框）；② `profile_item.category` 只收 `life_habit` / `life_log` / `current_state` / `short_term_goal` / `long_axis` 五个约定令牌（库内自由文本，表外 422）；取代/作废必填理由；同类别同文本回 409 并指明已有 id；③ 四问输出没给 `profile_item_id` id 又不说「依据不足」→ 一律判不合格；④ 档案 #4/#5 是修复前留下的重复，**未清**——想让档案干净去 `/profile` 作废一条；⑤ **`/report` 只列「最新 active 计划」的节点**（T24 按决策未动它）——多计划下想给别的计划报报告，先从该计划页面进去；⑥ 规划对话与蓝图都要「候选已采纳」当前提，不勾 = 整份采纳、一个都没勾回 400；**计划归属按「调用方说明 > 已有对话记着的 > 候选自带」解析**——「新方向」候选的落点只活在采纳当刻，刷新后靠 `plan_chat` 认账（2026-09-18 修的 bug）。
 - **样式方案未决 + 零散口径**：前端全部页面**无 CSS、无组件库**。零散口径：`POST /api/report` 无防重复（正解是前端禁用按钮）；框架生成的 `404`/`405` 文案仍是英文；provider 的「地址/模型」清不成空（留空 = 不改）；`ledger.fetch_active` 取的是「初始业务状态」（名字误导、行为没错）；前端 effect 里同步 setState 会被 `react-hooks/set-state-in-effect` 拦（取数写成 `.then` 回调）。**远景**：SPEC 第 17 节第 3 条记着「档案自动提炼」愿景，不阻塞当前目标。
 
 ## 4. 稳定边界与重新打开条件
@@ -84,14 +84,14 @@
 | E-38 / 2026-09-17 | **T23 三级结构与交付物验收**（规格见 SPEC 决策 30–32）：`plan_node.level` 加 `task`；阶段完成 = 任务全打勾/跳过 **且** 交付物已提交；打勾 / 跳过（必填理由）/ 提交交付物三个动作与三条路由；新表 `deliverable_submission`（重提交 = 新行）；推进提案文案改「任务全部完成、交付物已提交」。验证：`pytest -q` **229 passed**（新增 `test_task_layer.py` 10 条 + 改写 8 条旧用例）、`smoke_p1.py` **10 步全绿**（三级流程）、前端 lint/tsc exit=0 | `backend/tests/test_task_layer.py` 可复跑 | 通过：四组合判定符合新规则；无任务阶段只看交付物；周打卡不参与判定；跳过算完成且理由进台账；交付物只对阶段、重提交留痕、当前值 = 最新一行；打勾/跳过只对任务（层级不符 400、不存在 404） | `plan.py` 判定与三个动作、那三条路由、`deliverable_submission` 表、计划表组件与 `/new`、`api.ts` 三个函数变更后失效。**老数据不做兼容**（物理清库，备份 `.bak-20260917-234923`）；**浏览器走查归用户** |
 | E-39 / 2026-09-18 | **T24 多计划与严格分开**（规格见 SPEC 决策 33–34）：`db.init` 加列迁移（`learning_request.plan_id`）；`plan.list_plans`/`close_plan`/`void_plan` + 三条路由；「找」把计划上下文（目标/当前阶段/开着任务）带进 prompt；候选随请求继承归属；采纳落点 = 归属计划（无归属须显式 `plan_id`，否则 409）；同计划上一轮未裁定候选自动过期。验证：`pytest -q` **244 passed**、`smoke_p1.py` 10 步全绿、前端 lint/tsc exit=0 | `backend/tests/test_plans.py` 可复跑 | 通过：默认列表只给进行中；收尾幂等进历史；作废理由必填且从列表消失；归属随请求传递并可带出；落归属计划、无归属不指明 409 且保持 `proposed`、冲突/不存在/已收尾一律拒；同计划上一轮未裁定的过期、已裁定的不动、别的计划不受影响、过期不进禁区 | `list_plans`/`close_plan`/`void_plan`、加列迁移、`advisor` 归属与过期逻辑、`find.py` 计划上下文段、三条计划路由、计划切换器与 `/candidates` 变更后失效。**浏览器走查归用户** |
 | E-40 / 2026-09-18 | **T25「找」加宽**（规格见 SPEC 决策 35）：`_feedback_block`（最近 5 轮 `search` 的流水进 prompt，1200 字符上限从最旧截断）；`Clarify{question, missing}` 追问槽位，`missing` 必须点名五类档案之一。验证：`pytest -q` **274 passed**、`smoke_p1.py` 10 步全绿（动了契约） | `backend/tests/test_candidates.py` 可复跑 | 通过：流水只取 `search`、只放已裁定/已过期（`proposed` 不进）、按时间正序、超上限丢最旧；追问缺一字段或不点名类别判不合格、带追问仍给满 3–5 条、**不落库不加列** | `_feedback_block`/`_clarify_problem`/`CLARIFY_KEYS`、`find.py` 的 prompt 段与形状行、那三个常量变更后失效。**只验假上游**；真实模型对反馈流水的利用未验 |
-| E-41 / 2026-09-18 | **T26 对话式规划与蓝图**（规格见 SPEC 决策 36）：新表 `plan_chat`；对话上限 6 轮 / 历史 4000 字符、每轮 1 次调用不重试；蓝图 `kind=plan_blueprint`（树 = 版本，新版把旧版标 `superseded`）；裁定加 `selected` 勾选建树。验证：`pytest -q` **278 passed**、`smoke_p1.py` 10 步全绿、前端 lint/tsc exit=0；真实库跑 `db.init` 补表 | `backend/tests/test_blueprint.py` 可复跑 | 通过：未采纳不能聊（409）、6 轮封顶、历史从最早截断且留最新一句、输出不合格不重试但你的话留在对话里；蓝图落 `pending` 且进待裁定列表、新版把旧版标 `superseded`（留台账流水、旧的不能再裁）、同计划只有一份 pending；勾选只建勾中的、不勾 = 整份、空勾回 400；同名阶段复用且 `built.notes` 明说交付物没写进去；重名任务 / 下标超界 / 计划已收尾在建之前拦下 | `blueprint.py`、`proposals.decide` 的蓝图分支与 `ProposalDecideIn.selected`、`plan_chat` 表、`advisor.landing_plan` 的归属语义、两个页面变更后失效。**只验假上游**；**真实模型未跑** |
+| E-41 / 2026-09-18 | **T26 对话式规划与蓝图**（规格见 SPEC 决策 36）：新表 `plan_chat`；对话上限 6 轮 / 历史 4000 字符、每轮 1 次调用不重试；蓝图 `kind=plan_blueprint`（树 = 版本，新版把旧版标 `superseded`）；裁定加 `selected` 勾选建树。验证：`pytest -q` **279 passed**、`smoke_p1.py` 10 步全绿、前端 lint/tsc exit=0；真实库跑 `db.init` 补表 | `backend/tests/test_blueprint.py` 可复跑 | 通过：未采纳不能聊（409）、6 轮封顶、历史从最早截断且留最新一句、输出不合格不重试但你的话留在对话里；蓝图落 `pending` 且进待裁定列表、新版把旧版标 `superseded`（留台账流水、旧的不能再裁）、同计划只有一份 pending；勾选只建勾中的、不勾 = 整份、空勾回 400；同名阶段复用且 `built.notes` 明说交付物没写进去；重名任务 / 下标超界 / 计划已收尾在建之前拦下 | `blueprint.py`、`proposals.decide` 的蓝图分支与 `ProposalDecideIn.selected`、`plan_chat` 表、`advisor.landing_plan` 的归属语义、两个页面变更后失效。**只验假上游**；**真实模型未跑** |
 
 ## 6. 启动、验收与上下文
 
 ```powershell
 cd D:\cadence\backend
 .\.venv\Scripts\python.exe -m app.db init         # 建库（可重复执行；加表/加列都走它）
-.\.venv\Scripts\python.exe -m pytest -q           # 预期 278 passed
+.\.venv\Scripts\python.exe -m pytest -q           # 预期 279 passed
 .\.venv\Scripts\python.exe tools\show_db.py       # 只读看库：计划树 / 报告 / 台账 / 提案
 .\.venv\Scripts\python.exe tools\smoke_p1.py      # 闭环冒烟：自起临时库跑 10 步，不动真实数据
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000   # 开发用：改代码自动重启
