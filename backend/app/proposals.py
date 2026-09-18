@@ -15,8 +15,9 @@
 - `plan_blueprint`（`blueprint.py` 产，SPEC 决策 36）：沿对话出的**一棵树**（阶段 → 任务）。
   批准 = **按勾选建树**：`selected` 给的是勾中的阶段 / 任务下标，没勾的部分直接丢弃
   （蓝图是版本化的，想要可以再出一版）；不勾（`selected` 空）= 整份采纳。
-- `profile_change`：还没有生产者（未来的档案提炼 agent 路线会产，见 SPEC 第 17 节第 3 条），
-  批准同样只记账；等它真有了生产者，再来这一步定义「批准即写档案」的形状。
+- `profile_change`（`dialogue.py` 产，2026-09-18 T28 起）：计划对话里聊出的「我的状态变了」。
+  批准 = **真的写进长期档案**（新增一条，走 `app/profile.py` 的同一道判重闸）——这是这一类
+  的第一个生产者，也是「批准」第一次真的改档案；驳回只留痕。
 
 裁定一律走台账的**业务终态**（`accepted` / `rejected`，SPEC 第 18 节第 22 条），
 并顺手补上一直空着的 `decided_at`。
@@ -28,7 +29,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import blueprint, ledger, plan
+from . import blueprint, ledger, plan, profile
 from .db import now_iso
 
 
@@ -44,10 +45,10 @@ class ProposalConflict(ProposalError):
     """提案已经裁定过、或计划已收尾 → 接口层翻成 409。"""
 
 
-# 四种类型各自的默认裁定理由：批准时不写理由也要让台账那句话能读懂。
+# 只有「批准也不改任何东西」的类型才从这里取默认理由：批准时即使你没写理由，
+# 台账那句话也要能读懂。有实质动作的类型（收尾计划 / 重排 / 建树 / 写档案）各自组词。
 _APPROVE_REASONS = {
     "material_judgment": "批准：认可这次四问判断",
-    "profile_change": "批准：认可这条档案变更",
 }
 
 
@@ -137,14 +138,37 @@ def decide(
         target = plan.resolve_plan(conn, int(raw_plan_id)) if raw_plan_id is not None else None
         if target is None:
             raise ProposalError(f"提案里的计划 id={raw_plan_id} 已不存在，先去计划表核对一下")
-        if str(target["status"]) == "closed":
-            raise ProposalConflict("这个计划已经收尾了，不必再裁一次")
+        # 判据是「不是进行中」而不是「已收尾」：计划有四态（T27），
+        # 暂停或作废的计划同样不该被这一条顺水收尾——它的状态不是这次提案能决定的。
+        if str(target["status"]) != "active":
+            raise ProposalConflict(
+                f"这个计划已经不是进行中（{target['status']}），不必再裁一次"
+            )
         closing_plan_id = int(raw_plan_id)
 
     # 蓝图：先只读地解析出要建哪些节点（查完重名），建的动作留到状态改完之后
     builds: list[Any] = []
     if approved and kind == blueprint.BLUEPRINT_KIND:
         builds = blueprint.resolve_build(conn, payload, selected)
+
+    # 档案变更：同样先把「能不能写」验完（类别合法、不撞同类别一字不差的现有条目），
+    # 写的动作留到状态改完之后——验不过就一条都不写，提案保持 pending 可重裁
+    profile_category = ""
+    profile_content = ""
+    if approved and kind == "profile_change":
+        profile_category = str(payload.get("category") or "").strip()
+        profile_content = str(payload.get("content") or "").strip()
+        if profile_category not in profile.PROFILE_TOKENS:
+            raise ProposalError(
+                f"提案里的类别「{profile_category}」不在约定的五个令牌里"
+                f"（{' / '.join(profile.PROFILE_TOKENS)}），先把提案改对再来批准"
+            )
+        if not profile_content:
+            raise ProposalError("提案里没有要写进档案的内容，批准它等于什么都没发生")
+        try:
+            profile.assert_no_duplicate(conn, profile_category, profile_content)
+        except profile.ProfileConflict as error:
+            raise ProposalConflict(str(error)) from error
 
     chosen: str | None = None
     if approved and kind == "plan_replan":
@@ -168,6 +192,8 @@ def decide(
             task_count = sum(len(build.tasks) for build in builds)
             new_stages = sum(1 for build in builds if build.reuse_id is None)
             base = f"批准：按勾选建树（{new_stages} 个新阶段、{task_count} 件任务）"
+        elif kind == "profile_change":
+            base = f"批准：把这条写进长期档案（{profile_category}）"
         else:
             base = _APPROVE_REASONS.get(kind, f"批准：{kind}")
     else:
@@ -185,6 +211,7 @@ def decide(
 
     effect = "recorded_only"
     built: dict[str, Any] | None = None
+    written: dict[str, Any] | None = None
     if approved and closing_plan_id is not None:
         ledger.set_status(
             conn,
@@ -200,6 +227,19 @@ def decide(
     elif approved and kind == blueprint.BLUEPRINT_KIND:
         built = blueprint.apply_build(conn, int(payload.get("plan_id") or 0), builds)
         effect = "blueprint_built"
+    elif approved and kind == "profile_change":
+        try:
+            written_id = profile.create_item(
+                conn,
+                category=profile_category,
+                content=profile_content,
+                reason=f"按提案 #{proposal_id} 批准写进档案：{str(payload.get('why') or '').strip() or '计划对话里聊出的变化'}",
+                actor="user",
+            )
+        except (profile.ProfileError, ledger.LedgerError) as error:
+            raise ProposalError(f"档案没能写进去：{error}") from error
+        written = {"id": written_id, "category": profile_category, "content": profile_content}
+        effect = "profile_written"
 
     return {
         "id": proposal_id,
@@ -208,4 +248,5 @@ def decide(
         "effect": effect,
         "option": chosen if approved else None,
         "built": built,
+        "written": written,
     }

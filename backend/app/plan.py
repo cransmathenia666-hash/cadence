@@ -596,13 +596,42 @@ def resolve_plan(conn: sqlite3.Connection, plan_id: int | None = None) -> sqlite
     return actives[-1] if actives else None
 
 
-# ---------- 计划的生命周期与列表（T24：多计划 + 严格分开，SPEC 决策 33） ----------
+# ---------- 计划的生命周期与列表（T24：多计划 + 严格分开，SPEC 决策 33；T27 拆四态） ----------
+#
+# `plan.status` 四个取值（无数据库约束，加取值不用迁移）：
+#   active 进行中        —— 默认列表里只有它
+#   paused 暂时不做      —— 可逆的搁置，随时「继续做」回来
+#   closed 做完了        —— 业务终态，可以「重开」
+#   void   这件事根本不该做 —— 台账的单向门，不能回头
+# 「能回到 active 吗」是这条分界线的判据：paused / closed 能，void 不能。
+#
+# 作废仍只从 active 走：`ledger.void` 的前置条件是记录处于 `active_status`
+# （所有实体共用的台账规则，本任务不动它）。要作废一个暂停的计划得两步——
+# 先「继续做」再作废；界面也不给 paused / closed 项提供作废按钮。
+
+def _ending_event(conn: sqlite3.Connection, plan_id: int, status: str) -> sqlite3.Row | None:
+    """计划**离开进行中**那一刻的台账流水；还在进行中就返回 None。
+
+    取最后一条而不是第一条：暂停 → 继续 → 再收尾这种序列里，只有最后那条
+    回答得了「它现在这个状态是什么时候、因为什么来的」。
+    判据用 change_type 而不是 before/after 的值：作废写的是 `void`，
+    其余状态迁移写 `status_change`，两种都算一次「结束」。
+    """
+    if status == "active":
+        return None
+    for event in reversed(ledger.history(conn, "plan", plan_id)):
+        if event["change_type"] in ("status_change", "void"):
+            return event
+    return None
+
 
 def list_plans(conn: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, Any]]:
-    """列出计划。默认只给**进行中**的；`include_inactive=True` 连收尾 / 作废的一起给。
+    """列出计划。默认只给**进行中**的；`include_inactive=True` 连暂停 / 收尾 / 作废一起给。
 
-    作废的计划不进默认列表，但行还在——「垃圾清得掉、做过的事查得到」。
-    每项带当前阶段与阶段进度，界面拿它做切换器，不用再逐个取计划树。
+    不在进行中的计划不进默认列表，但行还在——「垃圾清得掉、做过的事查得到」。
+    每项带当前阶段与阶段进度，界面拿它做切换器，不用再逐个取计划树；
+    再带 `ended_at` / `ended_reason`（离开进行中那一刻的时间与理由，进行中时为 None），
+    界面拿它在历史段里说清「这个计划当初是怎么停下的」。
     """
     result: list[dict[str, Any]] = []
     for row in conn.execute("SELECT * FROM plan ORDER BY id"):
@@ -611,11 +640,14 @@ def list_plans(conn: sqlite3.Connection, include_inactive: bool = False) -> list
         plan_id = int(row["id"])
         stages = get_stages(conn, plan_id)
         stage = current_stage(conn, plan_id)
+        ended = _ending_event(conn, plan_id, str(row["status"]))
         result.append({
             "id": plan_id,
             "goal": row["goal"],
             "status": row["status"],
             "valid_from": row["valid_from"],
+            "ended_at": None if ended is None else ended["created_at"],
+            "ended_reason": None if ended is None else ended["reason"],
             "current_stage": None if stage is None else {
                 "id": stage["id"],
                 "title": stage["title"],
@@ -637,7 +669,10 @@ def require_plan(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row:
 def close_plan(
     conn: sqlite3.Connection, plan_id: int, reason: str | None = None, actor: str = "user"
 ) -> dict[str, Any]:
-    """收尾一个计划（做完了）：进历史，不再出现在默认计划列表里。可重复调用。"""
+    """收尾一个计划（做完了）：进历史，不再出现在默认计划列表里。可重复调用。
+
+    进行中与暂停的都能收尾（作废的不行）；收尾后还能「重开」，所以它不是单向门。
+    """
     row = require_plan(conn, plan_id)
     if row["status"] in INVALID_STATUSES:
         raise PlanError(f"计划 id={plan_id} 已经作废了，不能再收尾")
@@ -648,6 +683,51 @@ def close_plan(
         reason=str(reason or "计划收尾").strip(),
     )
     return {"plan_id": plan_id, "status": "closed", "changed": True}
+
+
+def pause_plan(
+    conn: sqlite3.Connection, plan_id: int, reason: str | None = None, actor: str = "user"
+) -> dict[str, Any]:
+    """暂停一个计划（暂时不做）：从默认列表挪进历史，随时能「继续做」回来。
+
+    与作废的分界就在能不能回头——暂停是可逆的搁置，作废是单向门。
+    已经收尾的不给暂停：「做完了」不是「先不做」，要退回来得先重开。
+    作废更不给（`ledger.void` 只认 active 的记录），两步走：先继续做、再作废。
+    """
+    row = require_plan(conn, plan_id)
+    if row["status"] in INVALID_STATUSES:
+        raise PlanError(f"计划 id={plan_id} 已经作废了，不能再暂停")
+    if row["status"] == "closed":
+        raise PlanError(f"计划 id={plan_id} 已经收尾了——要接着做就「重开」它，不能直接暂停")
+    if row["status"] == "paused":
+        return {"plan_id": plan_id, "status": "paused", "changed": False}
+    ledger.set_status(
+        conn, "plan", plan_id, "paused", actor=actor,
+        reason=str(reason or "暂时不做了").strip(),
+    )
+    return {"plan_id": plan_id, "status": "paused", "changed": True}
+
+
+def reopen_plan(
+    conn: sqlite3.Connection, plan_id: int, reason: str | None = None, actor: str = "user"
+) -> dict[str, Any]:
+    """把一个暂停或收尾的计划放回进行中（继续做 / 重开）。可重复调用，幂等。
+
+    作废的不给重开——它是单向门。要重新做这件事就新建一个计划，
+    这样台账里「当初为什么扔掉它」那句话永远查得到，不会被一次重开抹掉。
+    """
+    row = require_plan(conn, plan_id)
+    if row["status"] in INVALID_STATUSES:
+        raise PlanError(
+            f"计划 id={plan_id} 已经作废了，作废是单向门——要重新做就新建一个计划"
+        )
+    if row["status"] == "active":
+        return {"plan_id": plan_id, "status": "active", "changed": False}
+    ledger.set_status(
+        conn, "plan", plan_id, "active", actor=actor,
+        reason=str(reason or "继续做").strip(),
+    )
+    return {"plan_id": plan_id, "status": "active", "changed": True}
 
 
 def void_plan(conn: sqlite3.Connection, plan_id: int, reason: str, actor: str = "user") -> dict[str, Any]:

@@ -23,7 +23,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import advisor, blueprint, config, db, ledger, llm, plan, proposals
+from . import advisor, blueprint, config, db, ledger, llm, plan, profile, proposals
 
 app = FastAPI(
     title="cadence",
@@ -308,11 +308,12 @@ def get_plan(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_
     return tree
 
 
-# ---------- 计划列表与生命周期（T24 多计划，SPEC 决策 33 ③） ----------
+# ---------- 计划列表与生命周期（T24 多计划，SPEC 决策 33 ③；T27 拆四态） ----------
 #
-# 默认只列**进行中**的计划；收尾（closed）与作废（void）的进历史、要 `include_inactive`
-# 才看得到。作废是台账的 void（理由必填），收尾是业务终态 closed——两者都让计划
-# 从默认列表里消失，但历史都留着。
+# 默认只列**进行中**的计划；暂停（paused）、收尾（closed）、作废（void）的进历史、
+# 要 `include_inactive` 才看得到。四态的分界线是「能不能回到进行中」：暂停与收尾能
+# （`/reopen` 一条路），作废不能——它是台账的单向门。作废理由必填、收尾与暂停可选，
+# 四者都让计划从默认列表消失，但历史与理由都留着。
 
 class PlanCloseIn(BaseModel):
     reason: str | None = Field(default=None, description="为什么收尾（可选，进台账）")
@@ -320,6 +321,14 @@ class PlanCloseIn(BaseModel):
 
 class PlanVoidIn(BaseModel):
     reason: str = Field(min_length=1, description="为什么作废——进台账，必填")
+
+
+class PlanPauseIn(BaseModel):
+    reason: str | None = Field(default=None, description="为什么暂停（可选，默认「暂时不做了」）")
+
+
+class PlanReopenIn(BaseModel):
+    reason: str | None = Field(default=None, description="为什么继续 / 重开（可选，默认「继续做」）")
 
 
 @app.get("/api/plans")
@@ -345,13 +354,35 @@ def post_plan_close(
 def post_plan_void(
     plan_id: int, payload: PlanVoidIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """作废一个计划：不算数了（垃圾计划清场）。理由必填，进台账。"""
+    """作废一个计划：这件事根本不该做。**单向门**，理由必填、进台账。"""
     try:
         return plan.void_plan(conn, plan_id, payload.reason)
     except plan.PlanError as error:
         raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
     except ledger.LedgerError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plans/{plan_id}/pause")
+def post_plan_pause(
+    plan_id: int, payload: PlanPauseIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """暂停一个计划：暂时不做，进历史但随时能「继续做」回来。理由可选。"""
+    try:
+        return plan.pause_plan(conn, plan_id, payload.reason)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
+
+
+@app.post("/api/plans/{plan_id}/reopen")
+def post_plan_reopen(
+    plan_id: int, payload: PlanReopenIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """把一个暂停 / 收尾的计划放回进行中。作废的不给重开（要重新做就新建一个）。"""
+    try:
+        return plan.reopen_plan(conn, plan_id, payload.reason)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
 
 
 # ---------- LLM 提供商与调用记账（T10） ----------
@@ -806,16 +837,17 @@ class ProfileItemVoidIn(BaseModel):
 
 
 def _require_active_profile_item(conn: sqlite3.Connection, item_id: int) -> sqlite3.Row:
-    """404 与 409 的分流在这里做：不存在是 404，存在但已不是当前有效值是 409。"""
-    row = conn.execute("SELECT * FROM profile_item WHERE id = ?", (item_id,)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"档案条目 id={item_id} 不存在")
-    if row["status"] != "active":
-        raise HTTPException(
-            status_code=409,
-            detail=f"档案条目 id={item_id} 已不是当前有效值（{row['status']}），只能改动当前有效的条目",
-        )
-    return row
+    """404 与 409 的分流在这里做：不存在是 404，存在但已不是当前有效值是 409。
+
+    判据本身在 `app/profile.py`（T28 抽出去的），这里只把两种错翻成状态码——
+    同一道闸还要被「批准档案变更提案」那条路用，规则不该有两份。
+    """
+    try:
+        return profile.require_active(conn, item_id)
+    except profile.ProfileNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except profile.ProfileConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.post("/api/profile", status_code=201,
@@ -828,21 +860,11 @@ def post_profile_item(payload: ProfileItemIn, conn: sqlite3.Connection = Depends
     作废后重新填一样的文字是正当需求（同「已完成节点不挡同名重建」）。
     """
     content = payload.content.strip()
-    duplicate = conn.execute(
-        "SELECT id FROM profile_item WHERE status = 'active' AND category = ? AND content = ?",
-        (payload.category, content),
-    ).fetchone()
-    if duplicate is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"档案里已有这条：#{duplicate['id']}（{payload.category}，一字不差）。"
-            "不用再补；想改它就用「改」，不想让它算数就「作废」",
-        )
     try:
-        item_id = ledger.create_active(
-            conn, "profile_item", {"category": payload.category, "content": content}, actor="user"
-        )
-    except ledger.LedgerError as error:
+        item_id = profile.create_item(conn, category=payload.category, content=content, actor="user")
+    except profile.ProfileConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (profile.ProfileError, ledger.LedgerError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": item_id, "category": payload.category, "content": content}
 
@@ -852,17 +874,12 @@ def put_profile_item(
     item_id: int, payload: ProfileItemUpdate, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
     """改一条档案的内容：实为台账「取代」——旧值不删，before/after 与理由都留在流水里。"""
-    row = _require_active_profile_item(conn, item_id)
+    row = _require_active_profile_item(conn, item_id)  # 404 / 409 在这一步分流
     try:
-        new_id = ledger.supersede(
-            conn,
-            "profile_item",
-            item_id,
-            {"content": payload.content.strip()},
-            reason=payload.reason.strip(),
-            actor="user",
+        new_id = profile.supersede_item(
+            conn, item_id, content=payload.content, reason=payload.reason
         )
-    except ledger.LedgerError as error:
+    except (profile.ProfileError, ledger.LedgerError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {
         "id": new_id,
@@ -877,9 +894,12 @@ def void_profile_item(
     item_id: int, payload: ProfileItemVoidIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
     """作废一条档案（不物理删除）：条目从此不在 GET /api/profile 里出现，台账留痕。"""
-    _require_active_profile_item(conn, item_id)
     try:
-        ledger.void(conn, "profile_item", item_id, reason=payload.reason.strip(), actor="user")
-    except ledger.LedgerError as error:
+        profile.void_item(conn, item_id, reason=payload.reason)
+    except profile.ProfileNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except profile.ProfileConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (profile.ProfileError, ledger.LedgerError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": item_id, "voided": True}

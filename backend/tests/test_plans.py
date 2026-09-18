@@ -1,10 +1,12 @@
-"""多计划与严格分开（T24，SPEC 决策 33 + 34）。
+"""多计划与严格分开（T24，SPEC 决策 33 + 34）+ 计划生命周期四态（T27）。
 
-覆盖四组：
-① 计划列表：默认只给进行中的，收尾 / 作废要 `include_inactive` 才看得到；
+覆盖六组：
+① 计划列表：默认只给进行中的，暂停 / 收尾 / 作废要 `include_inactive` 才看得到；
 ② 收尾与作废：收尾是业务终态 `closed`（可重复调用）、作废走台账 `void`（理由必填）；
 ③ 候选的计划归属：「找」带计划上下文进 prompt、候选随请求继承归属、`GET /api/candidates` 带出来；
-④ 候选过期：新一轮落库把**同计划**上一轮未裁定的标为 `expired`，过期 ≠ 否决（不进禁区）。
+④ 候选过期：新一轮落库把**同计划**上一轮未裁定的标为 `expired`，过期 ≠ 否决（不进禁区）；
+⑤ 暂停与重开（T27）：`paused` 是可逆的搁置，`void` 是单向门；两条新路由的状态码与回执形状；
+⑥ `ended_at` / `ended_reason`：离开进行中那一刻的时间与理由，进行中时为 None。
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import json
 import pytest
 from fastapi import HTTPException
 
-from app import advisor, db, ledger, llm, main, plan, providers
+from app import advisor, db, ledger, llm, main, plan, proposals, providers
 from app.providers import find
 
 
@@ -157,6 +159,218 @@ def test_plan_routes_map_missing_to_404_and_rules_to_400(conn):
     assert no_reason.value.status_code == 400
     assert main.post_plan_close(plan_id, main.PlanCloseIn(reason=None), conn)["status"] == "closed"
     assert main.get_plans(False, conn) == {"plans": []}
+
+
+# ---------- ⑤ 暂停与重开（T27：把「作废」拆成 paused 与 void） ----------
+
+def test_pause_plan_hides_it_and_records_the_reason(conn):
+    plan_id = make_plan(conn, "暂时不想学的")
+
+    result = plan.pause_plan(conn, plan_id, reason="先把手上的做完")
+
+    assert result == {"plan_id": plan_id, "status": "paused", "changed": True}
+    assert plan.list_plans(conn) == []  # 默认列表里不再出现
+    listed = plan.list_plans(conn, include_inactive=True)[0]
+    assert listed["status"] == "paused"
+    assert listed["ended_reason"] == "先把手上的做完"
+    assert listed["ended_at"] is not None
+    assert ledger.history(conn, "plan", plan_id)[-1]["after_value"] == "paused"
+
+
+def test_pause_plan_defaults_the_reason(conn):
+    plan_id = make_plan(conn, "懒得动它")
+
+    plan.pause_plan(conn, plan_id)
+
+    assert plan.list_plans(conn, include_inactive=True)[0]["ended_reason"] == "暂时不做了"
+
+
+def test_pause_plan_is_idempotent_and_writes_nothing(conn):
+    plan_id = make_plan(conn, "暂停两次")
+    plan.pause_plan(conn, plan_id, reason="第一次")
+    before = len(ledger.history(conn, "plan", plan_id))
+
+    again = plan.pause_plan(conn, plan_id, reason="第二次")
+
+    assert again["changed"] is False
+    assert len(ledger.history(conn, "plan", plan_id)) == before  # 不写噪音流水
+    assert plan.list_plans(conn, include_inactive=True)[0]["ended_reason"] == "第一次"
+
+
+def test_pause_plan_refuses_closed_and_void(conn):
+    closed = make_plan(conn, "做完了的")
+    plan.close_plan(conn, closed)
+    voided = make_plan(conn, "不该做的")
+    plan.void_plan(conn, voided, "一开始就不该建")
+
+    with pytest.raises(plan.PlanError):
+        plan.pause_plan(conn, closed)
+    with pytest.raises(plan.PlanError):
+        plan.pause_plan(conn, voided)
+
+    # 失败路径不改数据
+    statuses = {row["id"]: row["status"] for row in conn.execute("SELECT id, status FROM plan")}
+    assert statuses == {closed: "closed", voided: "void"}
+
+
+def test_pause_plan_on_a_missing_plan_raises(conn):
+    with pytest.raises(plan.PlanError):
+        plan.pause_plan(conn, 999)
+
+
+def test_reopen_plan_puts_paused_and_closed_back_to_active(conn):
+    paused = make_plan(conn, "暂停的")
+    closed = make_plan(conn, "收尾的")
+    plan.pause_plan(conn, paused, reason="先放放")
+    plan.close_plan(conn, closed, reason="做完了")
+
+    first = plan.reopen_plan(conn, paused, reason="有空了，继续")
+    second = plan.reopen_plan(conn, closed)  # 收尾的走同一条路：重开
+
+    assert first == {"plan_id": paused, "status": "active", "changed": True}
+    assert second == {"plan_id": closed, "status": "active", "changed": True}
+    assert [item["id"] for item in plan.list_plans(conn)] == [paused, closed]
+    # 台账多一条 status_change（paused|closed → active，带理由）
+    last = ledger.history(conn, "plan", paused)[-1]
+    assert (last["change_type"], last["before_value"], last["after_value"]) == (
+        "status_change", "paused", "active",
+    )
+    assert last["reason"] == "有空了，继续"
+    closing = ledger.history(conn, "plan", closed)[-1]
+    assert (closing["before_value"], closing["after_value"]) == ("closed", "active")
+    assert closing["reason"] == "继续做"  # 默认理由
+
+
+def test_reopen_plan_is_idempotent_for_an_active_plan(conn):
+    plan_id = make_plan(conn, "本来就是活的")
+
+    result = plan.reopen_plan(conn, plan_id)
+
+    assert result["changed"] is False
+    assert len(ledger.history(conn, "plan", plan_id)) == 1  # 只有那条 create
+
+
+def test_reopen_plan_refuses_a_void_plan(conn):
+    plan_id = make_plan(conn, "根本不该做")
+    plan.void_plan(conn, plan_id, "不该建")
+
+    with pytest.raises(plan.PlanError):
+        plan.reopen_plan(conn, plan_id)
+
+    assert plan.resolve_plan(conn, plan_id)["status"] == "void"  # 单向门：纹丝不动
+
+
+def test_close_plan_accepts_a_paused_plan(conn):
+    plan_id = make_plan(conn, "暂停后又被判做完了")
+    plan.pause_plan(conn, plan_id, reason="先放放")
+
+    assert plan.close_plan(conn, plan_id, reason="其实做完了")["changed"] is True
+
+    assert plan.resolve_plan(conn, plan_id)["status"] == "closed"
+
+
+def test_plan_lifecycle_routes_carry_status_and_changed(conn):
+    plan_id = make_plan(conn, "路由口径")
+
+    with pytest.raises(HTTPException) as not_found:
+        main.post_plan_pause(999, main.PlanPauseIn(), conn)
+    assert not_found.value.status_code == 404
+    with pytest.raises(HTTPException) as missing_reopen:
+        main.post_plan_reopen(999, main.PlanReopenIn(), conn)
+    assert missing_reopen.value.status_code == 404
+
+    paused = main.post_plan_pause(plan_id, main.PlanPauseIn(reason="先放放"), conn)
+    assert paused == {"plan_id": plan_id, "status": "paused", "changed": True}
+    assert main.get_plans(False, conn) == {"plans": []}
+
+    reopened = main.post_plan_reopen(plan_id, main.PlanReopenIn(reason=None), conn)
+    assert reopened == {"plan_id": plan_id, "status": "active", "changed": True}
+
+    # 规则拒绝走 400：收尾后不能再暂停，作废后不能再重开
+    main.post_plan_close(plan_id, main.PlanCloseIn(reason=None), conn)
+    with pytest.raises(HTTPException) as refused:
+        main.post_plan_pause(plan_id, main.PlanPauseIn(), conn)
+    assert refused.value.status_code == 400
+    voided = make_plan(conn, "要作废的")
+    main.post_plan_void(voided, main.PlanVoidIn(reason="不该建"), conn)
+    with pytest.raises(HTTPException) as one_way:
+        main.post_plan_reopen(voided, main.PlanReopenIn(), conn)
+    assert one_way.value.status_code == 400
+
+
+# ---------- ⑥ ended_at / ended_reason ----------
+
+def test_active_plan_has_no_ending_fields(conn):
+    make_plan(conn, "活着的")
+
+    listed = plan.list_plans(conn)[0]
+
+    assert listed["ended_at"] is None and listed["ended_reason"] is None
+
+
+def test_ending_fields_track_the_last_time_it_left_active(conn):
+    plan_id = make_plan(conn, "暂停又回来又收尾")
+    plan.pause_plan(conn, plan_id, reason="先放放")
+    plan.reopen_plan(conn, plan_id, reason="有空了")
+    plan.close_plan(conn, plan_id, reason="这回真做完了")
+
+    listed = plan.list_plans(conn, include_inactive=True)[0]
+
+    assert listed["status"] == "closed"
+    assert listed["ended_reason"] == "这回真做完了"  # 不是那条「先放放」
+    assert listed["ended_at"] == ledger.history(conn, "plan", plan_id)[-1]["created_at"]
+
+
+def test_void_plan_records_its_ending_too(conn):
+    plan_id = make_plan(conn, "试建的垃圾")
+    plan.void_plan(conn, plan_id, "试建，不要了")
+
+    listed = plan.list_plans(conn, include_inactive=True)[0]
+
+    assert (listed["status"], listed["ended_reason"]) == ("void", "试建，不要了")
+
+
+# ---------- ⑦ 暂停 / 作废的计划不能再被批准收尾（proposals 判据同步） ----------
+
+def _stage_advance_proposal(conn, plan_id: int) -> int:
+    """造一条「后面没有更多阶段了」的推进提案，返回提案 id。"""
+    stage_id = plan.add_node(conn, plan_id, "stage", "唯一阶段")
+    task_id = plan.add_node(conn, plan_id, "task", "唯一的任务", parent_id=stage_id)
+    plan.check_task(conn, task_id)
+    result = plan.submit_deliverable(conn, stage_id, "https://example.com/out", "做完了")
+    assert result["proposal_id"] is not None
+    return int(result["proposal_id"])
+
+
+def test_stage_advance_cannot_close_a_paused_plan(conn):
+    plan_id = make_plan(conn, "暂停中的计划")
+    proposal_id = _stage_advance_proposal(conn, plan_id)
+    plan.pause_plan(conn, plan_id, reason="先放放")
+
+    with pytest.raises(proposals.ProposalConflict):
+        proposals.decide(conn, proposal_id, approved=True)
+
+    # 提案保持 pending，计划还是 paused——验不过就一条都不写
+    assert main.get_proposals(None, conn)["proposals"][0]["id"] == proposal_id
+    assert plan.resolve_plan(conn, plan_id)["status"] == "paused"
+
+    plan.reopen_plan(conn, plan_id, reason="回来收尾")
+
+    decided = proposals.decide(conn, proposal_id, approved=True)
+
+    assert decided["effect"] == "plan_closed"
+    assert plan.resolve_plan(conn, plan_id)["status"] == "closed"
+
+
+def test_stage_advance_cannot_close_a_void_plan(conn):
+    plan_id = make_plan(conn, "要作废的计划")
+    proposal_id = _stage_advance_proposal(conn, plan_id)
+    plan.void_plan(conn, plan_id, "整件事不该做")
+
+    with pytest.raises(proposals.ProposalConflict):
+        proposals.decide(conn, proposal_id, approved=True)
+
+    assert plan.resolve_plan(conn, plan_id)["status"] == "void"
 
 
 # ---------- ③ 候选的计划归属 ----------

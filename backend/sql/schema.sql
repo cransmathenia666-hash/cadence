@@ -78,12 +78,13 @@ CREATE TABLE IF NOT EXISTS proposal (
 );
 CREATE INDEX IF NOT EXISTS idx_proposal_status ON proposal (status);
 
--- ========== 计划表（两级：阶段=可验证交付物 + 周检查点） ==========
+-- ========== 计划表（三级：计划 → 阶段=可验证交付物 → { 任务、周检查点 }） ==========
+-- 与 `plan_node.level` 一样，status 的取值是自由文本、数据库不加约束（加取值不用迁移）：
 
 CREATE TABLE IF NOT EXISTS plan (
   id         INTEGER PRIMARY KEY,
   goal       TEXT    NOT NULL,
-  status     TEXT    NOT NULL DEFAULT 'active',   -- active / closed
+  status     TEXT    NOT NULL DEFAULT 'active',   -- active / paused / closed / void
   superseded_by INTEGER,
   valid_from TEXT    NOT NULL,
   created_at TEXT    NOT NULL
@@ -92,8 +93,8 @@ CREATE TABLE IF NOT EXISTS plan (
 CREATE TABLE IF NOT EXISTS plan_node (
   id           INTEGER PRIMARY KEY,
   plan_id      INTEGER NOT NULL,
-  parent_id    INTEGER,                 -- 阶段为空，检查点指向所属阶段
-  level        TEXT    NOT NULL,        -- stage / checkpoint
+  parent_id    INTEGER,                 -- 阶段为空，任务与检查点指向所属阶段
+  level        TEXT    NOT NULL,        -- stage / task / checkpoint
   title        TEXT    NOT NULL,
   deliverable  TEXT,                    -- 阶段：可验证的交付物描述
   depth_target TEXT,
