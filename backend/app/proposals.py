@@ -1,7 +1,7 @@
 """提案裁定：agent 与规则产出的待裁定结果，只有你点头才动计划与档案。
 
-三种 `kind` 的来源，以及「批准」各自意味着什么（2026-09-17 定「最小诚实版」，
-**2026-09-18 T29 收窄**：`stage_advance` 与 `plan_replan` 整类删除，见下）：
+四种 `kind` 的来源，以及「批准」各自意味着什么（2026-09-17 定「最小诚实版」，
+**2026-09-18 T29 收窄**：`stage_advance` 与 `plan_replan` 整类删除；**T31 新增第四类**）：
 
 - `material_judgment`（`advisor.py` 产）：四问判断的结论。批准只记账——它回答的是
   「这份资料值不值得学」，不是新方向；落新方向由**候选采纳**那条路负责。
@@ -12,6 +12,12 @@
 - `profile_change`（`dialogue.py` 产，2026-09-18 T28 起）：计划对话里聊出的「我的状态变了」。
   批准 = **真的写进长期档案**（新增一条，走 `app/profile.py` 的同一道判重闸）——这是这一类
   的第一个生产者，也是「批准」第一次真的改档案；驳回只留痕。
+- `plan_change`（`dialogue.py` 产，2026-09-18 T31 起，SPEC 决策 39）：计划对话里附带的
+  **一条可执行建议**（改一个已有节点 / 加一件任务 / 加一个阶段）。批准 = 按 `action` 分流：
+  改的走 `plan.update_node_fields`（原地改、**id 不变**、台账一条流水），加的走 `plan.add_node`
+  （同一道防重名闸）。界面上那条「确认」就是这里的批准，**「忽略」= 驳回**（理由固定
+  「聊天里先不动」）——所以每条建议都有归宿。这一类与 `profile_change` 的分工：一个动
+  计划，一个动档案。
 
 裁定一律走台账的**业务终态**（`accepted` / `rejected`，SPEC 第 18 节第 22 条），
 并顺手补上一直空着的 `decided_at`。
@@ -23,7 +29,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import blueprint, ledger, plan, profile
+from . import blueprint, ledger, plan, plan_change, profile
 from .db import now_iso
 
 
@@ -167,6 +173,22 @@ def decide(
             "驳回它仍可——那会留一条「当时判过它不作数」的台账记录"
         )
 
+    # 计划改动（T31）：同样先把「能不能动」验完（节点还在不在、字段能不能改、名字撞不撞），
+    # 动的动作留到状态改完之后——验不过就一条都不写，提案保持 pending 可重裁
+    change: plan_change.ChangePlan | None = None
+    if approved and kind == plan_change.KIND:
+        try:
+            change = plan_change.resolve(conn, payload)
+        except plan_change.PlanChangeNotFound as error:
+            raise ProposalNotFound(str(error)) from error
+        except plan_change.PlanChangeConflict as error:
+            raise ProposalConflict(str(error)) from error
+        except plan_change.PlanChangeError as error:
+            raise ProposalError(str(error)) from error
+        except plan.PlanError as error:
+            # resolve 里的防重名闸复用 `plan.assert_no_open_duplicate`，它抛的是 plan 的错误
+            raise ProposalError(str(error)) from error
+
     if approved:
         if kind == blueprint.BLUEPRINT_KIND:
             task_count = sum(len(build.tasks) for build in builds)
@@ -174,6 +196,9 @@ def decide(
             base = f"批准：按勾选建树（{new_stages} 个新阶段、{task_count} 件任务）"
         elif kind == "profile_change":
             base = f"批准：把这条写进长期档案（{profile_category}）"
+        elif kind == plan_change.KIND:
+            # 台账那句话说清「到底批准了哪一条」——summary 是后端拼的人话一行
+            base = f"批准：{payload.get('summary') or '按聊天里的建议改动计划'}"
         else:
             base = _APPROVE_REASONS.get(kind, f"批准：{kind}")
     else:
@@ -192,6 +217,8 @@ def decide(
     effect = "recorded_only"
     built: dict[str, Any] | None = None
     written: dict[str, Any] | None = None
+    added: dict[str, Any] | None = None
+    updated: dict[str, Any] | None = None
     if approved and kind == blueprint.BLUEPRINT_KIND:
         built = blueprint.apply_build(conn, int(payload.get("plan_id") or 0), builds)
         effect = "blueprint_built"
@@ -208,6 +235,18 @@ def decide(
             raise ProposalError(f"档案没能写进去：{error}") from error
         written = {"id": written_id, "category": profile_category, "content": profile_content}
         effect = "profile_written"
+    elif approved and kind == plan_change.KIND and change is not None:
+        # 验已经全验过了（resolve），这里才是唯一一次写：改的原地改、加的建节点
+        try:
+            result = plan_change.apply(conn, change)
+        except (plan.PlanError, ledger.LedgerError) as error:
+            raise ProposalError(f"改动没能落地：{error}") from error
+        if change.action == plan_change.UPDATE_NODE:
+            updated = result
+            effect = "node_updated"
+        else:
+            added = result
+            effect = "node_added"
 
     return {
         "id": proposal_id,
@@ -216,4 +255,6 @@ def decide(
         "effect": effect,
         "built": built,
         "written": written,
+        "added": added,
+        "updated": updated,
     }

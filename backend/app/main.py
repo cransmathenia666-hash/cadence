@@ -684,7 +684,8 @@ def post_candidate_verdict(
 #
 # 提案是「AI 算出结论、但只有你点头才算数」的东西（SPEC 第 8 节铁律）。
 # T29 起只剩三类（`material_judgment` / `profile_change` / `plan_blueprint`），
-# 规则自动产的两类（`stage_advance` / `plan_replan`）已整类删除——来源与「批准」各自的
+# 规则自动产的两类（`stage_advance` / `plan_replan`）已整类删除；**T31 又加了第四类
+# `plan_change`**（计划对话里附带的一条可执行建议，决策 39）。来源与「批准」各自的
 # 含义写在 `app/proposals.py` 的模块说明里。这里只收参数、把领域错误翻成状态码：
 # 不存在 404、已裁定过 409、规则拒绝 400。
 
@@ -733,9 +734,11 @@ def post_proposal_decide(
     """批准 / 驳回一条提案。
 
     批准不必都改东西：`effect` 字段说明这一次到底动了什么——`blueprint_built` 是
-    **按勾选把树建进计划**（阶段 / 任务，`built` 里列出建了哪些），`plan_closed` 是
-    「后面没有更多阶段」的推进提案获准 = 计划收尾，`replan_recorded` 只记下你选的重排方向，
-    `recorded_only` 就是纯记账。驳回只留痕，不改任何业务数据。
+    **按勾选把树建进计划**（阶段 / 任务，`built` 里列出建了哪些），`profile_written` 是
+    真往长期档案里写了一条（`written` 是哪一条），`node_updated` 是**原地改了一个已有节点
+    的字段**（`updated` 里是改前改后，id 不变），`node_added` 是往计划里加了一件任务 /
+    一个阶段（`added` 里是新建的那条），`recorded_only` 就是纯记账。驳回只留痕，不改任何
+    业务数据——计划对话里那条「忽略」就走这里，理由固定「聊天里先不动」。
     """
     try:
         return proposals.decide(
@@ -853,7 +856,9 @@ def post_plan_blueprint(
 #
 # 与 `/api/plan-chat`（定方向的那段短程对话）分工不同：这一段跟着**计划**走，
 # 不限轮数（成本闸是历史字符上限），聊的是执行期的事。三条路由：看历史 / 聊一句 /
-# 把聊出的变化提炼成档案变更提案。
+# 把聊出的变化提炼成档案变更提案。**T31 起**聊一句还能附一条可执行建议（决策 39），
+# 建议落成 `kind=plan_change` 的待裁定提案——改计划仍要经你当场裁定（在计划页点
+# 「确认」），这一段对话自己一个字段也写不动。
 #
 # 状态码口径同其它链路：计划不存在 404、还没聊过就提炼 409、模型输出不合格 400。
 
@@ -873,7 +878,10 @@ class DialogueExtractIn(BaseModel):
 
 @app.get("/api/plan-dialogue")
 def get_plan_dialogue(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """看这段对话：历史消息 + 聊了几句 + 能不能提炼档案提案。"""
+    """看这段对话：历史消息 + 聊了几句 + 能不能提炼档案提案。
+
+    T31 起每条助手消息另带 `suggestion`（它那一轮提的建议与那条提案），界面据此渲染确认条。
+    """
     try:
         return dialogue.view(conn, plan_id)
     except dialogue.DialogueNotFound as error:
@@ -884,10 +892,11 @@ def get_plan_dialogue(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)
 
 @app.post("/api/plan-dialogue", status_code=201)
 def post_plan_dialogue(payload: DialogueIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """聊一句：1 次调用、不重试；输出为空就如实报错，你的话仍留在对话里。
+    """聊一句：人话 + 最多一条可执行建议（决策 39）。
 
-    助手这一侧存的是**人话**（不是 JSON）——这一段不需要解析它的输出，逼它包 JSON
-    只会让回答变别扭、还多一类失败。
+    输出是信封（`{"reply": ..., "suggestion": ...}`），形状不合格带原因重试 1 次
+    （每轮最坏 2 次调用）；建议合格就落一条 `plan_change` 待裁定提案，**确认 / 忽略在计划页**。
+    助手那侧存进库里的仍是**人话**。
     """
     try:
         return dialogue.say(conn, payload.plan_id, payload.message)

@@ -12,9 +12,18 @@
 三条纪律：
 - LLM 只产出**提案**：这一段对话里的「我的状态变了」要落成 `profile_change` 提案，
   写档案必须经你裁定（SPEC 第 8 节铁律）。对话本身不碰计划一个字。
-- 调用卡在 `llm.Operation` 上：**每轮 1 次调用、不重试**；提炼档案提案 1 次 + 不合格重试 1 次。
+- **每轮还能附一条可执行建议**（2026-09-18 T31 起，SPEC 决策 39）：改一个已有节点、
+  或加一件任务 / 一个阶段。建议落成 `kind=plan_change` 的待裁定提案，你当场点「确认」
+  才走写入口（`app/plan_change.py` 管这一类）。它自己**一个字段也写不动**。
+- 调用卡在 `llm.Operation` 上：**每轮最多 2 次**——输出形状不合格（见下）带原因重试一次；
+  提炼档案提案 1 次 + 不合格重试 1 次。
 - 成本闸不是轮数而是**历史字符上限**（决策 6/37 的修订）：长期窗口不能用「聊六次就锁死」
   去卡，真正要防的是「代码写出死循环」——而这里每一次都由你手点一句才动一次，没有循环风险。
+
+**输出是信封**（T31 起）：`{"reply": "人话", "suggestion": null 或一条建议}`。
+库里仍只存 `reply` 那一段人话——历史拼回上下文与 6000 字符截断的口径一行不改；
+变的是这一轮有了形状可验，所以不合格时按老规矩带原因重试一次（原先「不重试」是因为
+纯人话没什么可验的，现在有了一块结构化输出）。
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import advisor, blueprint as blueprint_mod, ledger, llm, plan, profile
+from . import advisor, blueprint as blueprint_mod, ledger, llm, plan, plan_change, profile
 from .db import now_iso
 
 TASK_DIALOGUE = "plan_dialogue"
@@ -77,9 +86,10 @@ def plan_of(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row:
 
 
 def messages_of(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
+    """这段对话的全部消息。`id` 也要取——建议与提案就是靠它关联的（决策 39）。"""
     return list(
         conn.execute(
-            "SELECT role, content, created_at FROM plan_dialogue"
+            "SELECT id, role, content, created_at FROM plan_dialogue"
             " WHERE plan_id = ? ORDER BY id",
             (plan_id,),
         ).fetchall()
@@ -95,13 +105,18 @@ def turns_used(conn: sqlite3.Connection, plan_id: int) -> int:
     return int(row["n"])
 
 
-def _record(conn: sqlite3.Connection, plan_id: int, role: str, content: str) -> None:
-    """追加一句。这张表是追加式日志、不经台账（同 learning_request 的先例）。"""
-    conn.execute(
+def _record(conn: sqlite3.Connection, plan_id: int, role: str, content: str) -> int:
+    """追加一句，返回它的行号。这张表是追加式日志、不经台账（同 learning_request 的先例）。
+
+    返回行号是因为 `plan_change` 提案要记着「这条建议是从哪一句里冒出来的」
+    （payload 里的 `dialogue_id`）——界面据此把确认条挂在那条消息下面。
+    """
+    cursor = conn.execute(
         "INSERT INTO plan_dialogue (plan_id, role, content, created_at) VALUES (?, ?, ?, ?)",
         (plan_id, role, content, now_iso()),
     )
     conn.commit()
+    return int(cursor.lastrowid)
 
 
 # ---------- 组上下文：它凭什么给出有用的回答 ----------
@@ -128,10 +143,11 @@ def context_text(conn: sqlite3.Connection, plan_id: int) -> str:
 
     lines.append("")
     lines.append("【阶段与任务】按顺序（[ ] 未开始 / [~] 进行中 / [x] 完成 / [-] 跳过）")
+    lines.append("（括号里的 #编号就是它们的编号——要给建议就用这个编号，别自己编）")
     marks = {"not_started": " ", "in_progress": "~", "done": "x", "stuck": "!", "skipped": "-"}
     for stage in tree["stages"]:
         head = "（已完成）" if stage["finished"] else ""
-        lines.append(f"- 阶段「{stage['title']}」{head}")
+        lines.append(f"- 阶段「{stage['title']}」（#{stage['id']}）{head}")
         if stage["deliverable"]:
             lines.append(f"  要交的东西：{stage['deliverable']}")
         submission = stage["deliverable_submission"]
@@ -143,7 +159,7 @@ def context_text(conn: sqlite3.Connection, plan_id: int) -> str:
         for task in tasks:
             due = f"｜截止 {task['due_date']}" if task["due_date"] else ""
             late = f"｜落后 {task['lag_days']} 天" if task["lag_days"] else ""
-            lines.append(f"  [{marks.get(task['status'], '?')}] {task['title']}{due}{late}")
+            lines.append(f"  [{marks.get(task['status'], '?')}] {task['title']}（#{task['id']}）{due}{late}")
 
     lines += ["", *_lineage(conn, plan_id)]
     lines += ["", *_blueprints(conn, plan_id)]
@@ -298,10 +314,27 @@ def _trim(rows: list[sqlite3.Row]) -> list[dict[str, str]]:
 
 SYSTEM_PROMPT = (
     "你是这个学习计划的陪跑顾问，正在和计划的主人讨论它的执行情况。"
-    "直接说人话：可以用短段落或列表，**不要输出 JSON**、不要客套开场。"
     "对着下面给的事实说（他的阶段、开着的任务、最近的报告、落后情况），别讲放之四海皆准的话。"
-    "你只能讨论与建议，不能改计划：要改结构就告诉他去计划表里做什么（打勾 / 跳过 / 交交付物）。"
-    "信息不够就问一句——但不要每轮都抛一串问题。默认控制在 200 字以内，除非他要求展开。"
+    "默认控制在 200 字以内，除非他要求展开。\n"
+    "只输出一个 JSON 对象，形状："
+    '{"reply": "你要说的话", "suggestion": null 或一条建议}。'
+    "不要解释、不要客套、不要 Markdown 代码块。\n"
+    "- reply：直接说人话，可以用短段落或列表，不要客套开场。\n"
+    "- suggestion：**一轮最多一条**，只在「改哪里、改成什么、为什么」都说得具体时才提；"
+    "拿不准就在 reply 里先问一句、suggestion 给 null。三类形状（编号用上面事实里括号里的 #号，"
+    "不要自己编）：\n"
+    '   改节点 {"action": "update_node", "node_id": 12, "fields": {"due_date": "2026-10-08"}, '
+    '"why": "为什么该这么改"}——fields 里只能出现 title / deliverable / due_date，只写要改的那几样；'
+    "due_date 给空字符串表示清掉它。\n"
+    '   加任务 {"action": "add_task", "node_id": 8, "task": {"title": "任务名", '
+    '"due_date": "2026-10-08"}, "why": "..."}——node_id 给**阶段**的编号，一次只加一件，'
+    "due_date 拿不准就别给。\n"
+    '   加阶段 {"action": "add_stage", "stage": {"title": "阶段名", '
+    '"deliverable": "这个阶段结束时能看见、能验收的东西", "why": "为什么先做它"}, "why": "..."}'
+    "——新阶段排在最后，必须带「要交的东西」。\n"
+    "- 你不能：删节点、替他打勾 / 跳过 / 交交付物、碰别的计划。"
+    "「这块不做了」在计划里是用打勾 / 跳过 / 收尾表达的，不是你该提的建议。\n"
+    "- 建议只是建议：他点「确认」才会真改，所以别在 reply 里吹你已经改完了。"
 )
 
 EXTRACT_SYSTEM_PROMPT = (
@@ -312,14 +345,95 @@ EXTRACT_SYSTEM_PROMPT = (
 
 # ---------- 看 / 聊 ----------
 
+class Reply(BaseModel):
+    """这一轮的回话：人话（存进库里）+ **最多一条**可执行建议（决策 39）。
+
+    `suggestion` 是**单个对象或 null**、不是数组：「一轮最多一条」从形状上就成立，
+    不用靠字数限制去数。
+    """
+
+    reply: str = Field(min_length=1)
+    suggestion: plan_change.Suggestion | None = None
+
+
+def _details(error: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc']) or '(根)'}: {item['msg']}"
+        for item in error.errors()
+    )
+
+
+def _check_reply(
+    conn: sqlite3.Connection, plan_id: int, text: str
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """验收这一轮：给出（人话，要落库的建议 payload 或 None，不合格原因或 None）。
+
+    三件事一起判——输出是不是信封、人话有没有、建议（如果有）站不站得住。建议里
+    「点名的节点不存在 / 不属于这个计划 / 改前＝改后 / 名字撞车」这类**批不了**的毛病
+    也在这里拦下：宁可不提，也不落一条等你点了「确认」才报错的提案（决策 39）。
+    """
+    data = advisor.extract_json(text)
+    if data is None:
+        return None, None, "输出不是合法的 JSON 对象"
+
+    try:
+        reply = Reply.model_validate(data)
+    except ValidationError as error:
+        return None, None, f"字段不合格（{_details(error)}）"
+
+    said = reply.reply.strip()
+    if not said:
+        return None, None, "reply 是空的——这一轮等于一个字都没说"
+    if reply.suggestion is None:
+        return said, None, None  # 没有建议就是纯聊天，什么都不落
+
+    payload, problem = plan_change.check(conn, plan_id, reply.suggestion)
+    if problem is not None:
+        return None, None, f"建议不合格（{problem}）"
+    return said, payload, None
+
+
+def _suggestions(conn: sqlite3.Connection, plan_id: int) -> dict[int, dict[str, Any]]:
+    """这段对话里冒出来过的建议：对话行号 → {proposal_id, summary, status}。
+
+    关联靠提案 payload 里的 `dialogue_id`（**不加列、不动表结构**）：一条建议落一条
+    `plan_change` 提案，提案里记着它是从对话的哪一行冒出来的。已裁定的也照样带回来——
+    界面就不给按钮了，那一条「已确认 / 已忽略」还看得见。
+    """
+    rows = conn.execute(
+        "SELECT * FROM proposal WHERE kind = ? ORDER BY id", (plan_change.KIND,)
+    ).fetchall()
+    landed: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        payload = blueprint_mod.payload_of(row)
+        if int(payload.get("plan_id") or 0) != int(plan_id):
+            continue
+        dialogue_id = payload.get("dialogue_id")
+        if dialogue_id is None:
+            continue
+        landed[int(dialogue_id)] = {
+            "proposal_id": int(row["id"]),
+            "summary": str(payload.get("summary") or ""),
+            "status": str(row["status"]),
+        }
+    return landed
+
+
 def view(conn: sqlite3.Connection, plan_id: int) -> dict[str, Any]:
-    """看这段对话：计划、历史、聊了几句、能不能提炼档案提案。"""
+    """看这段对话：计划、历史、聊了几句、能不能提炼档案提案。
+
+    T31 起每条助手消息另带 `suggestion`（`{proposal_id, summary, status}` 或 `None`）：
+    界面据此在那条消息下面渲染确认条。
+    """
     plan_of(conn, plan_id)
     rows = messages_of(conn, plan_id)
     used = turns_used(conn, plan_id)
+    landed = _suggestions(conn, plan_id)
     return {
         "plan_id": plan_id,
-        "messages": [dict(row) for row in rows],
+        "messages": [
+            {**dict(row), "suggestion": landed.get(int(row["id"]))} for row in rows
+        ],
         "turns_used": used,
         "char_limit": DIALOGUE_CHAR_LIMIT,
         # 至少聊过一句才有东西可提炼（与「蓝图要先聊过一轮」同一条纪律）
@@ -336,11 +450,14 @@ def say(
     model: str | None = None,
     transport: llm.Transport | None = None,
 ) -> dict[str, Any]:
-    """聊一句：记下你的话 → 调 1 次模型 → 记下它的回话。
+    """聊一句：记下你的话 → 调模型 → 记下它的回话（人话）+ 落一条建议提案（如果有）。
 
-    **不重试**（每轮 1 次调用）：输出为空就如实报错，而你那句话已经留在对话里了——
-    再说一句就接着走。助手这一侧存的是**人话**（不是 JSON）：这里不需要解析它的输出，
-    逼它包一层 JSON 只会让回答变别扭、还多一类失败。
+    **每轮最多 2 次调用**（T31 起输出是信封，形状不合格按老规矩带原因重试 1 次；原先
+    「不重试」是因为纯人话没什么可验的）。两次都不合格就如实报错，**没有落任何提案**——
+    而你那句话已经留在对话里了，再说一句就接着走。
+
+    助手这一侧存的仍是**人话**（信封里的 `reply`），不是 JSON：下一轮拼进上下文的是
+    一段像对话的话，不是它自己吐的壳。
     """
     plan_of(conn, plan_id)
     text = str(message or "").strip()
@@ -353,20 +470,72 @@ def say(
         {"role": "user", "content": context_text(conn, plan_id)},
         *_trim(messages_of(conn, plan_id)),
     ]
-    operation = llm.Operation(conn, TASK_DIALOGUE, limit=1, transport=transport)
-    reply = str(operation.chat(messages, provider_id=provider_id, model=model) or "").strip()
-    if not reply:
-        raise DialogueError(
-            "模型这次一个字都没回；这一轮只给 1 次调用（决策 6 修订），所以没有重试——"
-            "你那句话还在对话里，再说一句就接着聊"
-        )
+    operation = llm.Operation(conn, TASK_DIALOGUE, limit=2, transport=transport)
+    raw = operation.chat(messages, provider_id=provider_id, model=model)
+    said, payload, problem = _check_reply(conn, plan_id, raw)
 
-    _record(conn, plan_id, "assistant", reply)
+    attempts = 1
+    if problem is not None:
+        attempts = 2
+        messages = [
+            *messages,
+            {"role": "assistant", "content": raw},
+            {
+                "role": "user",
+                "content": f"你上面的输出不合格：{problem}。"
+                "请按上面那个形状只输出一个合格的 JSON 对象，不要任何解释。",
+            },
+        ]
+        raw = operation.chat(messages, provider_id=provider_id, model=model)
+        said, payload, problem = _check_reply(conn, plan_id, raw)
+        if problem is not None:
+            raise DialogueError(
+                f"模型连着 {attempts} 次都没给出合格的回话（{problem}）；已按上限中止，"
+                "**没有落任何提案**——你那句话还在对话里，再说一句就接着聊"
+            )
+    if said is None:  # 理论上到不了
+        raise DialogueError("内部状态异常：验收通过却没有拿到人话")
+
+    dialogue_id = _record(conn, plan_id, "assistant", said)
+    suggestion = _land_suggestion(conn, plan_id, dialogue_id, payload)
     return {
         "plan_id": plan_id,
-        "reply": reply,
+        "reply": said,
+        "suggestion": suggestion,
+        "proposal_id": None if suggestion is None else int(suggestion["proposal_id"]),
         "turns_used": turns_used(conn, plan_id),
         "calls": operation.used,
+    }
+
+
+def _land_suggestion(
+    conn: sqlite3.Connection, plan_id: int, dialogue_id: int, payload: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """把验收过的建议落成一条 `kind=plan_change` 的待裁定提案（决策 39）。
+
+    界面上的「确认」就是裁定它：确认 → 批准（改的原地改、加的建节点），忽略 → 驳回
+    （台账记「聊天里先不动」）。所以每条建议都有归宿，不会在 `/proposals` 堆着。
+    """
+    if payload is None:
+        return None
+    landed = {**payload, "dialogue_id": int(dialogue_id)}
+    proposal_id = ledger.create_active(
+        conn,
+        "proposal",
+        {
+            "kind": plan_change.KIND,
+            "payload": json.dumps(landed, ensure_ascii=False),
+            "reason": (
+                f"计划 #{plan_id} 的对话里聊出的一条改动建议：{landed.get('summary')}"
+                "——等你确认"
+            ),
+        },
+        actor="agent",
+    )
+    return {
+        "proposal_id": proposal_id,
+        "summary": str(landed.get("summary") or ""),
+        "status": "pending",
     }
 
 
