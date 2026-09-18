@@ -508,11 +508,27 @@ function ProposalBody({
     const whole = (index: number) => selection.includes(String(index));
     const tickedTask = (index: number, taskIndex: number) =>
       whole(index) || selection.includes(`${index}.${taskIndex}`);
+    /**
+     * 阶段那格显示为「勾上」：整段勾了，**或者它下面每件任务都逐条勾了**。
+     *
+     * 后一种的效果跟勾整段完全一样（后端两种情况都把这一段的阶段与全部任务建进去），
+     * 所以显示必须跟着一致——不然会出现「三件任务都勾着、阶段的格子空着」这种看着像
+     * 漏选的假象。没有任务的阶段不适用这一条（空集合的 every 恒真）。
+     */
+    const stageChecked = (index: number) => {
+      if (whole(index)) return true;
+      const tasks = stages[index].tasks ?? [];
+      return tasks.length > 0 && tasks.every((_, other) => tickedTask(index, other));
+    };
 
-    /** 勾/取消一个阶段：勾 = 整段（丢掉它下面逐条勾的），取消 = 这一段全不要。 */
+    /** 勾/取消一个阶段：取消 = 这一段全不要（逐条勾的那些一起清掉）。 */
     function toggleStage(index: number) {
-      if (whole(index)) {
-        onSelection(selection.filter((item) => item !== String(index)));
+      if (stageChecked(index)) {
+        onSelection(
+          selection.filter(
+            (item) => item !== String(index) && !item.startsWith(`${index}.`),
+          ),
+        );
         return;
       }
       onSelection([
@@ -560,7 +576,7 @@ function ProposalBody({
               <label>
                 <input
                   type="checkbox"
-                  checked={whole(index)}
+                  checked={stageChecked(index)}
                   onChange={() => toggleStage(index)}
                 />
                 <strong>{item.title}</strong>
