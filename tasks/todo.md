@@ -4,6 +4,12 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.11 变更（2026-09-18）**：新增并完成 T28（计划级对话——蓝图落地之后接着聊）——用户走查提的第 5 条；对应 SPEC 决策 37 与决策 6 的第二次修订。
+
+**v0.12 变更（2026-09-18）**：侧窗讨论后拍板两条待办——T29（提案瘦身与页面分家：判资料独立、蓝图待批独立、推进提案整类删）与 T30（节点字段写入口＝原地改 + 台账流水）；两条都要先动 SPEC 决策 28/29/30。
+
+**v0.10 变更（2026-09-18）**：新增 T27（计划生命周期四态与历史计划出口，排在 P4 之前）——「作废」拆成 `paused`（暂时不做，可逆）与 `void`（这件事根本不该做，单向门），补暂停 / 重开两条路由与界面出口；SPEC 决策 33 与第 11 节契约表同步。
+
 **v0.9 变更（2026-09-18）**：T25（「找」加宽）与 T26（对话式规划与蓝图）**完工**，各带实施记录；SPEC 决策 35/36 标已实现、第 11 节契约表补三条 plan-chat 路由与 `selected`。
 
 **v0.8 变更（2026-09-18）**：T25/T26 补入「实现要点」（反馈流水的上限与位置、追问槽位形状、对话轮数与历史存储、蓝图 payload、树=版本的取代语义、勾选部分采纳后剩余处理）——SPEC 决策 6/35/36 同步写死，新窗口可照做无需再问。
@@ -142,6 +148,32 @@
   - Files：`backend/app/blueprint.py`、`backend/app/proposals.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/tests/test_blueprint.py`、`frontend/app/candidates/page.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 6/35/36）
   - 实施记录（2026-09-18）：新增 `backend/app/blueprint.py` 装两条链路（对话 + 蓝图）。**对话**：`plan_chat` 表（plan_id + candidate_id + role + content，追加式、不经台账）；前提是候选已采纳（否则 409）；每轮 1 次调用、**不重试**（决策 6 修订），整段上限 6 轮（按用户发的话数），历史字符上限 4000 从最早截断（最新一句永远留着）；输出 `{questions(≤3), ready, note}`，既不 ready 又没问题判不合格；助手那侧存 JSON 原文、喂回下一轮时渲染成人话。**蓝图**：`kind=plan_blueprint`，payload 按决策 36 的形状；生成前必须聊过一轮（`can_generate`）；1 次调用 + 不合格带原因重试 1 次；`due_date` 非法判不合格（不悄悄吞）。**树 = 版本**：先建新版再把同计划旧的 pending 标成业务终态 `superseded`（不碰台账生命周期列），被取代的不能再裁。**批准 = 按勾选建树**：`selected` 形如 `["0","1.2"]`（阶段整段 / 单件任务，从 0 起），没勾的直接丢弃，不传 = 整份；`effect=blueprint_built` 且回执带 `built`。**实现时定下的三件事**：① 计划归属复用 `advisor.landing_plan`（原 `_landing_plan` 转为公开）——采纳落点与对话/蓝图归属必须是同一个答案；② 蓝图里与已有阶段**同名**的条目**复用**那条阶段（采纳时自动建的），任务挂到它下面、不重复建，它要交的东西写不进去（改节点字段的写入口不存在）→ 在 `built.notes` 里明说；③ 重名任务 / 下标超界 / 计划已收尾全部在**建之前**查完（台账无请求级事务，验不过就一个节点都不建、提案保持 pending 可重裁）。另把 `advisor._extract_json` 转为公开的 `extract_json` 共用同一套 JSON 取法。`pytest -q` **274 passed**（254 + 20 条新用例）、`smoke_p1.py` 10 步全绿、lint/tsc exit=0；真实库已跑 `python -m app.db init` 追上 `plan_chat` 表。提交 `d24bb58`（后端）、`3ee63b6`（前端）。**未覆盖**：真实模型跑对话与蓝图（走查归用户）；蓝图里「第一版就有同名阶段」这条只由单测覆盖。
   - 修（2026-09-18，用户走查踩到）：**「够了，出方案」认不出计划归属**——一条「新方向」的候选被显式采纳后，落点只活在采纳当刻的响应与前端内存里；页面刷新（前端热更新重建也算）后前端传不出 `plan_id`，而当时只有 `view` 会读 `plan_chat` 记着的归属，「聊一句」与「出方案」只看候选自带的 → 同一流程两套判断标准、最后一步报「没有计划归属」。修法：`blueprint.resolve_plan` 统一成「调用方说明 > 已有对话记着的 > 候选自带」（`_thread_plan` 转公开 `thread_plan`，与 `view` 共用；显式与记着的不一致回 409，绝不改口），前端以 `view.plan_id` 为准并在服务器也说不出时给一个计划选择框。提交 `f7fa658`；`pytest -q` **279 passed**（我 4 条回归 + 并行会话 1 条「对话所属计划已收尾/作废就拦下」）、`smoke_p1.py` 10 步全绿、lint/tsc exit=0。
+
+- [x] **T27 计划生命周期四态与历史计划出口**
+  - Acceptance：按 SPEC 决策 33 的 T27 修订落地——`plan.status` 拆成 `active` / `paused` / `closed` / `void` 四态（`paused`＝暂时不做可恢复，`void`＝这件事根本不该做、单向门）；`pause_plan` / `reopen_plan` 两条函数与两条路由；`list_plans` 每项带 `ended_at` / `ended_reason`；界面加「暂停」按钮与「历史计划」折叠段（暂停项「继续做」、收尾项「重开」、作废项不给按钮）。**AI 那一层不做**（只做界面这一层）
+  - Verify：单测覆盖暂停 / 重开 / 收尾三条路径与幂等、`void` 的单向门、`ended_*` 反映最后一次结束、`proposals.decide` 对非 active 计划拒绝收尾、两条新路由的 200/400/404 与回执形状；`pytest -q` + `tools\smoke_p1.py`（动了契约）；前端 lint 与 tsc exit=0（浏览器走查归用户）
+  - Files：`backend/app/plan.py`、`backend/app/proposals.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/tests/test_plans.py`、`frontend/app/page.tsx`、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 33、第 11 节）
+  - 实施记录（2026-09-18）：`plan.pause_plan`（不存在 / 已作废 / 已收尾一律 `PlanError`，已暂停幂等 `changed:false` 且**不写流水**，理由默认「暂时不做了」）与 `plan.reopen_plan`（`paused` / `closed` → `active`，进行中幂等，**作废回 `PlanError`**——单向门）；`close_plan` **未改**（本就挡 `void` / `superseded`，故进行中与暂停的都能收尾）。`list_plans` 增 `ended_at` / `ended_reason`：取 `ledger.history` 里**最后一条** `change_type in ("status_change", "void")` 流水的 `created_at` / `reason`（暂停 → 继续 → 再收尾的序列里只有最后那条回答得了「现在这个状态是怎么来的」），进行中恒为 `None`。`proposals.decide` 的收尾分支判据由 `== "closed"` 改成 `!= "active"`（否则暂停或作废的计划仍会被这一条顺水收尾），文案改「这个计划已经不是进行中（{status}），不必再裁一次」。路由 `POST /api/plans/{id}/pause` 与 `/reopen`（请求模型 `PlanPauseIn` / `PlanReopenIn`，`reason` 可选）。`schema.sql` 的 `plan.status` 注释补四态（顺手改正同块里过时的「两级」与 `level` 注释）。前端：`pausePlan` / `reopenPlan`、`PlanSummary` 两个新字段、首页计划管理区加「暂停」（交互同收尾＝一次点击、用默认理由）、切换器下方加「历史计划」`<details>` 段（暂停项「继续做」/ 收尾项「重开」都调 `reopenPlan`；作废项不给按钮并附「作废是单向门，要重新做就新建一个计划」），作废文案改成新语义。`pytest -q` **294 passed**（279 + 15 条新用例）、`smoke_p1.py` 10 步全绿、lint/tsc exit=0。**未覆盖**：浏览器走查归用户；界面上的「暂停」只能用默认理由（要自定义理由得直接调接口）。
+
+- [x] **T28 计划级对话：蓝图落地之后接着聊**
+  - Acceptance：按 SPEC 决策 37——计划表页有一块能跟 AI 接着聊的窗口（蓝图落地之后才真正开始用）；对话跟着**计划**走、**不限轮数**（成本闸换成历史字符上限）；上下文每轮重拼（阶段/任务/状态/截止日/落后量/最近报告/档案）；**只说话与建议，不改计划结构**；聊出的「我的状态变了」能提炼成待裁定的**档案变更提案**（你点按钮才发生；批准才真写档案——顺带让 `profile_change` 这一类的第一个生产者出现）
+  - Verify：单测覆盖不限轮数、历史字符截断、上下文七项事实、暂停计划也能聊、空回复不重试但留你的话、提炼的 409/空数组/非法类别重试/超 3 条、以及「聊 → 提炼 → 批准 → 档案真多一条」的端到端；`pytest -q` + `tools\smoke_p1.py`（动了契约）；前端 lint 与 tsc exit=0（浏览器走查归用户）
+  - Files：`backend/app/dialogue.py`、`backend/app/profile.py`、`backend/app/proposals.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/tests/test_dialogue.py`、`backend/tests/test_proposals.py`、`frontend/components/plan-dialogue.tsx`、`frontend/app/page.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 6 第二次修订 + 决策 37 + 第 11 节）
+  - 实施记录（2026-09-18）：分两块落地。**① 档案变更提案能真写档案**（提交 `8db6bcb`）：新增 `backend/app/profile.py`，把档案写入的三条规则与那道**判重闸**（同类别一字不差的当前有效条目不许重复）从接口层搬出来——原先这条规则只写在 `POST /api/profile` 里，而「批准档案变更提案」要走同一道闸，两处各写一遍迟早分叉；`proposals.decide` 新增 profile_change 分支，**验完再写**（类别合法 / 内容非空 / 不撞重复 → 否则 400/409 且提案保持 pending 可重裁），`effect=profile_written` 并回执带 `written`，台账理由记成「按提案 #N 批准写进档案：<聊出的 why>」。**② 计划级对话**（提交 `ed1951b` 后端、`6ec4d94` 前端）：新表 `plan_dialogue` + 新模块 `backend/app/dialogue.py`，三条路由（看 / 聊 / 提炼）；**不限轮数**、每轮 1 次调用不重试、历史字符上限 6000 从最早截断；助手那侧**存人话不存 JSON**（这一段不需要解析它的输出）；上下文每轮重拼（计划目标、阶段与交付物、任务与状态与截止日与落后量、最近 5 份报告、长期档案），所以计划表里刚打的勾下一轮它就看得见；提炼做成**你点按钮才发生**（闲聊不该往 /proposals 撒提案），1 次调用 + 不合格带原因重试 1 次、允许 0 条、类别必须落在五个令牌里；**讨论不按计划状态拦**（暂停了正是最需要商量的时刻）。前端：计划表页底部内嵌 `components/plan-dialogue.tsx`（key 带计划号，换计划整块换掉），`/proposals` 补 profile_change 的专门渲染与 `profile_written` 回执。`pytest -q` **315 passed**、`smoke_p1.py` 10 步全绿、lint/tsc exit=0；真实库已跑 `db.init` 追上 `plan_dialogue` 表。**未覆盖**：真实模型跑这段对话与提炼（走查归用户）；**范围外**：改已有节点的字段（交付物/截止日）仍无写入口——聊出「这个阶段不要了」只能靠计划表里的打勾/跳过表达，那件事按交接文档的约定单独立项。
+
+- [ ] **T29 提案瘦身与页面分家（2026-09-18 用户走查后拍板）**
+  - Acceptance：他定的三条——① 判资料页只装判资料的（四问输入 + 当次答案 + 历史记录），**「学什么」那条路的产物一律不进这页**（原话：「学什么那一类的产物不要出现在『值不值得学这个界面』」）；② 蓝图待批**单独一页**（他明确否掉「并进计划页」）；③ **推进提案整类删**（规则自动产、批准不改任何东西；手动收尾已在计划页有），落后的「重排」降级成计划页上的一句提醒
+  - 前置：SPEC 决策 28（提案按 kind 分流裁定）与 29（两个正式页）要先改写，决策 30 里「阶段完成即产推进提案」那半句也要一起删；已存在的旧提案（含库里 pending 的 5 条推进提案）要先定处置口径（一次性标终态，还是留着只读）
+  - 未定：判资料页要不要留一条**只读的历史记录**（裁定环节删掉后，过去判过的资料就查不到了）——他还没答
+  - Verify：单测删掉 `stage_advance` 相关断言、补「阶段完成后不再产提案」与「落后只出提醒」；`pytest -q` + `tools\smoke_p1.py`（动了契约）；前端两页各自 200（浏览器走查归用户）
+  - Files：`backend/app/plan.py`、`backend/app/proposals.py`、`docs/SPEC.md`（决策 28/29/30）、`frontend/app/`（判资料与蓝图待批分家）、`frontend/lib/api.ts`
+
+- [ ] **T30 节点字段写入口（改一个已经建好的节点）**
+  - Acceptance：口径**已定**（2026-09-18 他选「第二条」）——**原地改字段 + 台账记一条流水**（谁、何时、改前改后、理由），**id 不变**；**不用「取代」**：取代会让 id 变、报告 / 交付物 / 引用全断，而且台账明禁对 `plan_node` 做生命周期操作（决策 22——节点的「不算数」由跳过表达，改字段不属于生命周期事件）。做出来要能改 `title` / `deliverable` / `due_date` 三个字段
+  - 解锁：批准「重排」能真执行（挪截止日），计划页那块对话才能改东西而不只是往里加（今天有三处卡在这条：T26 的「同名阶段复用、交付物写不进去」、T14 的「重排只记方向」、T28 的「只说话与建议，不改计划结构」）
+  - 待确认：他此前说过计划页对话「只聊、不动计划」，这次只答了写入口的**留痕口径**——**开工前问一句「那块对话要不要真能改」**
+  - Verify：单测覆盖改字段留痕（改前改后进流水）、id 与引用不断（报告 / 交付物仍指得到）、缺理由报错、非节点对象拒绝；`pytest -q`（动了台账写入语义，加跑 `tools\smoke_p1.py`）
+  - Files：`backend/app/plan.py`、`backend/app/main.py`（一条路由）、`backend/tests/test_task_layer.py`、`docs/SPEC.md`（第 18 节加一条决策）
 
 ## P4 触达兜底
 
