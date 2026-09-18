@@ -1,8 +1,8 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-18（**T29 页面分家 + T30 节点字段写入口完工，并过了一轮复核收口**——312 passed、冒烟 **11 步**、lint/tsc exit=0；推进提案整类删（存量 5 条已标终态）、判资料独立一页、蓝图与其余待裁定同住 `/proposals`、节点字段能原地改且界面有入口。此前同日：T27/T28 与走查报的两处已修）
+> 最近更新：2026-09-18（**T25–T30 这一阶段全部落地并落盘**——317 passed、冒烟 **11 步**、lint/tsc exit=0、七个页面均 200；工作区已清干净。本阶段：找加宽、对话式规划与蓝图、计划级对话、推进提案整类删 + 页面分家、节点字段写入口（含界面）。此前同日：T27 四态与走查报的两处已修）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`；近期：T23–T28 见 git 历史，T29 `b41431e`/`86d120e`/`32bd235`、T30 `f7cc58f`｜无远端｜**未提交改动**：复核收口那一轮（`git status` 可见：前端蓝图并回 `/proposals` 并删 `app/blueprints/`、计划表加「改字段」入口、`blueprint.py` 复用阶段写交付物、SPEC/todo 同步）；`AGENTS.md` 教学协议段被删未表态；`.dsh-vision-toolkit/`、`.zcode/`、`辅助对话2.md` 非本项目产物
+> 主工作树：`D:\cadence`｜`master`｜基线：后端 `fe4a5b8`、前端脚手架 `d8f9e3c`；近期：T23–T28 见 git 历史，T29 `b41431e`/`86d120e`/`32bd235`、T30 `f7cc58f`、阶段收口 `263a54e`｜无远端｜**未提交改动：无**（`.dsh-vision-toolkit/`、`.zcode/`、`辅助对话2.md` 非本项目产物；`AGENTS.md` 的新版沟通协议已随 `263a54e` 落盘）
 > 其他工作树：无
 > 当前唯一目标：**P4 触达与导出（T15–T17）**——规格在 `tasks/todo.md` 的 P4 一节；T15 的邮件实现需要用户给 SMTP 授权码，可先做 `notify` 接口与空实现
 > 下一条动作：① 计划页对话接上「能改」（用户 2026-09-18 定：T30 之后）；② 报一个 P4 的短计划给用户点头；③ **用户走查六件未回报**：三级界面与多计划、T25 的追问与流水、T26 的对话与蓝图勾选、T27 的暂停/继续/历史计划、T28 的计划表页对话、**`/judge` 与 `/proposals` 两页 + 计划表的「改字段」**
@@ -27,8 +27,8 @@
 | 多计划与严格分开（T24） | 通过 | E-39 | `plan.list_plans`/`close_plan`/`void_plan`、`db._ADDED_COLUMNS` 那条加列、`advisor` 的归属与过期逻辑、`find.py` 的计划上下文段、那三条计划路由、计划切换器与 `/candidates` 页面变更后失效；**走查归用户** |
 | 三级结构：任务层 + 交付物验收（T23） | 通过 | E-38 | `plan.py` 的判定与三个动作（`stage_completion` / `stage_finished` / `check_task` / `skip_task` / `submit_deliverable`）、`main.py` 那三条动作路由、`deliverable_submission` 表、计划表组件与 `/new` 页变更后失效；**浏览器走查归用户** |
 | 计划生命周期四态与历史计划出口（T27） | 通过 | E-42 | `plan.pause_plan` / `reopen_plan` / `list_plans` 的 `ended_*` 两字段、`proposals.decide` 的收尾判据、两条新路由、首页计划管理区与「历史计划」段、`api.ts` 的 `pausePlan` / `reopenPlan` 变更后失效；**浏览器走查归用户** |
-| 计划级对话（T28：蓝图落地后接着聊 + 档案变更提案能真写档案） | 通过 | E-43 | `dialogue.py`、`profile.py` 的写入规则、`proposals.decide` 的 profile_change 分支、`plan_dialogue` 表、`components/plan-dialogue.tsx` 与 `/proposals` 的档案变更渲染变更后失效；**真实模型未跑，走查归用户** |
-| 提案瘦身与页面分家（T29）＋节点字段写入口（T30） | 通过 | E-44、E-45 | `plan.update_node_fields` 与 `/fields` 路由、`proposals.decide`、`plan_tree` 的 `behind_reason`/`advice`、`/judge` 页、`/proposals` 的三类分流与蓝图勾选、`blueprint.apply_build` 的交付物回写、`plan-tree.tsx` 的改字段入口、`/api/judgments` 变更后失效；**新页与「改字段」的走查归用户** |
+| 计划级对话（T28：蓝图落地后接着聊 + 档案变更提案能真写档案） | 通过 | E-43 | `dialogue.py`（含上下文里的来历与蓝图）、`profile.py` 的写入规则、`proposals.decide` 的 profile_change 分支、`plan_dialogue` 表、`components/plan-dialogue.tsx`、`/proposals` 的档案变更渲染变更后失效；**真实模型未跑，走查归用户** |
+| 提案瘦身与页面分家（T29）＋节点字段写入口（T30） | 通过 | E-44、E-45 | `plan.update_node_fields` 与 `/fields` 路由、`proposals.decide`、`plan_tree` 的 `behind_reason`/`advice`、`/judge` 页、`/proposals` 的三类分流与蓝图勾选、`blueprint.apply_build` 的交付物回写、`plan-tree.tsx` 的改字段入口、`/api/judgments` 变更后失效；**页面与「改字段」的走查归用户** |
 | 对话式规划与蓝图（T26） | 通过 | E-40/E-41 | `backend/app/blueprint.py`、`proposals.decide` 的蓝图分支与 `ProposalDecideIn.selected`、`blueprint.resolve_plan` 的归属解析、`plan_chat` 表、`/candidates` 对话区与 `/proposals` 的蓝图渲染变更后失效；**真实模型未跑，走查归用户** |
 | SPEC 第 9 节真实使用验收 | 未验证 | 标准 1、5 的后端部分由 E-19 与 E-38 覆盖 | 需 P2–P4 完成后 |
 
