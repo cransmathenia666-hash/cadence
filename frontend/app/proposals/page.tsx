@@ -17,6 +17,7 @@ import {
   type Proposal,
   type StageAdvancePayload,
   type MaterialJudgmentPayload,
+  type ProfileChangePayload,
 } from "@/lib/api";
 
 /**
@@ -32,7 +33,8 @@ import {
  *   界面把选中方向的原文摆出来，照着手工改。
  * - `plan_blueprint` 计划蓝图（T26）：**按勾选建树**——勾中的阶段 / 任务才会进计划，
  *   没勾的直接丢弃（树是版本化的，想要可以再出一版）。
- * - `profile_change` 档案变更：还没有生产者（未来的档案提炼会走这里），先按通用形态显示。
+ * - `profile_change` 档案变更（T28 起有计划对话这个生产者）：批准 = **真的把这条写进长期档案**
+ *  （同类别一字不差的重复会被拒），是「批准」第一次真的改档案。
  *
  * 裁定全部走台账并留理由（SPEC 第 8 节：AI 只产出提案，写入必须经你裁定）。
  */
@@ -42,6 +44,15 @@ const QUESTION_LABELS: Record<keyof Judgment, string> = {
   depth_target: "② 学到什么程度",
   intensity: "③ 板块分级",
   time_budget: "④ 时间预算",
+};
+
+/** 五个约定令牌的中文名（与后端 `advisor.PROFILE_CATEGORIES` 一致）。 */
+const CATEGORY_LABELS: Record<string, string> = {
+  life_habit: "生活习惯（睡眠/运动/作息）",
+  life_log: "生活记录（日程/课程/近况）",
+  current_state: "当前状态（精力/时间/压力）",
+  short_term_goal: "短期目标 + 当下痛点",
+  long_axis: "长期主线（职业方向）",
 };
 
 const KIND_TITLES: Record<string, string> = {
@@ -172,9 +183,12 @@ export default function ProposalsPage() {
             ? `已批准：计划 #${done.built?.plan_id ?? planId} 里建了 ` +
               `${done.built?.stages.length ?? 0} 个新阶段、${done.built?.tasks.length ?? 0} 件任务` +
               `${done.built?.notes.length ? `。${done.built.notes.join("；")}` : "。"}`
-            : done.effect === "replan_recorded"
-              ? `已批准，记下你选的方向「${option}」——改节点字段的写入口还没有，照这条方向的原文手工改。`
-              : "已批准，只记账：这项不会改计划或档案。"
+            : done.effect === "profile_written"
+              ? `已批准：把「${done.written?.content ?? ""}」写进了长期档案（${done.written?.category ?? ""}）` +
+                "——去「长期档案」页能看到它，旧条目一条没动（这是新增，不是取代）。"
+              : done.effect === "replan_recorded"
+                ? `已批准，记下你选的方向「${option}」——改节点字段的写入口还没有，照这条方向的原文手工改。`
+                : "已批准，只记账：这项不会改计划或档案。"
         : "已驳回，理由进了台账。";
       setNotes((previous) => [text, ...previous]);
       setProposals((previous) => (previous ?? []).filter((item) => item.id !== proposalId));
@@ -660,6 +674,37 @@ function ProposalBody({
             （勾了阶段 = 连它的任务一起要；一件任务都没勾的阶段不会建。
             同名阶段不会重复建：采纳候选时已经建了同名阶段，任务会挂到它下面；它「要交的东西」
             写不进去（改节点字段的写入口还没有），批准后会告诉你哪几条这样。）
+          </small>
+        </p>
+      </>
+    );
+  }
+
+  if (proposal.kind === "profile_change") {
+    const payload = proposal.payload as unknown as ProfileChangePayload;
+    return (
+      <>
+        <p>
+          <label>
+            <span>
+              类别 <strong>{payload.category}</strong>
+              {CATEGORY_LABELS[payload.category] !== undefined && `（${CATEGORY_LABELS[payload.category]}）`}
+            </span>
+            <br />
+            <span>要写进档案的内容：{payload.content}</span>
+          </label>
+        </p>
+        {payload.why !== undefined && (
+          <p>
+            <small>为什么该这么记：{payload.why}</small>
+          </p>
+        )}
+        <p>
+          <small>
+            这条来自<strong>计划对话</strong>
+            {payload.plan_id !== undefined && `（计划 #${payload.plan_id}）`}里聊出的变化。
+            <strong>批准 = 真的写进长期档案</strong>（新增一条；同类别一字不差的重复会被拒）；
+            驳回只留痕，档案一个字不动。
           </small>
         </p>
       </>

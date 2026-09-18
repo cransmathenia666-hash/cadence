@@ -218,7 +218,13 @@ export async function submitReport(input: {
 
 // ---------- 计划的列表与生命周期（T24） ----------
 
-/** 计划列表里的一项。`status`：active 进行中 / closed 已收尾 / void 已作废。 */
+/**
+ * 计划列表里的一项。
+ *
+ * `status` 四态（T27）：`active` 进行中 / `paused` 暂时不做 / `closed` 做完了 /
+ * `void` 这件事根本不该做。分界线是**能不能回到进行中**——paused 与 closed 能
+ * （走同一个 `reopenPlan`），void 不能（单向门，要重新做就新建一个计划）。
+ */
 export type PlanSummary = {
   id: number;
   goal: string;
@@ -228,9 +234,13 @@ export type PlanSummary = {
   current_stage: { id: number; title: string } | null;
   stages: number;
   stages_finished: number;
+  /** 离开进行中那一刻的时间；进行中时为 null。暂停 → 继续 → 再收尾后是最后那次。 */
+  ended_at: string | null;
+  /** 离开进行中那一刻的理由（默认「暂时不做了」/「计划收尾」）；进行中时为 null。 */
+  ended_reason: string | null;
 };
 
-/** 列出计划。默认只给进行中的；`includeInactive` 连收尾 / 作废的一起给。 */
+/** 列出计划。默认只给进行中的；`includeInactive` 连暂停 / 收尾 / 作废的一起给。 */
 export async function listPlans(includeInactive = false): Promise<PlanSummary[]> {
   const data = await request<{ plans: PlanSummary[] }>(
     `/api/plans?include_inactive=${includeInactive}`,
@@ -250,7 +260,7 @@ export async function closePlan(
   });
 }
 
-/** 作废一个计划（不算数了）。**理由必填**——它进台账。 */
+/** 作废一个计划（这件事根本不该做）。**理由必填**、**单向门**——它进台账。 */
 export async function voidPlan(
   planId: number,
   reason: string,
@@ -259,6 +269,30 @@ export async function voidPlan(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason }),
+  });
+}
+
+/** 暂停一个计划（暂时不做）。可逆的搁置，随时能 `reopenPlan` 回来。理由可选。 */
+export async function pausePlan(
+  planId: number,
+  reason?: string,
+): Promise<{ plan_id: number; status: string; changed: boolean }> {
+  return request(`/api/plans/${planId}/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason ?? null }),
+  });
+}
+
+/** 把一个暂停 / 收尾的计划放回进行中（继续做 / 重开）。作废的不给重开。 */
+export async function reopenPlan(
+  planId: number,
+  reason?: string,
+): Promise<{ plan_id: number; status: string; changed: boolean }> {
+  return request(`/api/plans/${planId}/reopen`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason ?? null }),
   });
 }
 
@@ -836,10 +870,18 @@ export type ProposalDecision = {
   status: string;
   /**
    * `blueprint_built` = 按勾选把树建进了计划（`built` 里列出建了哪些）；
+   * `profile_written` = 真把一条写进了长期档案（`written` 里是哪一条）；
    * `plan_closed` = 计划收尾；`replan_recorded` 只记下你选的方向；其余纯记账。
    */
-  effect: "blueprint_built" | "plan_closed" | "replan_recorded" | "recorded_only";
+  effect:
+    | "blueprint_built"
+    | "plan_closed"
+    | "replan_recorded"
+    | "profile_written"
+    | "recorded_only";
   option: string | null;
+  /** 只在批准档案变更时有值：真写进档案的那一条。 */
+  written: { id: number; category: string; content: string } | null;
   /** 只在批准蓝图时有值：这次真建了哪些节点，外加「没能写进去」那类实话。 */
   built: {
     plan_id: number;
@@ -985,3 +1027,82 @@ export async function generateBlueprint(
  * 一个都没勾（空数组）在后端会被拒——「整份都要」是不传这个参数。
  */
 export type Selection = string[];
+
+// ---------- 计划级对话（T28：蓝图落地之后接着聊） ----------
+//
+// 与上面那段 plan-chat（绑候选、6 轮、出蓝图）分工不同：这一段跟着**计划**走，
+// 不限轮数（成本闸是历史字符上限），聊的是执行期的事。助手那一侧存的是人话，不是 JSON。
+
+/** 对话里的一条消息。 */
+export type DialogueMessage = {
+  role: string;
+  content: string;
+  created_at: string;
+};
+
+export type PlanDialogueView = {
+  plan_id: number;
+  messages: DialogueMessage[];
+  /** 已经聊了几句（不限轮数，这个数只用来显示）。 */
+  turns_used: number;
+  /** 历史累计字符上限；超出从最早截断（后端做的，前端只显示）。 */
+  char_limit: number;
+  /** 至少聊过一句才有东西可提炼档案提案。 */
+  can_extract: boolean;
+};
+
+/** 看这个计划的对话（历史 + 聊了几句）。 */
+export async function getPlanDialogue(planId: number): Promise<PlanDialogueView> {
+  return request<PlanDialogueView>(`/api/plan-dialogue?plan_id=${planId}`);
+}
+
+/** 聊一句的回执。`reply` 是它的人话回复（不是 JSON）。 */
+export type DialogueTurn = {
+  plan_id: number;
+  reply: string;
+  turns_used: number;
+  calls: number;
+};
+
+/** 聊一句：每轮 1 次调用、不重试；输出为空就报错，你的话仍留在对话里。 */
+export async function sayPlanDialogue(planId: number, message: string): Promise<DialogueTurn> {
+  return request<DialogueTurn>("/api/plan-dialogue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan_id: planId, message }),
+  });
+}
+
+/** 提炼的回执：落了哪几条待裁定的档案变更提案（允许 0 条）。 */
+export type DialogueExtraction = {
+  plan_id: number;
+  items: { proposal_id: number; category: string; content: string }[];
+  calls: number;
+};
+
+/**
+ * 把这段对话里聊出的变化提炼成待裁定的**档案变更提案**（你点按钮才发生）。
+ * 批准那条提案才会真的改档案——去「待裁定提案」页裁定。
+ */
+export async function extractProfileProposals(planId: number): Promise<DialogueExtraction> {
+  return request<DialogueExtraction>("/api/plan-dialogue/profile-proposals", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+}
+
+/**
+ * 「档案变更」提案的 payload（T28 的计划对话产的）。
+ *
+ * 批准 = 真的写进长期档案（新增一条；同类别一字不差的重复会被拒）。
+ */
+export type ProfileChangePayload = {
+  /** 五个约定令牌之一：life_habit / life_log / current_state / short_term_goal / long_axis。 */
+  category: string;
+  content: string;
+  /** 为什么该这么记——进台账，回答「当时为什么这么写」。 */
+  why?: string;
+  /** 这条是从哪个计划的对话里聊出来的。 */
+  plan_id?: number;
+};
