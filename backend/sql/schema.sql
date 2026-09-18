@@ -195,3 +195,22 @@ CREATE TABLE IF NOT EXISTS deliverable_submission (
   created_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_deliverable_node ON deliverable_submission (node_id, created_at);
+
+-- ========== 计划级对话（T28：蓝图落地之后接着聊） ==========
+
+-- 一段跟着计划走的长期对话（决策 37）。与 `plan_chat` 的分工：
+-- `plan_chat` 是「定方向」的短程对话（绑候选、有 6 轮上限、终点是出一棵蓝图），
+-- 这张表是「执行期」的长期对话（绑计划、不限轮数，只用历史字符上限控成本）。
+-- 两者生命周期、上限、能产出的东西都不同，所以不塞进同一张表——分开之后，
+-- 每条查询不必先判断「这是哪种对话」。
+--
+-- 同样是**追加式日志**、不经台账（同 learning_request 的先例）：它记的是「我们说过
+-- 什么」，不是有状态的对象。
+CREATE TABLE IF NOT EXISTS plan_dialogue (
+  id         INTEGER PRIMARY KEY,
+  plan_id    INTEGER NOT NULL,
+  role       TEXT    NOT NULL,   -- user / assistant
+  content    TEXT    NOT NULL,   -- 用户原话；助手那侧存它的原话（人话，不是 JSON）
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_dialogue_thread ON plan_dialogue (plan_id, id);

@@ -23,7 +23,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import advisor, blueprint, config, db, ledger, llm, plan, profile, proposals
+from . import advisor, blueprint, config, db, dialogue, ledger, llm, plan, profile, proposals
 
 app = FastAPI(
     title="cadence",
@@ -795,6 +795,78 @@ def post_plan_blueprint(
     except blueprint.BlueprintConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except blueprint.BlueprintError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+# ---------- 计划级对话（T28：蓝图落地之后接着聊） ----------
+#
+# 与 `/api/plan-chat`（定方向的那段短程对话）分工不同：这一段跟着**计划**走，
+# 不限轮数（成本闸是历史字符上限），聊的是执行期的事。三条路由：看历史 / 聊一句 /
+# 把聊出的变化提炼成档案变更提案。
+#
+# 状态码口径同其它链路：计划不存在 404、还没聊过就提炼 409、模型输出不合格 400。
+
+
+class DialogueIn(BaseModel):
+    """聊一句。"""
+
+    plan_id: int = Field(description="聊的是哪个计划（必须存在）")
+    message: str = Field(min_length=1, description="你的这一句")
+
+
+class DialogueExtractIn(BaseModel):
+    """把这段对话里聊出的变化提炼成待裁定的档案变更提案。"""
+
+    plan_id: int
+
+
+@app.get("/api/plan-dialogue")
+def get_plan_dialogue(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """看这段对话：历史消息 + 聊了几句 + 能不能提炼档案提案。"""
+    try:
+        return dialogue.view(conn, plan_id)
+    except dialogue.DialogueNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except dialogue.DialogueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan-dialogue", status_code=201)
+def post_plan_dialogue(payload: DialogueIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """聊一句：1 次调用、不重试；输出为空就如实报错，你的话仍留在对话里。
+
+    助手这一侧存的是**人话**（不是 JSON）——这一段不需要解析它的输出，逼它包 JSON
+    只会让回答变别扭、还多一类失败。
+    """
+    try:
+        return dialogue.say(conn, payload.plan_id, payload.message)
+    except dialogue.DialogueNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except dialogue.DialogueConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except dialogue.DialogueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan-dialogue/profile-proposals", status_code=201)
+def post_dialogue_profile_proposals(
+    payload: DialogueExtractIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """把这段对话里聊出的变化提炼成待裁定的档案变更提案（你点按钮才发生，不是每轮自动）。
+
+    批准那条提案才会真的改档案（`proposals.decide` 的 profile_change 分支，T28-1）。
+    """
+    try:
+        return dialogue.propose_profile_changes(conn, payload.plan_id)
+    except dialogue.DialogueNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except dialogue.DialogueConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except dialogue.DialogueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except llm.LlmError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
