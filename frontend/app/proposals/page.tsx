@@ -508,51 +508,90 @@ function ProposalBody({
     const whole = (index: number) => selection.includes(String(index));
     const tickedTask = (index: number, taskIndex: number) =>
       whole(index) || selection.includes(`${index}.${taskIndex}`);
-    /**
-     * 阶段那格显示为「勾上」：整段勾了，**或者它下面每件任务都逐条勾了**。
-     *
-     * 后一种的效果跟勾整段完全一样（后端两种情况都把这一段的阶段与全部任务建进去），
-     * 所以显示必须跟着一致——不然会出现「三件任务都勾着、阶段的格子空着」这种看着像
-     * 漏选的假象。没有任务的阶段不适用这一条（空集合的 every 恒真）。
-     */
-    const stageChecked = (index: number) => {
-      if (whole(index)) return true;
-      const tasks = stages[index].tasks ?? [];
-      return tasks.length > 0 && tasks.every((_, other) => tickedTask(index, other));
-    };
 
-    /** 勾/取消一个阶段：取消 = 这一段全不要（逐条勾的那些一起清掉）。 */
-    function toggleStage(index: number) {
-      if (stageChecked(index)) {
-        onSelection(
-          selection.filter(
-            (item) => item !== String(index) && !item.startsWith(`${index}.`),
-          ),
-        );
-        return;
+    /**
+     * 勾/取消之后统一过一遍，把等价写法收敛成同一种。
+     *
+     * 为什么需要这一步：`"4"`（整段）与 `"4.0","4.1","4.2"`（逐条勾满）在库里建出来的
+     * 东西**完全一样**——后端两种情况都把这一段的阶段与全部任务建进去。但显示会分叉：
+     * 用户走查时就遇到「三件任务都勾着、阶段那格空着」，看着像漏选。所以选区只留一种写法：
+     * 逐条勾满 → 收成整段；整段已在 → 丢掉它下面逐条的那些；这一段一件没勾 → 整段清掉。
+     * 顺带把认不出 / 越界的路径丢掉（后端也会拒，别带过去）。
+     */
+    function normalize(raw: string[]): string[] {
+      const wholeStages = new Set<number>();
+      const tickedTasks = new Map<number, Set<number>>();
+      for (const item of raw) {
+        const text = String(item).trim();
+        const [head, tail] = text.split(".");
+        if (!/^\d+$/.test(head)) continue;
+        const index = Number(head);
+        if (index >= stages.length) continue;
+        if (tail === undefined) {
+          wholeStages.add(index);
+          continue;
+        }
+        if (!/^\d+$/.test(tail)) continue;
+        const taskIndex = Number(tail);
+        if (taskIndex >= (stages[index].tasks ?? []).length) continue;
+        const bucket = tickedTasks.get(index) ?? new Set<number>();
+        bucket.add(taskIndex);
+        tickedTasks.set(index, bucket);
       }
-      onSelection([
-        ...selection.filter((item) => !item.startsWith(`${index}.`)),
-        String(index),
-      ]);
+
+      const next: string[] = [];
+      stages.forEach((stage, index) => {
+        if (wholeStages.has(index)) {
+          next.push(String(index));
+          return;
+        }
+        const ticked = tickedTasks.get(index);
+        if (ticked === undefined || ticked.size === 0) return;
+        const total = (stage.tasks ?? []).length;
+        if (total > 0 && ticked.size === total) {
+          next.push(String(index)); // 勾满 = 整段，不再逐条记
+          return;
+        }
+        next.push(...[...ticked].sort((left, right) => left - right).map((task) => `${index}.${task}`));
+      });
+      return next;
+    }
+
+    /** 勾/取消一个阶段：整段都要，或整段全不要（逐条勾的那些一起清掉）。 */
+    function toggleStage(index: number) {
+      const stagePath = String(index);
+      const others = selection.filter(
+        (item) => item !== stagePath && !item.startsWith(`${index}.`),
+      );
+      onSelection(normalize(whole(index) ? others : [...others, stagePath]));
     }
 
     /** 勾/取消一件任务：整段被勾着时，先把它拆成逐条勾，再动这一条。 */
     function toggleTask(index: number, taskIndex: number) {
       const path = `${index}.${taskIndex}`;
       if (whole(index)) {
-        const rest = stages[index].tasks
+        const rest = (stages[index].tasks ?? [])
           .map((_, other) => `${index}.${other}`)
           .filter((other) => other !== path);
-        onSelection([...selection.filter((item) => item !== String(index)), ...rest]);
+        onSelection(normalize([...selection.filter((item) => item !== String(index)), ...rest]));
         return;
       }
       onSelection(
-        selection.includes(path)
-          ? selection.filter((item) => item !== path)
-          : [...selection, path],
+        normalize(
+          selection.includes(path)
+            ? selection.filter((item) => item !== path)
+            : [...selection, path],
+        ),
       );
     }
+
+    const tickedStages = stages.filter((_, index) => whole(index)).length;
+    const taskTotal = stages.reduce((total, item) => total + (item.tasks ?? []).length, 0);
+    const tickedTaskCount = stages.reduce(
+      (total, item, index) =>
+        total + (item.tasks ?? []).filter((_, taskIndex) => tickedTask(index, taskIndex)).length,
+      0,
+    );
 
     return (
       <>
@@ -576,7 +615,9 @@ function ProposalBody({
               <label>
                 <input
                   type="checkbox"
-                  checked={stageChecked(index)}
+                  // 选区是规范形状（见 `normalize`），所以「整段」这一个标记就够判断——
+                  // 逐条勾满的那些已经在改完当刻收成整段了。
+                  checked={whole(index)}
                   onChange={() => toggleStage(index)}
                 />
                 <strong>{item.title}</strong>
@@ -610,9 +651,15 @@ function ProposalBody({
           ))}
         </ol>
         <p>
+          <strong>
+            当前勾选：{tickedStages} / {stages.length} 个阶段，
+            {tickedTaskCount} / {taskTotal} 件任务
+          </strong>
+          <br />
           <small>
-            同名阶段不会重复建：采纳候选时已经建了同名阶段，任务会挂到它下面。
-            它「要交的东西」写不进去（改节点字段的写入口还没有），批准后会告诉你哪几条这样。
+            （勾了阶段 = 连它的任务一起要；一件任务都没勾的阶段不会建。
+            同名阶段不会重复建：采纳候选时已经建了同名阶段，任务会挂到它下面；它「要交的东西」
+            写不进去（改节点字段的写入口还没有），批准后会告诉你哪几条这样。）
           </small>
         </p>
       </>
