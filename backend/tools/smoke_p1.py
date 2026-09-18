@@ -1,4 +1,4 @@
-"""P1 闭环冒烟：一条命令走完「建计划 → 建阶段 → 建任务 → 打勾 → 交交付物 → 看落后量 → 产出提案」。
+"""P1 闭环冒烟：一条命令走完「建计划 → 建阶段 → 建任务 → 打勾 → 交交付物 → 看落后量 → 看阶段完成」。
 
 为什么要有它：手点 `/docs` 要五六次；复制 PowerShell 又会踩两个坑——
 `$` 被终端吃掉、中文按老编码发出去变乱码。这个脚本用标准库 `urllib` 直接发请求，
@@ -12,7 +12,9 @@
 等它完成之后再建同名 -> 期望 201（这是规则的另一半：已收尾的不挡路）。
 
 2026-09-17 起（T23）走三级结构：阶段完成 = 全部任务打勾/跳过 **且** 交付物已提交；
-周打卡只做节奏，不参与完成判定（最后一步用报告证明它不额外产提案）。
+周打卡只做节奏，不参与完成判定。
+
+T29 起这两步（打勾、交交付物）都不再顺产「推进提案」——那整类已删，阶段完成与否只由计划表显示；冒烟跟着改成断言「一条提案都不产」，顺带证明完成判定本身还在。
 """
 
 from __future__ import annotations
@@ -164,9 +166,10 @@ def main() -> int:
         status, delivered = request(base, "POST", f"/api/plan/nodes/{stage['id']}/deliverable", {
             "url": "https://example.com/smoke", "note": "冒烟：交付物提交",
         })
-        checker.step(7, "提交交付物（阶段因此完成，产推进提案）", status, delivered)
+        checker.step(7, "提交交付物（阶段因此完成；T29 起不再顺产推进提案）", status, delivered)
         checker.expect("交付物提交状态码", status, 201)
-        checker.expect("是否产出推进提案", delivered["proposal_id"] is not None, True)
+        # T29：这两步过去会顺产「推进提案」，现在一条都不产——阶段完成只由计划表显示
+        checker.expect("打勾与交交付物都不再产提案（T29）", delivered["proposal_id"], None)
 
         status, tree_after = request(base, "GET", f"/api/plan?plan_id={plan['id']}")
         checker.step(8, "再取计划：落后量应回到 0", status, tree_after["lag"])
@@ -190,6 +193,9 @@ def main() -> int:
         })
         checker.step(10, "建周打卡并提交报告（只管节奏，不参与完成判定）", status, weekly)
         checker.expect("周打卡报告不额外产提案", weekly["proposal_id"], None)
+        # T29：阶段完成与否只由计划表显示（这句顺带证明判定还在，只是不再产提案）
+        checker.expect("阶段完成判定仍在（finished=True）",
+                       [item["finished"] for item in tree_after["stages"]], [True])
 
         print()
         if checker.failures:

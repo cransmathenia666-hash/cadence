@@ -147,23 +147,6 @@ def test_checkpoint_report_produces_no_advance_proposal(conn):
     assert ledger.fetch_active(conn, "proposal") == []
 
 
-def test_finishing_tasks_and_deliverable_produces_advance_proposal(conn):
-    """成功标准 1 后半（新判定）：任务全部打勾 + 交付物已提交 → 「是否进入下一阶段」提案。"""
-    plan_id, stage_id, _ = make_plan(conn, checkpoints=())
-    task_id = plan.add_node(conn, plan_id, "task", "看完第 3 章", parent_id=stage_id)
-
-    plan.check_task(conn, task_id)
-    assert ledger.fetch_active(conn, "proposal") == []  # 还差交付物
-
-    result = plan.submit_deliverable(conn, stage_id, "https://example.com/repo", "接口能读写了")
-
-    assert result["proposal_id"] is not None
-    proposal = conn.execute(
-        "SELECT kind, payload FROM proposal WHERE id = ?", (result["proposal_id"],)).fetchone()
-    assert proposal["kind"] == "stage_advance"
-    assert json.loads(proposal["payload"])["stage_id"] == stage_id
-
-
 def test_report_on_open_stage_produces_no_proposal(conn):
     _, _, checkpoints = make_plan(conn)
 
@@ -425,67 +408,6 @@ def test_weekly_replan_options_are_the_three_ways(conn):
     assert "检查点 1" in status["replan_options"][0]["detail"]
 
 
-def test_no_replan_proposal_when_on_track(conn):
-    """按时推进就不打扰你。"""
-    # 故意留一个未完成的检查点：否则这条计划会先产出阶段推进提案，干扰本测试的断言
-    _, _, checkpoints = make_plan(
-        conn, checkpoints=(("检查点 1", "2026-09-30"), ("检查点 2", None)))
-    plan.submit_report(conn, checkpoints[0], "done", note="做完了", at="2026-09-16T20:00:00+08:00")
-
-    assert plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY) is None
-    assert [row["kind"] for row in ledger.fetch_active(conn, "proposal")] == []
-
-
-def test_replan_proposal_created_when_behind(conn):
-    plan_id, stage_id, _ = make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
-
-    proposal_id = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
-
-    assert proposal_id is not None
-    row = conn.execute(
-        "SELECT kind, status, payload FROM proposal WHERE id = ?", (proposal_id,)).fetchone()
-    assert row["kind"] == "plan_replan"
-    assert row["status"] == "pending"
-    payload = json.loads(row["payload"])
-    assert payload["week"] == "2026-W38"
-    assert payload["plan_id"] == plan_id
-    assert payload["stage_id"] == stage_id
-    assert payload["lag_days"] == 7
-    assert len(payload["options"]) == 3
-
-
-def test_replan_proposal_created_when_no_report_this_week(conn):
-    """没有过期节点，但本周一条报告都没有——那也是未推进。"""
-    make_plan(conn, checkpoints=(("检查点 1", "2026-09-30"),))
-
-    proposal_id = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
-
-    payload = json.loads(
-        conn.execute("SELECT payload FROM proposal WHERE id = ?", (proposal_id,)).fetchone()["payload"])
-    assert "没有报告" in payload["why"]
-
-
-def test_replan_proposal_is_not_duplicated_within_the_week(conn):
-    make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
-
-    first = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
-    second = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
-
-    assert first is not None
-    assert second is None
-    assert len(ledger.fetch_active(conn, "proposal")) == 1
-
-
-def test_replan_proposal_can_be_created_again_next_week(conn):
-    make_plan(conn, checkpoints=(("检查点 1", "2026-09-13"),))
-
-    first = plan.ensure_weekly_replan_proposal(conn, today=TODAY_IS_SUNDAY)
-    second = plan.ensure_weekly_replan_proposal(conn, today=date(2026, 9, 27))
-
-    assert first is not None
-    assert second is not None
-
-
 # ---------- 防重复建节点（双击会造重复，见 HANDOFF 候选队列） ----------
 
 def count_nodes(conn, **where):
@@ -603,3 +525,35 @@ def test_legacy_voided_task_does_not_count_as_settled(conn):
 
     assert completion["total"] == 1
     assert completion["all_tasks_settled"] is True
+
+
+# ---------- T29：不再产提案，落后降级成提醒 ----------
+
+def test_finishing_a_stage_no_longer_produces_a_proposal(conn):
+    """阶段完成与否只由计划表显示，不再是一次裁定（决策 28/30 的修订）。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
+    stage_id = plan.add_node(conn, plan_id, "stage", "第一段")
+    task_id = plan.add_node(conn, plan_id, "task", "写点东西", parent_id=stage_id)
+
+    plan.check_task(conn, task_id)
+    result = plan.submit_deliverable(conn, stage_id, url="https://example.com/x", note="写完了")
+
+    assert result["proposal_id"] is None
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal").fetchone()["n"] == 0
+    assert plan.stage_finished(conn, plan.get_node(conn, stage_id)) is True  # 判定本身没变
+
+
+def test_being_behind_shows_up_as_a_reminder_not_a_proposal(conn):
+    """落后不再产「重排」提案：原因是算出来的，三个方向只是建议（不再有裁定入口）。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
+    stage_id = plan.add_node(conn, plan_id, "stage", "第一段", deliverable="交一份东西")
+    plan.add_node(conn, plan_id, "task", "检查点 1", parent_id=stage_id, due_date="2026-09-10")
+
+    tree = plan.plan_tree(conn, plan_id, today=date(2026, 9, 17))
+
+    assert tree["lag"]["behind"] is True
+    assert "落后" in tree["behind_reason"]
+    assert [item["kind"] for item in tree["advice"]] == [
+        "reduce_scope", "postpone", "swap_deliverable",
+    ]
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal").fetchone()["n"] == 0  # 一条提案都没产

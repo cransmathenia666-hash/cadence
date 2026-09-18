@@ -1,17 +1,11 @@
 """提案裁定：agent 与规则产出的待裁定结果，只有你点头才动计划与档案。
 
-四种 `kind` 的来源，以及「批准」各自意味着什么（2026-09-17 用户拍板「最小诚实版」）：
+三种 `kind` 的来源，以及「批准」各自意味着什么（2026-09-17 定「最小诚实版」，
+**2026-09-18 T29 收窄**：`stage_advance` 与 `plan_replan` 整类删除，见下）：
 
-- `stage_advance`（`plan.py` 产）：阶段的检查点全收尾后问「进不进下一阶段」。
-  当前阶段是**算出来的**（第一个没收尾的阶段），所以「进入下一阶段」批准后没有可写的
-  结构——阶段一收尾，当前阶段自己就往前走；唯一有实质动作的是「后面没有更多阶段了」
-  那一条，批准 = 把这个计划收尾（`closed`）。
-- `plan_replan`（`plan.py` 产）：落后、或整周一条报告都没有时给三个出路
-  （减量 / 顺延 / 换交付物）。批准要求你选一个方向，选中的方向进台账——**改节点字段
-  的写入口还不存在**（台账的改写只对档案与计划开放），所以这一轮批准只留决策记录，
-  计划仍由你手工改；界面会把该方向的原文摆出来照着改。
 - `material_judgment`（`advisor.py` 产）：四问判断的结论。批准只记账——它回答的是
   「这份资料值不值得学」，不是新方向；落新方向由**候选采纳**那条路负责。
+  （T29 起这一类的裁定仍留在这里，判资料的**输入与历史**搬到了 `/judge` 页。）
 - `plan_blueprint`（`blueprint.py` 产，SPEC 决策 36）：沿对话出的**一棵树**（阶段 → 任务）。
   批准 = **按勾选建树**：`selected` 给的是勾中的阶段 / 任务下标，没勾的部分直接丢弃
   （蓝图是版本化的，想要可以再出一版）；不勾（`selected` 空）= 整份采纳。
@@ -96,13 +90,6 @@ def list_pending(conn: sqlite3.Connection, kind: str | None = None) -> dict[str,
     return {"proposals": [_public(row) for row in rows]}
 
 
-def _option(payload: dict[str, Any], kind: str) -> dict[str, Any]:
-    for item in payload.get("options") or []:
-        if isinstance(item, dict) and str(item.get("kind")) == kind:
-            return item
-    return {}
-
-
 def _compose_reason(base: str, reason: str | None) -> str:
     extra = str(reason or "").strip()
     return base if not extra else f"{base}——{extra}"
@@ -131,21 +118,6 @@ def decide(
     if not approved and not str(reason or "").strip():
         raise ProposalError("驳回必须写明理由——它进台账，回答「当时为什么不同意」")
 
-    # 批准「后面没有更多阶段了」那一类推进提案 = 收尾计划，先把目标计划验清楚
-    closing_plan_id: int | None = None
-    if approved and kind == "stage_advance" and payload.get("next_stage_id") is None:
-        raw_plan_id = payload.get("plan_id")
-        target = plan.resolve_plan(conn, int(raw_plan_id)) if raw_plan_id is not None else None
-        if target is None:
-            raise ProposalError(f"提案里的计划 id={raw_plan_id} 已不存在，先去计划表核对一下")
-        # 判据是「不是进行中」而不是「已收尾」：计划有四态（T27），
-        # 暂停或作废的计划同样不该被这一条顺水收尾——它的状态不是这次提案能决定的。
-        if str(target["status"]) != "active":
-            raise ProposalConflict(
-                f"这个计划已经不是进行中（{target['status']}），不必再裁一次"
-            )
-        closing_plan_id = int(raw_plan_id)
-
     # 蓝图：先只读地解析出要建哪些节点（查完重名），建的动作留到状态改完之后
     builds: list[Any] = []
     if approved and kind == blueprint.BLUEPRINT_KIND:
@@ -170,25 +142,18 @@ def decide(
         except profile.ProfileConflict as error:
             raise ProposalConflict(str(error)) from error
 
-    chosen: str | None = None
-    if approved and kind == "plan_replan":
-        chosen = str(option or "").strip()
-        allowed = [str(item.get("kind")) for item in payload.get("options") or [] if isinstance(item, dict)]
-        if not chosen:
-            raise ProposalError("批准重排提案要选一个方向——减量、顺延还是换交付物")
-        if chosen not in allowed:
-            raise ProposalError(
-                f"方向「{chosen}」不在这次提案给的选项里（{'、'.join(allowed) or '无'}）"
-            )
+    # T29：`stage_advance` 与 `plan_replan` 整类删除，不再有生产者。
+    # 库里可能还留着老类型（历史或别处写进来的），这里明确拒绝而不是当通用类型放行——
+    # 批准一条「批准也不改任何东西」的老提案没有意义，还不如说清它已经不作数。
+    if approved and kind in ("stage_advance", "plan_replan"):
+        raise ProposalError(
+            f"「{kind}」这类提案已在 T29 整类删除（规则不再产、也不再裁定）——"
+            "阶段推进与落后的处理改在计划页上：落后会显示成一句提醒，收尾计划有按钮。"
+            "驳回它仍可——那会留一条「当时判过它不作数」的台账记录"
+        )
 
     if approved:
-        if kind == "plan_replan":
-            base = f"批准：{_option(payload, chosen or '').get('label') or chosen}"
-        elif kind == "stage_advance" and closing_plan_id is None:
-            base = f"批准：进入下一阶段「{payload.get('next_stage_title')}」"
-        elif closing_plan_id is not None:
-            base = "批准：收尾这个计划"
-        elif kind == blueprint.BLUEPRINT_KIND:
+        if kind == blueprint.BLUEPRINT_KIND:
             task_count = sum(len(build.tasks) for build in builds)
             new_stages = sum(1 for build in builds if build.reuse_id is None)
             base = f"批准：按勾选建树（{new_stages} 个新阶段、{task_count} 件任务）"
@@ -212,19 +177,7 @@ def decide(
     effect = "recorded_only"
     built: dict[str, Any] | None = None
     written: dict[str, Any] | None = None
-    if approved and closing_plan_id is not None:
-        ledger.set_status(
-            conn,
-            "plan",
-            closing_plan_id,
-            "closed",
-            actor="user",
-            reason=f"按提案 #{proposal_id} 收尾：阶段都收尾了，后面没有更多阶段",
-        )
-        effect = "plan_closed"
-    elif approved and kind == "plan_replan":
-        effect = "replan_recorded"
-    elif approved and kind == blueprint.BLUEPRINT_KIND:
+    if approved and kind == blueprint.BLUEPRINT_KIND:
         built = blueprint.apply_build(conn, int(payload.get("plan_id") or 0), builds)
         effect = "blueprint_built"
     elif approved and kind == "profile_change":
@@ -246,7 +199,7 @@ def decide(
         "kind": kind,
         "status": "accepted" if approved else "rejected",
         "effect": effect,
-        "option": chosen if approved else None,
+        "option": None,  # T29：唯一要选方向的 kind（plan_replan）已删，这个键留着不动前端形状
         "built": built,
         "written": written,
     }

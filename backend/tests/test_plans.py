@@ -342,37 +342,6 @@ def _stage_advance_proposal(conn, plan_id: int) -> int:
     return int(result["proposal_id"])
 
 
-def test_stage_advance_cannot_close_a_paused_plan(conn):
-    plan_id = make_plan(conn, "暂停中的计划")
-    proposal_id = _stage_advance_proposal(conn, plan_id)
-    plan.pause_plan(conn, plan_id, reason="先放放")
-
-    with pytest.raises(proposals.ProposalConflict):
-        proposals.decide(conn, proposal_id, approved=True)
-
-    # 提案保持 pending，计划还是 paused——验不过就一条都不写
-    assert main.get_proposals(None, conn)["proposals"][0]["id"] == proposal_id
-    assert plan.resolve_plan(conn, plan_id)["status"] == "paused"
-
-    plan.reopen_plan(conn, plan_id, reason="回来收尾")
-
-    decided = proposals.decide(conn, proposal_id, approved=True)
-
-    assert decided["effect"] == "plan_closed"
-    assert plan.resolve_plan(conn, plan_id)["status"] == "closed"
-
-
-def test_stage_advance_cannot_close_a_void_plan(conn):
-    plan_id = make_plan(conn, "要作废的计划")
-    proposal_id = _stage_advance_proposal(conn, plan_id)
-    plan.void_plan(conn, plan_id, "整件事不该做")
-
-    with pytest.raises(proposals.ProposalConflict):
-        proposals.decide(conn, proposal_id, approved=True)
-
-    assert plan.resolve_plan(conn, plan_id)["status"] == "void"
-
-
 # ---------- ③ 候选的计划归属 ----------
 
 def test_find_prompt_carries_the_plan_context(conn):

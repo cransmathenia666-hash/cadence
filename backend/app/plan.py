@@ -262,87 +262,6 @@ def stage_finished(conn: sqlite3.Connection, stage: sqlite3.Row) -> bool:
     return deliverable_submission(conn, int(stage["id"])) is not None
 
 
-def _next_stage(conn: sqlite3.Connection, stage: sqlite3.Row) -> sqlite3.Row | None:
-    stages = get_stages(conn, stage["plan_id"])
-    for index, candidate in enumerate(stages):
-        if candidate["id"] == stage["id"]:
-            return stages[index + 1] if index + 1 < len(stages) else None
-    return None
-
-
-def _pending_stage_proposal(conn: sqlite3.Connection, stage_id: int) -> int | None:
-    """该阶段是否已有待裁定的推进提案——有就不再产一条，避免刷屏。"""
-    for row in ledger.fetch_active(conn, "proposal"):
-        if row["kind"] != "stage_advance":
-            continue
-        try:
-            payload = json.loads(row["payload"])
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if payload.get("stage_id") == stage_id:
-            return int(row["id"])
-    return None
-
-
-def maybe_stage_advance_proposal(
-    conn: sqlite3.Connection, stage_id: int, actor: str = "agent"
-) -> int | None:
-    """阶段检查点全部收尾后，产出「是否进入下一阶段」的提案。
-
-    产出的是**提案**而不是直接推进：进不进入下一阶段由你裁定（SPEC 第 8 节铁律）。
-    返回提案 id；条件不满足或已有待裁定提案时返回 None。
-    """
-    stage = get_node(conn, stage_id)
-    if stage is None:
-        raise PlanError(f"节点 id={stage_id} 不存在")
-    if stage["level"] != "stage":
-        raise PlanError(f"只有阶段节点才会产出推进提案，id={stage_id} 是 {stage['level']}")
-
-    result = stage_completion(conn, stage_id)
-    if not stage_finished(conn, stage):
-        return None
-    if _pending_stage_proposal(conn, stage_id) is not None:
-        return None
-
-    submission = deliverable_submission(conn, stage_id)
-    next_stage = _next_stage(conn, stage)
-    if next_stage is None:
-        question = (
-            f"阶段「{stage['title']}」的任务全部完成、交付物已提交"
-            f"（任务完成 {result['done']} / 跳过 {result['skipped']}），"
-            f"后面没有更多阶段了，是否收尾这个计划？"
-        )
-    else:
-        question = (
-            f"阶段「{stage['title']}」的任务全部完成、交付物已提交"
-            f"（任务完成 {result['done']} / 跳过 {result['skipped']}），"
-            f"是否进入下一阶段「{next_stage['title']}」？"
-        )
-
-    payload = {
-        "plan_id": stage["plan_id"],
-        "stage_id": stage_id,
-        "stage_title": stage["title"],
-        "next_stage_id": next_stage["id"] if next_stage is not None else None,
-        "next_stage_title": next_stage["title"] if next_stage is not None else None,
-        "settled": result["settled"],
-        "done": result["done"],
-        "skipped": result["skipped"],
-        "deliverable_url": None if submission is None else submission["url"],
-        "question": question,
-    }
-    return ledger.create_active(
-        conn,
-        "proposal",
-        {
-            "kind": "stage_advance",
-            "payload": json.dumps(payload, ensure_ascii=False),
-            "reason": question,
-        },
-        actor=actor,
-    )
-
-
 # ---------- 报告：执行世界回到系统的唯一信号 ----------
 
 def submit_report(
@@ -387,14 +306,9 @@ def submit_report(
     ledger.set_status(conn, "plan_node", node_id, target, actor="user", reason=f"报告：{note}")
     conn.commit()
 
-    # 节点收尾后看看它所属阶段是不是也收尾了；是就产出「是否进入下一阶段」提案。
-    parent = get_node(conn, int(node["parent_id"])) if node["parent_id"] is not None else None
-    if node["level"] == "stage":
-        proposal_id = maybe_stage_advance_proposal(conn, node_id)
-    elif parent is not None and parent["level"] == "stage":
-        proposal_id = maybe_stage_advance_proposal(conn, int(parent["id"]))
-    else:
-        proposal_id = None
+    # 这里曾经会「顺势产出推进提案」；T29 把这整类删了——阶段完成与否只由计划表显示，
+    # 不再是一次裁定（决策 28/30 的修订）。留着这个键是为了不动前端与冒烟脚本的形状。
+    proposal_id = None
 
     return {
         "report_id": report_id,
@@ -418,14 +332,6 @@ def _require_level(conn: sqlite3.Connection, node_id: int, level: str, action: s
     return node
 
 
-def _propose_after_child_settles(conn: sqlite3.Connection, node: sqlite3.Row) -> int | None:
-    """子节点收尾后看看它所属阶段是不是也完成了；是就产出推进提案（任务/报告共用）。"""
-    parent = get_node(conn, int(node["parent_id"])) if node["parent_id"] is not None else None
-    if parent is None or parent["level"] != "stage":
-        return None
-    return maybe_stage_advance_proposal(conn, int(parent["id"]))
-
-
 def check_task(conn: sqlite3.Connection, node_id: int, actor: str = "user") -> dict[str, Any]:
     """任务打勾：一步到完成，不写理由（决策 31）。迁移仍走状态机与台账。"""
     node = _require_level(conn, node_id, "task", "打勾")
@@ -436,7 +342,7 @@ def check_task(conn: sqlite3.Connection, node_id: int, actor: str = "user") -> d
         "node_id": node_id,
         "node_status_before": before,
         "node_status": "done",
-        "proposal_id": _propose_after_child_settles(conn, node),
+        "proposal_id": None,  # T29：不再顺产推进提案
     }
 
 
@@ -456,7 +362,7 @@ def skip_task(
         "node_id": node_id,
         "node_status_before": before,
         "node_status": "skipped",
-        "proposal_id": _propose_after_child_settles(conn, node),
+        "proposal_id": None,  # T29：不再顺产推进提案
     }
 
 
@@ -493,7 +399,7 @@ def submit_deliverable(
         "url": cleaned_url,
         "note": cleaned_note,
         "created_at": timestamp,
-        "proposal_id": maybe_stage_advance_proposal(conn, node_id),
+        "proposal_id": None,  # T29：不再顺产推进提案
     }
 
 
@@ -767,6 +673,7 @@ def plan_tree(
             "lag": {"lag_days": 0, "behind": False, "worst": None},
         }
 
+    weekly = weekly_status(conn, today=today, plan_id=int(plan_row["id"]))
     stages = []
     for stage in get_stages(conn, int(plan_row["id"])):
         children = conn.execute(
@@ -816,6 +723,10 @@ def plan_tree(
             "progress": stage_completion(conn, int(current["id"])),
         },
         "lag": plan_lag(conn, int(plan_row["id"]), today),
+        # T29：落后不再产「重排」提案等人裁定，改成计划页上的一句话提醒——
+        # 原因是算出来的，三个方向只是**建议**（不再有裁定入口）。
+        "behind_reason": weekly["behind_reason"],
+        "advice": weekly["replan_options"],
         "stages": stages,
     }
 
@@ -958,57 +869,3 @@ def weekly_status(
         "replan_options": [] if behind_reason is None else _replan_options(stage, lag, progress),
     })
     return status
-
-
-def _pending_replan_for_week(conn: sqlite3.Connection, week: str) -> int | None:
-    """本周是否已经产出过重排提案——有就不再来一条，免得每周开机刷一堆。"""
-    for row in ledger.fetch_active(conn, "proposal"):
-        if row["kind"] != "plan_replan":
-            continue
-        try:
-            payload = json.loads(row["payload"])
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if payload.get("week") == week:
-            return int(row["id"])
-    return None
-
-
-def ensure_weekly_replan_proposal(
-    conn: sqlite3.Connection,
-    today: date | None = None,
-    plan_id: int | None = None,
-    actor: str = "agent",
-) -> int | None:
-    """未推进时产出重排提案：落后，或本周一条报告都没有。
-
-    产出的是**提案**，不是直接改计划——减量、顺延还是换交付物，
-    最终由你裁定（SPEC 第 8 节铁律）。同一周只产一条。
-    """
-    today = today or date.today()
-    status = weekly_status(conn, today=today, plan_id=plan_id)
-    if status["plan_id"] is None or status["behind_reason"] is None:
-        return None
-    if _pending_replan_for_week(conn, status["week"]) is not None:
-        return None
-
-    stage = status["current_stage"]
-    payload = {
-        "week": status["week"],
-        "plan_id": status["plan_id"],
-        "stage_id": None if stage is None else stage["id"],
-        "stage_title": None if stage is None else stage["title"],
-        "why": status["behind_reason"],
-        "lag_days": status["lag"]["lag_days"],
-        "options": status["replan_options"],
-    }
-    return ledger.create_active(
-        conn,
-        "proposal",
-        {
-            "kind": "plan_replan",
-            "payload": json.dumps(payload, ensure_ascii=False),
-            "reason": status["behind_reason"],
-        },
-        actor=actor,
-    )

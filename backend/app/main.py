@@ -643,9 +643,11 @@ def post_candidate_verdict(
 
 # ---------- 待裁定提案（T14：提案裁定页的后端） ----------
 #
-# 提案是「AI / 规则算出结论、但只有你点头才算数」的东西（SPEC 第 8 节铁律）。
-# 四类 kind 的来源与「批准」各自的含义写在 `app/proposals.py` 的模块说明里，
-# 这里只收参数、把领域错误翻成状态码：不存在 404、已裁定过 409、规则拒绝 400。
+# 提案是「AI 算出结论、但只有你点头才算数」的东西（SPEC 第 8 节铁律）。
+# T29 起只剩三类（`material_judgment` / `profile_change` / `plan_blueprint`），
+# 规则自动产的两类（`stage_advance` / `plan_replan`）已整类删除——来源与「批准」各自的
+# 含义写在 `app/proposals.py` 的模块说明里。这里只收参数、把领域错误翻成状态码：
+# 不存在 404、已裁定过 409、规则拒绝 400。
 
 
 class ProposalDecideIn(BaseModel):

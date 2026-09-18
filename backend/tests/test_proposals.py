@@ -55,8 +55,8 @@ def status_of(conn, proposal_id: int) -> str:
 
 def test_list_returns_pending_with_parsed_payload(conn):
     first = add_proposal(conn, "material_judgment", {"source_text": "要不要学 python"})
-    second = add_proposal(conn, "profile_change", {"items": []})
-    decided = add_proposal(conn, "plan_replan", {"options": []})
+    second = add_proposal(conn, "profile_change", {"category": "current_state", "content": "x"})
+    decided = add_proposal(conn, "material_judgment", {"source_text": "另一份资料"})
     proposals.decide(conn, decided, approved=False, reason="不适用")  # 裁定过的就不再出现
 
     listed = proposals.list_pending(conn)
@@ -158,101 +158,6 @@ def test_route_translates_domain_errors_to_status_codes(conn):
 
 # ---------- 批准到底动什么 ----------
 
-def test_approving_a_stage_advance_with_a_next_stage_changes_nothing_structural(conn):
-    """「进下一阶段」是算出来的：阶段一收尾，当前阶段自己就往前走了，没有可写的结构。"""
-    add_proposal(
-        conn,
-        "stage_advance",
-        {"plan_id": 1, "stage_id": 1, "stage_title": "阶段一", "next_stage_id": 2,
-         "next_stage_title": "阶段二", "done": 2, "skipped": 0, "question": "进不进下一阶段？"},
-        reason="进不进下一阶段「阶段二」？",
-    )
-    proposal_id = conn.execute("SELECT MAX(id) AS n FROM proposal").fetchone()["n"]
-
-    result = decide(conn, proposal_id, approved=True)
-
-    assert result["effect"] == "recorded_only"
-    assert ledger.history(conn, "proposal", proposal_id)[-1]["reason"] == "批准：进入下一阶段「阶段二」"
-
-
-def test_approving_the_last_stage_advance_closes_the_plan(conn):
-    """「后面没有更多阶段」那种推进提案，批准才是真有动作：计划收尾。"""
-    plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
-    stage_id = plan.add_node(conn, plan_id, "stage", "收尾阶段")
-    task_id = plan.add_node(conn, plan_id, "task", "收尾任务", parent_id=stage_id)
-    # 任务打勾 + 交付物提交 → 阶段完成 → 自动产出「后面没有更多阶段」的推进提案
-    plan.check_task(conn, task_id)
-    plan.submit_deliverable(conn, stage_id, "https://example.com/repo", "做完了")
-    row = conn.execute("SELECT id, payload FROM proposal").fetchone()
-    assert json.loads(row["payload"])["next_stage_id"] is None  # 确实是最后一段
-
-    result = decide(conn, int(row["id"]), approved=True)
-
-    assert result["effect"] == "plan_closed"
-    plan_row = plan.resolve_plan(conn, plan_id)
-    assert plan_row["status"] == "closed"
-    assert ledger.history(conn, "plan", plan_id)[-1]["reason"] == (
-        f"按提案 #{row['id']} 收尾：阶段都收尾了，后面没有更多阶段"
-    )
-
-
-def test_approving_a_replan_requires_one_of_the_offered_options(conn):
-    proposal_id = add_proposal(
-        conn,
-        "plan_replan",
-        {"week": "2026-W38", "plan_id": 1, "why": "落后 5 天",
-         "options": [
-             {"kind": "reduce_scope", "label": "减量", "detail": "缩一缩范围"},
-             {"kind": "postpone", "label": "顺延", "detail": "往后推 5 天"},
-         ]},
-        reason="落后 5 天",
-    )
-
-    with pytest.raises(proposals.ProposalError):
-        decide(conn, proposal_id, approved=True)  # 没选方向
-    with pytest.raises(proposals.ProposalError):
-        decide(conn, proposal_id, approved=True, option="swap_deliverable")  # 不在选项里
-    assert status_of(conn, proposal_id) == "pending"  # 两次都没动它
-
-    result = decide(conn, proposal_id, approved=True, option="postpone", reason="这周确实挪不动")
-
-    assert result["effect"] == "replan_recorded" and result["option"] == "postpone"
-    assert status_of(conn, proposal_id) == "accepted"
-    assert ledger.history(conn, "proposal", proposal_id)[-1]["reason"] == "批准：顺延——这周确实挪不动"
-
-
-def test_closing_an_already_closed_plan_is_a_conflict(conn):
-    plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
-    ledger.set_status(conn, "plan", plan_id, "closed", actor="user", reason="先前就收尾了")
-    proposal_id = add_proposal(
-        conn, "stage_advance", {"plan_id": plan_id, "next_stage_id": None, "stage_title": "最后一段"}
-    )
-
-    with pytest.raises(proposals.ProposalConflict):
-        decide(conn, proposal_id, approved=True)
-
-    assert status_of(conn, proposal_id) == "pending"
-
-
-def test_replan_payload_from_the_real_producer_is_decidable(conn):
-    """真实生产者产的那条重排提案，形状得跟裁定这边对得上。"""
-    plan_id = ledger.create_active(conn, "plan", {"goal": "测试计划"}, actor="user")
-    stage_id = plan.add_node(conn, plan_id, "stage", "第一段")
-    checkpoint_id = plan.add_node(conn, plan_id, "checkpoint", "本周检查点", parent_id=stage_id)
-    # 整周没有报告 → 产出重排提案（理由「本周没有报告，看不出这周推到哪了」）
-    proposal_id = plan.ensure_weekly_replan_proposal(conn, today=date(2026, 9, 17), plan_id=plan_id)
-    assert proposal_id is not None, "没报告的一周应该产出一条重排提案"
-
-    listed = proposals.list_pending(conn, "plan_replan")["proposals"][0]
-    options = [item["kind"] for item in listed["payload"]["options"]]
-
-    result = decide(conn, proposal_id, approved=True, option=options[0])
-
-    assert result["effect"] == "replan_recorded"
-    assert checkpoint_id is not None  # 计划结构一个字没改
-    assert plan.get_node(conn, checkpoint_id)["status"] == "not_started"
-
-
 # ---------- 批准「档案变更」= 真的写进档案（T28 起） ----------
 #
 # 这一类提案原先没有生产者、批准也只记账；T28 的计划对话成了它的第一个生产者，
@@ -334,3 +239,20 @@ def test_a_malformed_profile_change_is_refused(conn, payload):
 
     assert status_of(conn, proposal_id) == "pending"
     assert profile_items(conn) == []
+
+
+# ---------- T29：删掉的两类不再可裁 ----------
+#
+# `stage_advance` 与 `plan_replan` 整类删除（规则不再产、也就没有裁定入口）。
+# 库里可能还留着老类型（历史），这里钉住「明确拒绝、且保持 pending 可驳回」。
+
+@pytest.mark.parametrize("kind", ["stage_advance", "plan_replan"])
+def test_deleted_proposal_kinds_are_refused(conn, kind):
+    proposal_id = add_proposal(conn, kind, {"options": [{"kind": "postpone", "label": "顺延"}]})
+
+    with pytest.raises(proposals.ProposalError):
+        decide(conn, proposal_id, approved=True)
+
+    assert status_of(conn, proposal_id) == "pending"
+    # 驳回仍走得通：老提案的正当处置是留一条台账记录说它不作数
+    assert decide(conn, proposal_id, approved=False, reason="这类已删除")["status"] == "rejected"
