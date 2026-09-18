@@ -892,13 +892,15 @@ export type ProposalDecision = {
   /**
    * `blueprint_built` = 按勾选把树建进了计划（`built` 里列出建了哪些）；
    * `profile_written` = 真把一条写进了长期档案（`written` 里是哪一条）；
-   * `plan_closed` = 计划收尾；`replan_recorded` 只记下你选的方向；其余纯记账。
+   * `node_updated` = **原地改**了一个已有节点的字段（`updated` 里是改前改后，**id 不变**）；
+   * `node_added` = 往计划里加了一件任务 / 一个阶段（`added` 里是新建的那条）；
+   * `recorded_only` = 纯记账（驳回也是它）。
    */
   effect:
     | "blueprint_built"
-    | "plan_closed"
-    | "replan_recorded"
     | "profile_written"
+    | "node_updated"
+    | "node_added"
     | "recorded_only";
   /** 只在批准档案变更时有值：真写进档案的那一条。 */
   written: { id: number; category: string; content: string } | null;
@@ -908,6 +910,15 @@ export type ProposalDecision = {
     stages: { id: number; title: string; deliverable: string | null }[];
     tasks: { id: number; title: string; stage_id: number }[];
     notes: string[];
+  } | null;
+  /** 只在批准「加一件任务 / 一个阶段」时有值：新建的那个节点。 */
+  added: { id: number; level: string; title: string; parent_id: number | null } | null;
+  /** 只在批准「改一个已有节点」时有值：改了哪几项、改前改后（id 在一个没动）。 */
+  updated: {
+    node_id: number;
+    changed: string[];
+    before: Record<string, string | null>;
+    after: Record<string, string | null>;
   } | null;
 };
 
@@ -1047,16 +1058,34 @@ export async function generateBlueprint(
  */
 export type Selection = string[];
 
-// ---------- 计划级对话（T28：蓝图落地之后接着聊） ----------
+// ---------- 计划级对话（T28：蓝图落地之后接着聊；T31 起能提一条可执行建议） ----------
 //
 // 与上面那段 plan-chat（绑候选、6 轮、出蓝图）分工不同：这一段跟着**计划**走，
 // 不限轮数（成本闸是历史字符上限），聊的是执行期的事。助手那一侧存的是人话，不是 JSON。
+
+/**
+ * 它某一轮提的一条建议，以及那条待裁定提案（T31：SPEC 决策 39）。
+ *
+ * 提案是随那一轮**自动**落的，界面上的「确认」＝当场批准（改的原地改、加的建节点），
+ * 「忽略」＝当场驳回（台账记「聊天里先不动」）——所以每条建议都有归宿，
+ * **不会在 `/proposals` 页堆着**。已裁定的消息也带这个字段（界面就不给按钮了）。
+ */
+export type DialogueSuggestion = {
+  /** 那条 `plan_change` 提案的 id——「确认」就是对它调 `decideProposal`。 */
+  proposal_id: number;
+  /** 后端拼好的人话一行，直接当确认条显示：「改『读 MDN』的截止日：10-01 → 10-08」。 */
+  summary: string;
+  /** `pending` 时界面给「确认 / 忽略」两个按钮，其余只显示结果。 */
+  status: string;
+};
 
 /** 对话里的一条消息。 */
 export type DialogueMessage = {
   role: string;
   content: string;
   created_at: string;
+  /** 助手这一轮提的建议（没有就是 `null`）。 */
+  suggestion: DialogueSuggestion | null;
 };
 
 export type PlanDialogueView = {
@@ -1075,15 +1104,23 @@ export async function getPlanDialogue(planId: number): Promise<PlanDialogueView>
   return request<PlanDialogueView>(`/api/plan-dialogue?plan_id=${planId}`);
 }
 
-/** 聊一句的回执。`reply` 是它的人话回复（不是 JSON）。 */
+/** 聊一句的回执。`reply` 是它的人话回复；`suggestion` 是那一条建议（没有就是 `null`）。 */
 export type DialogueTurn = {
   plan_id: number;
   reply: string;
+  suggestion: DialogueSuggestion | null;
+  /** 建议落成的那条提案 id（没有建议时为 `null`）。 */
+  proposal_id: number | null;
   turns_used: number;
   calls: number;
 };
 
-/** 聊一句：每轮 1 次调用、不重试；输出为空就报错，你的话仍留在对话里。 */
+/**
+ * 聊一句：人话 + 最多一条可执行建议。
+ *
+ * 输出形状不合格时后端带原因重试一次（最坏 2 次调用）；两次都不合格就报错，
+ * 你这句话仍留在对话里。
+ */
 export async function sayPlanDialogue(planId: number, message: string): Promise<DialogueTurn> {
   return request<DialogueTurn>("/api/plan-dialogue", {
     method: "POST",
@@ -1124,6 +1161,35 @@ export type ProfileChangePayload = {
   why?: string;
   /** 这条是从哪个计划的对话里聊出来的。 */
   plan_id?: number;
+};
+
+/**
+ * 「计划改动」提案的 payload（T31：计划对话里那条可执行建议，SPEC 决策 39）。
+ *
+ * 三类动作共用一个 payload 形状，按 `action` 取用各自那几项：
+ * - `update_node`：`node_id` + `fields`（只含真改了的字段）+ `before`；
+ * - `add_task`：`stage_id` + `stage_title` + `task`；
+ * - `add_stage`：`stage`（新阶段排最后）。
+ *
+ * 批准＝改的走原地改字段（id 不变）、加的走建节点；界面上的「确认 / 忽略」就是对
+ * 这条提案的批准 / 驳回。`summary` 是后端拼好的人话一行，界面直接显示。
+ */
+export type PlanChangePayload = {
+  plan_id: number;
+  action: string;
+  /** 给人看的一行（后端拼的），也是台账理由里那一句。 */
+  summary?: string;
+  /** 为什么该这么改（模型给的）。 */
+  why?: string;
+  node_id?: number;
+  node_title?: string;
+  level?: string;
+  fields?: Record<string, string | null>;
+  before?: Record<string, string | null>;
+  stage_id?: number;
+  stage_title?: string;
+  task?: { title: string; due_date?: string | null };
+  stage?: { title: string; deliverable: string; why?: string };
 };
 
 // ---------- 判资料（T29：`/judge` 页） ----------

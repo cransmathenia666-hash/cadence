@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { PlanDialogue } from "@/components/plan-dialogue";
@@ -21,31 +20,14 @@ import {
   type PlanTree,
 } from "@/lib/api";
 
-/**
- * T8 计划表页面；T23 起承担任务层的写动作；T24 起承担**多计划切换与生命周期**；
- * T27 起生命周期拆成四态（暂停 / 收尾 / 作废）并补上**历史计划**这个出口；
- * T29 起落后不再产提案，改成这里的一句提醒 + 三个建议（怎么定由你自己定）。
- *
- * T28 起页面底部还有一块**计划级对话**（`components/plan-dialogue.tsx`）：蓝图落地之后
- * 接着聊这个计划——那一段只说话与提炼档案提案，改不了计划结构（「聊 → 改」另立项）。
- * 改计划的入口在计划表本身：每个节点旁边都能就地改字段（T30）。
- *
- * 取数、加载态、错误态在这里管；"画成什么样"与动作按钮在 `components/plan-tree.tsx`。
- * 数据全部来自 `GET /api/plan`（T24 起带 `plan_id`）——落后量、当前阶段、进度、
- * 阶段是否完成都是后端算好的，前端不做任何业务计算（SPEC 第 10 节的铁律）。
- *
- * 生命周期三扇门的分界是**能不能回头**：暂停是暂时不做（能「继续做」）、收尾是做完了
- * （能「重开」），作废是「这件事根本不该做」——单向门，只给理由不留退路。
- * 三种都不再进行中，所以都从切换器挪进「历史计划」，理由与时间一直留在库里。
- */
-
 /** 计划状态的说法。四态见 SPEC 决策 33（T27 拆分）。 */
 const PLAN_STATUS_LABELS: Record<string, string> = {
   active: "进行中",
   paused: "暂时不做",
-  closed: "做完了",
+  closed: "已做完",
   void: "已作废",
 };
+
 export default function Home() {
   const [tree, setTree] = useState<PlanTree | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,186 +84,255 @@ export default function Home() {
   const endedPlans = allPlans.filter((item) => item.status !== "active");
 
   return (
-    <main>
-      <h1>计划表</h1>
-      <p>
-        <Link href="/new">建计划 / 建阶段与任务</Link>
-        {" · "}
-        <Link href="/report">提交报告</Link>
-        {" · "}
-        <Link href="/candidates">候选清单与规划对话</Link>
-        {" · "}
-        <Link href="/judge">判一份资料</Link>
-        {" · "}
-        <Link href="/proposals">待裁定提案</Link>
-        {" · "}
-        <Link href="/providers">LLM 提供商</Link>
-        {" · "}
-        <Link href="/profile">长期档案</Link>
-      </p>
-
-      <section>
-        <h2>看哪个计划</h2>
-        {plans.length === 0 ? (
-          <p role="status">还没有进行中的计划——去「建计划」建一个。</p>
-        ) : (
-          <p>
-            <label htmlFor="plan-switch">计划：</label>
-            <select
-              id="plan-switch"
-              value={selectedId === null ? "" : String(selectedId)}
-              onChange={(event) =>
-                setSelectedId(event.target.value === "" ? null : Number(event.target.value))
-              }
-            >
-              <option value="">（最新建的那个）</option>
-              {plans.map((item) => (
-                <option key={item.id} value={item.id}>
-                  #{item.id}：{item.goal}（{item.stages_finished}/{item.stages} 阶段完成）
-                </option>
-              ))}
-            </select>
+    <div>
+      <div className="flex-between" style={{ marginBottom: "16px" }}>
+        <div>
+          <h1>当前计划</h1>
+          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
+            方向跟踪与三级结构任务落实。节点字段原地可改，已达标阶段可直接交交付物。
           </p>
+        </div>
+        {acting && (
+          <div className="badge badge-in_progress flex-row">
+            <span className="spinner" />
+            <span>处理中…</span>
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ padding: "14px 18px", marginBottom: "16px" }}>
+        <div className="flex-between" style={{ flexWrap: "wrap", gap: "10px" }}>
+          <div className="flex-row" style={{ gap: "10px" }}>
+            <label htmlFor="plan-switch" style={{ fontWeight: 600, margin: 0 }}>
+              选择计划：
+            </label>
+            {plans.length === 0 ? (
+              <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>
+                暂无进行中的计划，请前往「新建」页面创建。
+              </span>
+            ) : (
+              <select
+                id="plan-switch"
+                value={selectedId === null ? "" : String(selectedId)}
+                onChange={(event) =>
+                  setSelectedId(event.target.value === "" ? null : Number(event.target.value))
+                }
+                style={{ minWidth: "260px" }}
+              >
+                <option value="">（最新建的进行中计划）</option>
+                {plans.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    #{item.id}：{item.goal}（{item.stages_finished}/{item.stages} 阶段完成）
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {tree?.plan && (
+            <div className="flex-row gap-sm">
+              <span className={`badge badge-${tree.plan.status === "active" ? "in_progress" : "not_started"}`}>
+                {PLAN_STATUS_LABELS[tree.plan.status] ?? tree.plan.status}
+              </span>
+              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                建于 {tree.plan.valid_from?.slice(0, 10)}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {plans.length > 0 && (
+          <details style={{ marginTop: "12px", marginBottom: 0, padding: "8px 12px" }}>
+            <summary style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+              计划管理（暂停 / 收尾 / 作废）
+            </summary>
+            <div style={{ marginTop: "10px" }}>
+              <p style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "10px" }}>
+                暂停 = 暂时不做（随时能「继续做」）；收尾 = 做完了（能「重开」）；作废 = 单向门（必须填理由）。
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {plans.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex-between"
+                    style={{
+                      padding: "6px 10px",
+                      background: "var(--bg-subtle)",
+                      borderRadius: "var(--radius-sm)",
+                      fontSize: "13px",
+                    }}
+                  >
+                    <span>
+                      <strong>#{item.id}</strong> {item.goal}
+                    </span>
+                    <div className="flex-row gap-sm">
+                      <button
+                        type="button"
+                        className="sm"
+                        onClick={() => run(() => closePlan(item.id))}
+                        disabled={acting}
+                      >
+                        收尾
+                      </button>
+                      <button
+                        type="button"
+                        className="sm"
+                        onClick={() => run(() => pausePlan(item.id))}
+                        disabled={acting}
+                      >
+                        暂停
+                      </button>
+                      {voidingId === item.id ? (
+                        <div className="flex-row gap-sm">
+                          <input
+                            aria-label={`作废计划 #${item.id} 的理由`}
+                            value={voidReason}
+                            onChange={(event) => setVoidReason(event.target.value)}
+                            placeholder="作废理由（必填）"
+                            style={{ width: "160px" }}
+                          />
+                          <button
+                            type="button"
+                            className="danger sm"
+                            onClick={() =>
+                              run(async () => {
+                                await voidPlan(item.id, voidReason);
+                                setVoidingId(null);
+                                setVoidReason("");
+                                if (selectedId === item.id) setSelectedId(null);
+                              })
+                            }
+                            disabled={acting || voidReason.trim() === ""}
+                          >
+                            确认
+                          </button>
+                          <button
+                            type="button"
+                            className="sm"
+                            onClick={() => setVoidingId(null)}
+                            disabled={acting}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="danger sm"
+                          onClick={() => {
+                            setVoidingId(item.id);
+                            setVoidReason("");
+                          }}
+                          disabled={acting}
+                        >
+                          作废
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
         )}
 
-        <details>
-          <summary>计划管理（暂停 / 收尾 / 作废）</summary>
-          <p>
-            <small>
-              暂停 = 暂时不做（随时能「继续做」回来，理由可选）；收尾 = 做完了（能「重开」，
-              理由可选）；作废 = <strong>这件事根本不该做</strong>——它是单向门，
-              <strong>理由必填</strong>，之后只能新建计划重做。三者都会从上面的下拉里消失，
-              理由与时间留在下面的「历史计划」里。
-            </small>
-          </p>
-          <ul>
-            {plans.map((item) => (
-              <li key={item.id}>
-                #{item.id}「{item.goal}」{" "}
-                <button type="button" onClick={() => run(() => closePlan(item.id))} disabled={acting}>
-                  收尾
-                </button>{" "}
-                <button type="button" onClick={() => run(() => pausePlan(item.id))} disabled={acting}>
-                  暂停
-                </button>{" "}
-                {voidingId === item.id ? (
-                  <>
-                    <input
-                      aria-label={`作废计划 #${item.id} 的理由`}
-                      value={voidReason}
-                      onChange={(event) => setVoidReason(event.target.value)}
-                      placeholder="为什么这件事根本不该做（必填）"
-                    />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        run(async () => {
-                          await voidPlan(item.id, voidReason);
-                          setVoidingId(null);
-                          setVoidReason("");
-                          if (selectedId === item.id) setSelectedId(null);
-                        })
-                      }
-                      disabled={acting || voidReason.trim() === ""}
-                    >
-                      确认作废
-                    </button>{" "}
-                    <button type="button" onClick={() => setVoidingId(null)} disabled={acting}>
-                      取消
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVoidingId(item.id);
-                      setVoidReason("");
-                    }}
-                    disabled={acting}
-                  >
-                    作废…
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </details>
-
-        <details>
-          <summary>历史计划（{endedPlans.length}）</summary>
-          <p>
-            <small>
-              不再进行中的计划都在这里。暂停的给「继续做」、收尾的给「重开」——两者都是
-              同一个动作（放回进行中），做完就从这一段挪回上面的下拉里。
-            </small>
-          </p>
-          {endedPlans.length === 0 ? (
-            <p role="status">还没有进了历史的计划。</p>
-          ) : (
-            <ul>
+        {endedPlans.length > 0 && (
+          <details style={{ marginTop: "8px", marginBottom: 0, padding: "8px 12px" }}>
+            <summary style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+              历史计划归档（{endedPlans.length} 个）
+            </summary>
+            <div style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
               {endedPlans.map((item) => (
-                <li key={item.id}>
-                  #{item.id}「{item.goal}」〔{PLAN_STATUS_LABELS[item.status] ?? item.status}〕
-                  {item.ended_at !== null && (
-                    <> {item.ended_at.slice(0, 16).replace("T", " ")}</>
-                  )}
-                  {item.ended_reason !== null && <> —— {item.ended_reason}</>}{" "}
-                  {item.status === "paused" && (
-                    <button
-                      type="button"
-                      onClick={() => run(() => reopenPlan(item.id))}
-                      disabled={acting}
-                    >
-                      继续做
-                    </button>
-                  )}
-                  {item.status === "closed" && (
-                    <button
-                      type="button"
-                      onClick={() => run(() => reopenPlan(item.id))}
-                      disabled={acting}
-                    >
-                      重开
-                    </button>
-                  )}
-                  {item.status === "void" && (
-                    <small>作废是单向门，要重新做就新建一个计划</small>
-                  )}
-                </li>
+                <div
+                  key={item.id}
+                  className="flex-between"
+                  style={{
+                    padding: "6px 10px",
+                    background: "var(--bg-subtle)",
+                    borderRadius: "var(--radius-sm)",
+                    fontSize: "13px",
+                  }}
+                >
+                  <div>
+                    <strong>#{item.id}</strong> {item.goal}{" "}
+                    <span className="badge badge-not_started">
+                      {PLAN_STATUS_LABELS[item.status] ?? item.status}
+                    </span>
+                    {item.ended_reason && (
+                      <span style={{ color: "var(--text-muted)", marginLeft: "8px", fontSize: "12px" }}>
+                        原因：{item.ended_reason}
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    {item.status === "paused" && (
+                      <button
+                        type="button"
+                        className="sm primary"
+                        onClick={() => run(() => reopenPlan(item.id))}
+                        disabled={acting}
+                      >
+                        继续做
+                      </button>
+                    )}
+                    {item.status === "closed" && (
+                      <button
+                        type="button"
+                        className="sm"
+                        onClick={() => run(() => reopenPlan(item.id))}
+                        disabled={acting}
+                      >
+                        重开
+                      </button>
+                    )}
+                  </div>
+                </div>
               ))}
-            </ul>
-          )}
-        </details>
-      </section>
+            </div>
+          </details>
+        )}
+      </div>
 
       {error !== null && (
-        <p role="alert">
+        <div className="alert alert-danger" role="alert">
           <strong>取计划失败：</strong>
           {error}
-        </p>
+        </div>
       )}
 
-      {error === null && tree === null && <p role="status">正在从后端取计划…</p>}
+      {error === null && tree === null && (
+        <div className="card" style={{ textAlign: "center", padding: "40px 20px" }}>
+          <span className="spinner" style={{ width: "20px", height: "20px", marginBottom: "8px" }} />
+          <p style={{ color: "var(--text-muted)" }}>正在加载计划数据…</p>
+        </div>
+      )}
 
       {tree !== null && tree.plan !== null && tree.behind_reason !== null && (
-        <section>
-          <h2>落后了，提醒一句</h2>
-          <p>
-            <strong>{tree.behind_reason}。</strong>
+        <div className="alert alert-warning" style={{ display: "block" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+            <strong style={{ fontSize: "14px" }}>进度提醒：{tree.behind_reason}</strong>
+          </div>
+          <p style={{ fontSize: "12px", color: "var(--warning)", marginBottom: "8px" }}>
+            落后只是节奏提醒，怎么做完全由你决定。系统建议以下处理方向：
           </p>
-          <p>
-            <small>
-              T29 起这类提醒不再是要你裁定的条目——怎么做由你自己定，下面三个方向只是建议：
-            </small>
-          </p>
-          <ul>
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
             {(tree.advice ?? []).map((item) => (
-              <li key={item.kind}>
+              <div
+                key={item.kind}
+                style={{
+                  background: "#fff",
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  fontSize: "12px",
+                  border: "1px solid var(--warning-border)",
+                  flex: "1 1 240px",
+                }}
+              >
                 <strong>{item.label}</strong>：{item.detail}
-              </li>
+              </div>
             ))}
-          </ul>
-        </section>
+          </div>
+        </div>
       )}
 
       {tree !== null && (
@@ -297,11 +348,15 @@ export default function Home() {
         />
       )}
 
-      {/* T28：蓝图落地之后接着聊。key 带上计划号——换计划时把组件整个换掉，
-          免得上一段对话的消息串到另一个计划底下。 */}
+      {/* 计划级长对话。对话里「确认」一条建议之后只要重新取一遍数——改的动作后端已经做完，
+          所以给同一个外壳传一个空 thunk（它负责把最新计划与两份列表拉回来）。 */}
       {tree !== null && tree.plan !== null && (
-        <PlanDialogue key={tree.plan.id} planId={tree.plan.id} />
+        <PlanDialogue
+          key={tree.plan.id}
+          planId={tree.plan.id}
+          onChanged={() => run(async () => undefined)}
+        />
       )}
-    </main>
+    </div>
   );
 }
