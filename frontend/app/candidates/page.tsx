@@ -150,16 +150,28 @@ function ChatBox({
   candidateId,
   planId,
   title,
+  plans,
 }: {
   candidateId: number;
   planId: number | null;
   title: string;
+  plans: PlanSummary[];
 }) {
   const [view, setView] = useState<PlanChatView | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** 服务器也说不出落点时，由你在这里指一次；说一次它就记进对话里了。 */
+  const [chosenPlan, setChosenPlan] = useState("");
+
+  /**
+   * 落点以**服务器**的答案为准：`view.plan_id` 是「这段对话记在哪个计划名下」。
+   * 为什么不能只信 prop（`landingPlans`）：那个映射活在页面内存里，刷新一次就没了——
+   * 而「新方向」的候选自己查不出归属，于是「够了，出方案」会带着空计划发过去。
+   */
+  const effectivePlanId =
+    view?.plan_id ?? (chosenPlan === "" ? planId : Number(chosenPlan));
 
   useEffect(() => {
     getPlanChat(candidateId, planId)
@@ -168,7 +180,7 @@ function ChatBox({
   }, [candidateId, planId]);
 
   async function refresh() {
-    setView(await getPlanChat(candidateId, planId));
+    setView(await getPlanChat(candidateId, effectivePlanId));
   }
 
   async function onSend(event: FormEvent<HTMLFormElement>) {
@@ -177,7 +189,7 @@ function ChatBox({
     setError(null);
     setNotice(null);
     try {
-      const done = await sayPlanChat(candidateId, message, planId);
+      const done = await sayPlanChat(candidateId, message, effectivePlanId);
       setMessage("");
       await refresh();
       setNotice(
@@ -197,7 +209,7 @@ function ChatBox({
     setError(null);
     setNotice(null);
     try {
-      const created = await generateBlueprint(candidateId, planId);
+      const created = await generateBlueprint(candidateId, effectivePlanId);
       await refresh();
       setNotice(
         `已出第 ${created.version} 版蓝图（提案 #${created.proposal_id}，` +
@@ -220,10 +232,36 @@ function ChatBox({
         <strong>规划对话：{title}</strong>{" "}
         <small>
           （{view === null ? "…" : `已聊 ${view.turns_used} / ${view.max_turns} 轮`}
-          {planId === null && "；这条候选没有计划归属，先在计划表里给它建个计划"}
+          {effectivePlanId !== null && `；记在计划 #${effectivePlanId} 名下`}
+          {planId === null && "；这条候选是「新方向」采纳进来的，落在哪个计划待确认"}
           ）
         </small>
       </p>
+
+      {view !== null && effectivePlanId === null && (
+        <p>
+          <label htmlFor={`chat-plan-${candidateId}`}>这段对话属于哪个计划（必选）：</label>{" "}
+          <select
+            id={`chat-plan-${candidateId}`}
+            value={chosenPlan}
+            onChange={(event) => setChosenPlan(event.target.value)}
+          >
+            <option value="">请选择…</option>
+            {plans.map((item) => (
+              <option key={item.id} value={item.id}>
+                计划 #{item.id}：{item.goal}
+              </option>
+            ))}
+          </select>
+          <br />
+          <small>
+            这条候选来自「新方向」的提问，它自己不带计划归属——落点是你采纳那一刻现选的，
+            只活在那个页面上，刷新一次就只剩对话里记着的了。真的一次都没聊过、又刷新过页面时，
+            在这里指一次；说一句它就记进这段对话，之后不用再指。
+          </small>
+        </p>
+      )}
+
       <p>
         <small>
           先把意向聊清楚（能投入多少时间、先做哪块、想交出什么），聊够了让它出一版蓝图：
@@ -250,14 +288,20 @@ function ChatBox({
           required
         />
         <br />
-        <button type="submit" disabled={busy || message.trim() === ""}>
+        <button type="submit" disabled={busy || message.trim() === "" || effectivePlanId === null}>
           {busy ? "正在说…" : "说这一句"}
         </button>{" "}
         <button
           type="button"
           onClick={onGenerate}
-          disabled={busy || view === null || !view.can_generate}
-          title={view !== null && !view.can_generate ? "先聊过一轮再出方案" : undefined}
+          disabled={busy || view === null || !view.can_generate || effectivePlanId === null}
+          title={
+            effectivePlanId === null
+              ? "先指明这段对话属于哪个计划"
+              : view !== null && !view.can_generate
+                ? "先聊过一轮再出方案"
+                : undefined
+          }
         >
           够了，出方案
         </button>
@@ -651,6 +695,7 @@ export default function CandidatesPage() {
                       candidateId={row.id}
                       planId={landingPlans[row.id] ?? row.planId}
                       title={row.title}
+                      plans={plans}
                     />
                   )}
 

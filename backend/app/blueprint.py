@@ -78,18 +78,31 @@ def _accepted_candidate(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.
 def resolve_plan(
     conn: sqlite3.Connection, candidate: sqlite3.Row, explicit_plan_id: int | None
 ) -> int:
-    """这段对话属于哪个计划：与「采纳落点」同一套校验（SPEC 决策 33 ②）。
+    """这段对话属于哪个计划：**调用方说明 > 已有对话记着的 > 候选自带归属**。
 
-    复用 `advisor.landing_plan` 而不是另写一套：采纳落到哪个计划、这段对话记在哪个计划
-    名下、蓝图往哪个计划里建，必须是同一个答案——否则蓝图会建到别的计划里去。
+    中间那一档为什么必须存在：候选是「新方向」时（`learning_request.plan_id` 为空），
+    落点是采纳那一刻现选的——那个事实当时只活在两个地方：当刻的响应，和 `plan_chat`
+    里记下的那几行。页面刷新一次就只剩后者了。所以「聊一句」与「出方案」都得和
+    `view` 一样认 `plan_chat` 的账，否则会出现「对话明明聊成了、最后一步却说没有计划
+    归属」——那是同一个流程里两套判断标准，不是用户选错了。
+
+    最后一档复用 `advisor.landing_plan`：采纳落到哪个计划、这段对话记在哪个计划名下、
+    蓝图往哪个计划里建，必须是同一个答案。
     """
+    recorded = thread_plan(conn, int(candidate["id"]))
+    if recorded is not None:
+        if explicit_plan_id is not None and int(explicit_plan_id) != recorded:
+            raise BlueprintConflict(
+                f"这段对话已经记在计划 #{recorded} 名下，不能改成 #{explicit_plan_id}"
+            )
+        return recorded
     try:
         return advisor.landing_plan(conn, candidate, explicit_plan_id)
     except advisor.CandidateConflict as error:
         raise BlueprintConflict(str(error)) from error
 
 
-def _thread_plan(conn: sqlite3.Connection, candidate_id: int) -> int | None:
+def thread_plan(conn: sqlite3.Connection, candidate_id: int) -> int | None:
     """这条候选已经有对话的话，那段对话记在哪个计划名下。"""
     row = conn.execute(
         "SELECT plan_id FROM plan_chat WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
@@ -300,7 +313,7 @@ def view(conn: sqlite3.Connection, candidate_id: int, plan_id: int | None = None
     的候选、又还没聊过）就先返回空的，让界面提示你先指明落在哪个计划。
     """
     row = _accepted_candidate(conn, candidate_id)
-    target = plan_id if plan_id is not None else _thread_plan(conn, candidate_id)
+    target = plan_id if plan_id is not None else thread_plan(conn, candidate_id)
     if target is None:
         try:
             target = resolve_plan(conn, row, None)

@@ -118,6 +118,29 @@ def ready_thread(conn, title: str = "学 HTTP", *, transport=None) -> tuple[int,
     return candidate_id, plan_id
 
 
+def free_candidate_adopted_into(conn, plan_id: int, title: str = "轻量后端入门") -> int:
+    """一条「新方向」的候选（请求没有计划归属）被显式采纳进某个计划。
+
+    这正是前端刷新后的样子：落点只存在于采纳那一刻的响应里，库里候选自己查不出来。
+    """
+    request_id = advisor.record_request(conn, "search", "我不知道该学什么")  # 没有归属
+    candidate_id = ledger.create_active(
+        conn,
+        "candidate",
+        {
+            "request_id": request_id,
+            "title": title,
+            "why": "对主线有直接帮助",
+            "depth_target": "够用",
+            "rank": 1,
+        },
+        actor="agent",
+        reason="测试用",
+    )
+    advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)
+    return candidate_id
+
+
 def open_proposal(conn, plan_id: int, candidate_id: int, *stages: dict) -> int:
     """直接落一条待裁定蓝图——专测裁定与建树时用它，省掉一轮对话。"""
     payload = {
@@ -239,6 +262,83 @@ def test_chat_without_a_profile_never_calls_the_model(conn):
 
     assert transport.seen == []
     assert conn.execute("SELECT COUNT(*) AS n FROM plan_chat").fetchone()["n"] == 0
+
+
+# ---------- 计划归属：已有对话记着的也算数（2026-09-18 修的真实 bug） ----------
+#
+# 起因：一条「新方向」的候选被显式采纳进某个计划后，落点只活在当刻的响应里；页面刷新
+# 一次，前端就传不出 plan_id 了。而当时只有 `view` 会去读 `plan_chat` 记着的归属，
+# 「聊一句」和「出方案」只看候选自带的——于是「对话聊成了、最后一步说没有计划归属」。
+
+def test_blueprint_without_plan_id_falls_back_to_the_recorded_thread(conn):
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = ledger.create_active(conn, "plan", {"goal": "轻量后端与数据库入门"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+    transport = ScriptedTransport(
+        chat_reply(["每周几小时？"]),
+        blueprint_json(stage("轻量后端入门", tasks=[task("读 MDN")])),
+    )
+
+    blueprint.say(conn, candidate_id, "每周 6 小时", plan_id=plan_id, transport=transport)
+    # ↓ 模拟前端刷新：内存里的落点没了，plan_id 传 null——这时该从对话里认出来
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert created["plan_id"] == plan_id
+    payload = json.loads(
+        conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()["payload"]
+    )
+    assert payload["plan_id"] == plan_id
+    # 蓝图建树也落在同一个计划里
+    result = proposals.decide(conn, created["proposal_id"], approved=True)
+    assert result["built"]["plan_id"] == plan_id
+
+
+def test_another_turn_also_falls_back_to_the_recorded_thread(conn):
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = ledger.create_active(conn, "plan", {"goal": "某计划"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+    transport = ScriptedTransport(chat_reply(["第一问？"]), chat_reply(["第二问？"]))
+
+    blueprint.say(conn, candidate_id, "第一句", plan_id=plan_id, transport=transport)
+    done = blueprint.say(conn, candidate_id, "第二句", transport=transport)  # 不带 plan_id
+
+    assert done["plan_id"] == plan_id
+    assert blueprint.turns_used(conn, candidate_id, plan_id) == 2
+
+
+def test_a_recorded_thread_refuses_a_different_plan(conn):
+    """已经记在计划 A 名下的对话，不能改口说是计划 B——否则蓝图会建到别的计划里。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    other = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+    transport = ScriptedTransport(chat_reply(["第一问？"]))
+
+    blueprint.say(conn, candidate_id, "第一句", plan_id=plan_id, transport=transport)
+    with pytest.raises(blueprint.BlueprintConflict):
+        blueprint.say(conn, candidate_id, "第二句", plan_id=other, transport=transport)
+    with pytest.raises(blueprint.BlueprintConflict):
+        blueprint.generate_blueprint(conn, candidate_id, plan_id=other, transport=transport)
+
+    assert blueprint.thread_plan(conn, candidate_id) == plan_id  # 记着的没被改口
+
+
+def test_view_reports_the_plan_recorded_by_the_thread(conn):
+    plan_id = ledger.create_active(conn, "plan", {"goal": "某计划"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(chat_reply(["第一问？"]))
+
+    # 还没聊过：候选自己查不出归属，界面就得先问用户（见 `view` 的 plan_id 为 null）
+    assert blueprint.view(conn, candidate_id)["plan_id"] is None
+
+    blueprint.say(conn, candidate_id, "第一句", plan_id=plan_id, transport=transport)
+
+    assert blueprint.view(conn, candidate_id)["plan_id"] == plan_id  # 之后从对话里认出来
 
 
 def test_invalid_reply_costs_the_turn_but_keeps_your_words(conn):
