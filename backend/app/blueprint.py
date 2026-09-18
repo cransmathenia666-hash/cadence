@@ -95,6 +95,16 @@ def resolve_plan(
             raise BlueprintConflict(
                 f"这段对话已经记在计划 #{recorded} 名下，不能改成 #{explicit_plan_id}"
             )
+        # 记着的那条也要当场核对：计划可能在这段对话之后收尾或作废了。不查的话，会在
+        # 「出方案」时落一条永远批不了的蓝图提案（要等批准那一步才拦），白聊一场。
+        plan_row = plan.resolve_plan(conn, recorded)
+        if plan_row is None:
+            raise BlueprintConflict(f"这段对话记在计划 #{recorded} 名下，但那个计划已经不在了")
+        if str(plan_row["status"]) != "active":
+            raise BlueprintConflict(
+                f"这段对话所属的计划 #{recorded} 已不是进行中（{plan_row['status']}）——"
+                "换个计划，或先把那边收个尾"
+            )
         return recorded
     try:
         return advisor.landing_plan(conn, candidate, explicit_plan_id)

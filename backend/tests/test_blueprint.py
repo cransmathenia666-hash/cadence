@@ -341,6 +341,29 @@ def test_view_reports_the_plan_recorded_by_the_thread(conn):
     assert blueprint.view(conn, candidate_id)["plan_id"] == plan_id  # 之后从对话里认出来
 
 
+def test_a_recorded_thread_stops_when_its_plan_is_no_longer_running(conn):
+    """对话记着的计划要是之后收尾了，下一句就该拦下——别等到批准那一步才说。
+
+    这是「从对话里认归属」那一档必须自带的核对：认出来之后不看计划状态，就会在「出方案」
+    时落一条永远批不了的蓝图提案（批准那一步才拒），白聊一场。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+    transport = ScriptedTransport(chat_reply(["第一问？"]))
+    blueprint.say(conn, candidate_id, "第一句", plan_id=plan_id, transport=transport)
+    plan.close_plan(conn, plan_id)
+
+    with pytest.raises(blueprint.BlueprintConflict):  # 聊一句
+        blueprint.say(conn, candidate_id, "第二句", transport=transport)
+    with pytest.raises(blueprint.BlueprintConflict):  # 出方案
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal").fetchone()["n"] == 0
+    assert blueprint.turns_used(conn, candidate_id, plan_id) == 1  # 被拦下那句没记进去
+
+
 def test_invalid_reply_costs_the_turn_but_keeps_your_words(conn):
     """每轮只给 1 次调用（决策 6 修订），所以不合格就报错、不重试——但你的话留着。"""
     make_provider(conn)
