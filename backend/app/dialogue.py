@@ -5,6 +5,10 @@
 聊的是执行期的事（卡在哪、下一步先做哪个、要不要调整节奏），蓝图建成之后才真正开始用它。
 两者生命周期与上限都不同，塞进一张表只会让每条查询先判断「这是哪种对话」。
 
+**上下文给什么**（2026-09-18 起）：不只看「计划现在长什么样」，还看「它是怎么来的」——
+采纳过哪条方向、出蓝图之前聊了什么、蓝图里每阶段的理由、以及哪些当时没被勾中所以没建。
+用户的原话是「只要是这个计划里面的，都该让它知道」。
+
 三条纪律：
 - LLM 只产出**提案**：这一段对话里的「我的状态变了」要落成 `profile_change` 提案，
   写档案必须经你裁定（SPEC 第 8 节铁律）。对话本身不碰计划一个字。
@@ -21,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import advisor, ledger, llm, plan, profile
+from . import advisor, blueprint as blueprint_mod, ledger, llm, plan, profile
 from .db import now_iso
 
 TASK_DIALOGUE = "plan_dialogue"
@@ -37,6 +41,12 @@ DIALOGUE_CHAR_LIMIT = 6000
 # 提炼档案提案时最多取几条、看最近几份报告。都定成常量便于按实测调。
 MAX_EXTRACTED_ITEMS = 3
 RECENT_REPORTS = 5
+
+# 「这条方向是怎么来的」与「蓝图长什么样」这两段也要进上下文（2026-09-18 用户要求：
+# 只要是这个计划里的，它都该知道——包括当时没勾的部分与每个阶段的理由）。
+# 这段事实每轮都要重发，所以各给一个字符上限；超出从最旧的截断。
+LINEAGE_CHAR_LIMIT = 1500
+BLUEPRINT_CHAR_LIMIT = 2500
 
 
 class DialogueError(RuntimeError):
@@ -135,6 +145,9 @@ def context_text(conn: sqlite3.Connection, plan_id: int) -> str:
             late = f"｜落后 {task['lag_days']} 天" if task["lag_days"] else ""
             lines.append(f"  [{marks.get(task['status'], '?')}] {task['title']}{due}{late}")
 
+    lines += ["", *_lineage(conn, plan_id)]
+    lines += ["", *_blueprints(conn, plan_id)]
+
     reports = _recent_reports(conn, plan_id)
     lines += ["", f"【最近 {len(reports)} 份报告】" if reports else "【最近报告】还没有报告"]
     lines += [
@@ -151,6 +164,108 @@ def context_text(conn: sqlite3.Connection, plan_id: int) -> str:
         names = "、".join(advisor.PROFILE_CATEGORIES[name] for name in read["missing_categories"])
         lines += [f"（这几类还空着：{names}——要靠它们才能定的，问我。）"]
     return "\n".join(lines)
+
+
+def _lineage(conn: sqlite3.Connection, plan_id: int) -> list[str]:
+    """这个计划是怎么来的：采纳过哪条方向、出蓝图之前聊了什么。
+
+    为什么要给：不给它就只能看见「现在这棵树」，答不了「当初为什么这么排」——
+    而这类问题恰恰是执行期最常问的。数据在 `plan_chat` 里（定方向那段对话）。
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT candidate_id FROM plan_chat WHERE plan_id = ? ORDER BY candidate_id",
+        (plan_id,),
+    ).fetchall()
+    if not rows:
+        return ["【这条方向的来历】没有记录（这个计划不是从采纳一条候选来的，或是更早建的）"]
+
+    lines = ["【这条方向的来历】"]
+    for row in rows:
+        candidate = conn.execute(
+            "SELECT id, title, why, depth_target, status FROM candidate WHERE id = ?",
+            (row["candidate_id"],),
+        ).fetchone()
+        if candidate is None:
+            continue
+        lines.append(
+            f"- 采纳的方向：{candidate['title']}（当时给的理由：{candidate['why']}；"
+            f"建议深度 {candidate['depth_target']}）"
+        )
+        said: list[str] = []
+        for message in conn.execute(
+            "SELECT role, content FROM plan_chat WHERE plan_id = ? AND candidate_id = ? ORDER BY id",
+            (plan_id, row["candidate_id"]),
+        ):
+            text_of = (
+                blueprint_mod.render_reply(str(message["content"]))
+                if str(message["role"]) == "assistant"
+                else str(message["content"])
+            )
+            said.append(f"  {'它' if message['role'] == 'assistant' else '我'}：{text_of}")
+        kept, used = [], 0
+        for line in reversed(said):  # 从最新往回收，收不下就丢更早的
+            if kept and used + len(line) > LINEAGE_CHAR_LIMIT:
+                break
+            kept.insert(0, line)
+            used += len(line)
+        lines += kept or ["  （那段对话没有记录）"]
+    return lines
+
+
+def _blueprints(conn: sqlite3.Connection, plan_id: int) -> list[str]:
+    """这个计划的蓝图：最近的待裁定那版，与已经建进计划的那版。
+
+    除了阶段与任务本身，还标出**哪些当时没被勾中、因此没建**——那是「为什么计划里
+    没有这一块」的答案。更早的版本不铺开（都被顶掉了），只报个数。
+    """
+    rows = conn.execute(
+        "SELECT * FROM proposal WHERE kind = ? ORDER BY id DESC",
+        (blueprint_mod.BLUEPRINT_KIND,),
+    ).fetchall()
+    mine = [row for row in rows if int(blueprint_mod.payload_of(row).get("plan_id") or 0) == int(plan_id)]
+    if not mine:
+        return ["【蓝图】没有记录（这个计划不是从蓝图建起来的，或是更早建的）"]
+
+    taken = {
+        str(stage["title"]): {str(task["title"]) for task in stage["tasks"]}
+        for stage in plan.plan_tree(conn, plan_id)["stages"]
+    }
+    wanted: list[str] = []
+    for row in mine:
+        status = str(row["status"])
+        if status == "superseded":
+            continue  # 被新版顶掉的版本不值一提，下面只报个数
+        if status == "pending":
+            label = "待你勾选的那一版"
+        elif status == "accepted":
+            label = "已经建进计划的这一版"
+        else:
+            label = f"（{status}）"
+        payload = blueprint_mod.payload_of(row)
+        block = [f"- {label}：目标「{payload.get('goal')}」"]
+        for stage in payload.get("stages") or []:
+            title = str(stage.get("title"))
+            built = title in taken
+            block.append(f"  · 阶段「{title}」{'（已建）' if built else '（当时没勾，没建）'}")
+            block.append(f"    要交的东西：{stage.get('deliverable')}")
+            if stage.get("why"):
+                block.append(f"    为什么先做它：{stage['why']}")
+            for task in stage.get("tasks") or []:
+                task_title = str(task.get("title"))
+                done = task_title in taken.get(title, set())
+                due = f"｜截止 {task['due_date']}" if task.get("due_date") else ""
+                block.append(f"    - {task_title}{due}{'' if done else '（当时没勾，没建）'}")
+                if len(chr(10).join(block)) > BLUEPRINT_CHAR_LIMIT:
+                    break
+        wanted += block
+        if len(chr(10).join(wanted)) > BLUEPRINT_CHAR_LIMIT:
+            wanted.append("  （这版太长，只列到这里）")
+            break
+    dropped = [row for row in mine if str(row["status"]) == "superseded"]
+    head = ["【蓝图】"]
+    if dropped:
+        head.append(f"（另有 {len(dropped)} 版更早的已被新版顶掉，不再列出）")
+    return head + wanted
 
 
 def _recent_reports(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:

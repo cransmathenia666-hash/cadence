@@ -490,8 +490,37 @@ def test_approval_builds_only_the_ticked_part(conn):
     stages = plan.get_stages(conn, plan_id)
     assert task_titles(conn, int(stages[0]["id"])) == ["写一个接口"]  # 0.1 之外的没建
     assert task_titles(conn, int(stages[1]["id"])) == ["起一个服务"]
-    # 复用「学 HTTP」时它要交的东西写不进去——这条限制要明说，不能悄悄吞掉
-    assert result["built"]["notes"] and "没能写进去" in result["built"]["notes"][0]
+    # 复用「学 HTTP」时它要交的东西按这一版写进去了（T30 的写入口；改前改后进台账）
+    reused = plan.get_node(conn, int(stages[0]["id"]))
+    assert reused["deliverable"] == "交一个能跑通的小东西"
+    assert result["built"]["notes"] and "要交的东西" in result["built"]["notes"][0]
+    events = [
+        event
+        for event in ledger.history(conn, "plan_node", int(stages[0]["id"]))
+        if event["change_type"] == "update_fields"
+    ]
+    assert len(events) == 1
+    assert json.loads(events[0]["after_value"]) == {"deliverable": "交一个能跑通的小东西"}
+
+
+def test_reusing_a_stage_overwrites_an_old_deliverable_with_a_note(conn):
+    """复用的阶段本来就有别的交付物：按这一版改写，并在回执里明说是「改」不是「没写」。"""
+    candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
+    stages_before = plan.get_stages(conn, plan_id)
+    plan.update_node_fields(
+        conn, int(stages_before[0]["id"]), deliverable="先交一份笔记", reason="手工先定一个"
+    )
+    proposal_id = open_proposal(
+        conn, plan_id, candidate_id, stage("学 HTTP", deliverable="一个过测试的客户端")
+    )
+
+    result = proposals.decide(conn, proposal_id, approved=True)
+
+    assert plan.get_node(conn, int(stages_before[0]["id"]))["deliverable"] == "一个过测试的客户端"
+    note = result["built"]["notes"][0]
+    assert "从「先交一份笔记」改成了" in note
+    # 它没在计划里多建一个同名阶段
+    assert len(plan.get_stages(conn, plan_id)) == 1
 
 
 def test_no_selection_means_the_whole_blueprint(conn):

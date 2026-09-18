@@ -251,11 +251,14 @@ def _background(conn: sqlite3.Connection, candidate: sqlite3.Row, plan_id: int) 
     return "\n".join(lines)
 
 
-def _render_reply(content: str) -> str:
+def render_reply(content: str) -> str:
     """把助手那一侧的 JSON 原文渲染成人话，再喂回下一轮。
 
     库里存 JSON（界面要按结构显示），但没必要让模型下一轮去读自己的 JSON——
     摊成几行更像一次真实对话，也更省 token。
+
+    公开（去掉前导下划线）是因为计划级对话（`dialogue.py`）要**把这段定方向的历史
+    也喂进它的上下文**：同一种渲染不该两处各写一遍。
     """
     try:
         data = json.loads(content)
@@ -280,7 +283,7 @@ def _history_messages(rows: list[sqlite3.Row]) -> list[dict[str, str]]:
     used = 0
     for row in reversed(rows):
         assistant = str(row["role"]) == "assistant"
-        content = _render_reply(str(row["content"])) if assistant else str(row["content"])
+        content = render_reply(str(row["content"])) if assistant else str(row["content"])
         if kept and used + len(content) > CHAT_CHAR_LIMIT:
             break
         kept.insert(0, {"role": "assistant" if assistant else "user", "content": content})
@@ -773,14 +776,25 @@ def apply_build(
             )
         else:
             stage_id = build.reuse_id
+            reused = plan.get_node(conn, stage_id)
             note = (
                 f"阶段「{build.title}」这个计划里已经有（#{stage_id}），没有重复建——"
                 "任务挂到它下面了"
             )
-            if build.deliverable:
+            # 复用的阶段也能改字段了（T30 的写入口，2026-09-18）：蓝图里写的「要交的东西」
+            # 按这一版写进去——改前改后走同一道台账流水，不是悄悄覆盖。
+            if build.deliverable and reused is not None and reused["deliverable"] != build.deliverable:
+                before = reused["deliverable"]
+                plan.update_node_fields(
+                    conn,
+                    stage_id,
+                    deliverable=build.deliverable,
+                    reason=f"批准这一版蓝图：把「要交的东西」写进已有的同名阶段",
+                )
                 note += (
-                    f"；它要交的东西「{build.deliverable}」没能写进去——"
-                    "改节点字段的写入口还不存在（见交接文档的候选队列）"
+                    f"；它「要交的东西」"
+                    + (f"从「{before}」改成了" if before else "写成了")
+                    + f"「{build.deliverable}」（改前改后进了台账）"
                 )
             notes.append(note)
         for index, task in enumerate(build.tasks, start=1):

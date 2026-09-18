@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from app import db, dialogue, ledger, llm, plan, proposals
+from app import advisor, db, dialogue, ledger, llm, plan, proposals
 
 
 class ScriptedTransport:
@@ -328,3 +328,139 @@ def test_from_chat_to_archive_in_three_steps(conn):
     ]
     # 旧的没被顶掉：这是**新增**一条，不是取代（要取代得先有「哪一条该被取代」的信息）
     assert dialogue.view(conn, plan_id)["turns_used"] == 1
+
+# ---------- 上下文里「这个计划是怎么来的」（2026-09-18 用户要求） ----------
+#
+# 他的原话：只要是这个计划里面的，都该让它知道——包括当时没勾的部分与每个阶段的理由。
+# 所以在「计划现在长什么样」之外，上下文还带上这条方向的来历与蓝图全貌。
+
+def add_lineage(conn, plan_id: int, *, title: str = "学 HTTP", why: str = "对主线有帮助"):
+    """造一段「定方向」的历史：一条被采纳的候选 + 它那段对话。"""
+    request_id = advisor.record_request(conn, "search", "我不知道该学什么", plan_id)
+    candidate_id = ledger.create_active(
+        conn,
+        "candidate",
+        {"request_id": request_id, "title": title, "why": why, "depth_target": "够用", "rank": 1},
+        actor="agent",
+        reason="测试用",
+    )
+    for role, content in [
+        ("user", "我每周大概能投入 6 小时"),
+        ("assistant", json.dumps({"questions": [], "ready": True, "note": "信息够了"})),
+    ]:
+        conn.execute(
+            "INSERT INTO plan_chat (plan_id, candidate_id, role, content, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (plan_id, candidate_id, role, content, "2026-09-18T10:00:00+08:00"),
+        )
+    conn.commit()
+    return candidate_id
+
+
+def add_blueprint(conn, plan_id: int, *, stages: list[dict], status: str = "pending") -> int:
+    payload = {"plan_id": plan_id, "candidate_id": 1, "goal": "把后端写通", "stages": stages}
+    proposal_id = ledger.create_active(
+        conn,
+        "proposal",
+        {"kind": "plan_blueprint", "payload": json.dumps(payload, ensure_ascii=False), "reason": "测试用"},
+        actor="agent",
+    )
+    if status != "pending":
+        ledger.set_status(conn, "proposal", proposal_id, status, actor="agent", reason="测试用")
+    return proposal_id
+
+
+def test_context_carries_how_the_direction_came_about(conn):
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    add_lineage(conn, plan_id)
+    transport = ScriptedTransport("嗯")
+
+    dialogue.say(conn, plan_id, "开始吧", transport=transport)
+    context = context_of(transport)
+
+    assert "这条方向的来历" in context
+    assert "学 HTTP" in context and "对主线有帮助" in context  # 采纳的是哪条、当时给的理由
+    assert "我每周大概能投入 6 小时" in context  # 出蓝图之前聊过什么
+    assert "信息够了" in context  # 助手那侧存的是 JSON，喂回去时渲染成人话
+
+
+def test_context_carries_the_blueprint_and_what_was_not_ticked(conn):
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    # make_plan 已经建了阶段「学 HTTP」与任务「读 MDN」——它们就是「当时勾了的那部分」
+    add_blueprint(
+        conn,
+        plan_id,
+        stages=[
+            {
+                "title": "学 HTTP",
+                "deliverable": "讲清一次请求全流程",
+                "why": "它是后面所有接口的地基",
+                "tasks": [{"title": "读 MDN", "due_date": None}, {"title": "写个 demo", "due_date": None}],
+            },
+            {"title": "做一个小服务", "deliverable": "一个能访问的地址", "why": "把学的用起来", "tasks": []},
+        ],
+        status="accepted",
+    )
+    transport = ScriptedTransport("嗯")
+
+    dialogue.say(conn, plan_id, "下一步做什么", transport=transport)
+    context = context_of(transport)
+
+    assert "蓝图" in context
+    assert "它是后面所有接口的地基" in context  # 每个阶段的理由
+    assert "做一个小服务" in context and "当时没勾，没建" in context  # 没勾的那部分
+    assert "写个 demo" in context and "读 MDN" in context
+    # 已建的那些要标成已建，别让它以为整棵树都没建
+    assert "学 HTTP」（已建）" in context
+
+
+def test_a_superseded_blueprint_version_is_only_counted(conn):
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    stages = [{"title": "学 HTTP", "deliverable": "讲清流程", "why": "地基", "tasks": []}]
+    add_blueprint(conn, plan_id, stages=stages, status="superseded")
+    add_blueprint(conn, plan_id, stages=stages, status="pending")
+    transport = ScriptedTransport("嗯")
+
+    dialogue.say(conn, plan_id, "看看", transport=transport)
+    context = context_of(transport)
+
+    assert "1 版更早的已被新版顶掉" in context  # 旧版不铺开，只报个数
+    assert "待你勾选的那一版" in context
+
+
+def test_context_says_so_when_there_is_nothing_to_tell(conn):
+    """不是从候选/蓝图来的老计划：如实说没有记录，而不是留一片空白。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport("嗯")
+
+    dialogue.say(conn, plan_id, "开始吧", transport=transport)
+    context = context_of(transport)
+
+    assert context.count("没有记录") == 2  # 来历与蓝图各一句
+
+
+def test_the_lineage_is_truncated_from_the_earliest(conn):
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    candidate_id = add_lineage(conn, plan_id)
+    conn.execute(
+        "INSERT INTO plan_chat (plan_id, candidate_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        (plan_id, candidate_id, "user", "AAA" * 900, "2026-09-18T11:00:00+08:00"),
+    )
+    conn.commit()
+    transport = ScriptedTransport("嗯")
+
+    dialogue.say(conn, plan_id, "接着聊", transport=transport)
+    context = context_of(transport)
+
+    assert "AAA" in context  # 最新那一大段留着（它才是「我刚说的」）
+    assert "我每周大概能投入 6 小时" not in context  # 更早的那些被截掉
