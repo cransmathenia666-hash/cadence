@@ -96,7 +96,8 @@ export default function ReportPage() {
         // 后端把「从什么状态变成什么」直接返回了，所以这里不用自己推断
         text:
           `已记账：节点状态 ${result.node_status_before} → ${result.node_status}` +
-          (result.proposal_id === null ? "" : `，并产出推进提案 #${result.proposal_id}`),
+          // T29 起报告不再顺产推进提案（那整类已删），阶段完成与否去计划表上看
+          (result.proposal_id === null ? "" : `（这份报告还产出了提案 #${result.proposal_id}）`),
       });
       setNote("");
       await refresh();

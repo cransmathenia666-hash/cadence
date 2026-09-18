@@ -31,7 +31,7 @@ import {
  * - 采纳 / 否决都在这里做完：采纳会在**候选自带的计划**里自动建一个同名阶段
  *   （后端的事），否决必须写理由——它成为下次的禁区。
  * - 采纳之后能就地开**规划对话**（T26，SPEC 决策 36）：先把意向聊清楚，再让它出一版
- *   蓝图（阶段 / 任务），蓝图去「待裁定提案」页勾选采纳。
+ *   蓝图（阶段 / 任务），蓝图去「蓝图待批」页勾选采纳。
  *
  * 取数、状态、错误在这里管；判定全在后端（SPEC 第 10 节：前端不做业务计算）。
  */
@@ -144,7 +144,7 @@ function ChatMessageView({ item }: { item: ChatMessage }) {
  * 规划对话（T26）：聊清意向 → 出一版蓝图。
  *
  * 每一轮 1 次调用、整段上限 6 轮（SPEC 决策 6 修订 / 36）；出方案前至少要聊过一轮。
- * 聊完就去「待裁定提案」页勾选采纳——蓝图不会自己建进计划。
+ * 聊完就去「蓝图待批」页勾选采纳——蓝图不会自己建进计划。
  */
 function ChatBox({
   candidateId,
@@ -217,7 +217,7 @@ function ChatBox({
           (created.superseded_ids.length > 0
             ? `顶掉了旧的 #${created.superseded_ids.join("、#")}。`
             : "") +
-          "去「待裁定提案」页勾选采纳——不勾的部分直接丢弃。",
+          "去「蓝图待批」页勾选采纳——不勾的部分直接丢弃。",
       );
     } catch (cause) {
       setError(messageOf(cause, "出方案失败"));
@@ -265,7 +265,7 @@ function ChatBox({
       <p>
         <small>
           先把意向聊清楚（能投入多少时间、先做哪块、想交出什么），聊够了让它出一版蓝图：
-          阶段 → 任务，带每个阶段的交付物。蓝图是**提案**，要在「待裁定提案」页勾选才会建进计划。
+          阶段 → 任务，带每个阶段的交付物。蓝图是**提案**，要在「蓝图待批」页勾选才会建进计划。
         </small>
       </p>
 
@@ -311,7 +311,7 @@ function ChatBox({
         <p>
           <small>
             这个计划当前有一版待裁定蓝图（提案 #{view.blueprint.id}）——
-            去<Link href="/proposals">待裁定提案</Link>页勾选。再出一次会顶掉它。
+            去<Link href="/blueprints">蓝图待批</Link>页勾选。再出一次会顶掉它。
           </small>
         </p>
       )}
@@ -475,6 +475,10 @@ export default function CandidatesPage() {
       <p>
         <Link href="/">← 回计划表</Link>
         {" · "}
+        <Link href="/judge">判一份资料</Link>
+        {" · "}
+        <Link href="/blueprints">蓝图待批</Link>
+        {" · "}
         <Link href="/proposals">待裁定提案</Link>
         {" · "}
         <Link href="/profile">长期档案</Link>
@@ -483,7 +487,7 @@ export default function CandidatesPage() {
       <p>
         <small>
           这里问的是<strong>「学什么方向」</strong>；要判断某一份具体资料值不值得学，
-          去<Link href="/proposals">待裁定提案</Link>页问。
+          去<Link href="/judge">判一份资料</Link>页问。
         </small>
       </p>
 

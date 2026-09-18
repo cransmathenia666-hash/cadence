@@ -677,6 +677,16 @@ def get_proposals(kind: str | None = None, conn: sqlite3.Connection = Depends(ge
     return proposals.list_pending(conn, kind)
 
 
+@app.get("/api/judgments")
+def get_judgments(limit: int = 20, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """判资料的**只读历史**：已经裁定过的四问判断，最近的在前（T29 的 `/judge` 页用它）。
+
+    只读是刻意的：裁定环节在 `/proposals` 那边（`material_judgment` 批准只记账），
+    这里只负责让人回看「上次那份资料当时怎么判的」。
+    """
+    return proposals.list_decided(conn, advisor.MATERIAL_JUDGMENT_KIND, limit)
+
+
 @app.post("/api/proposals/{proposal_id}/decide",
           responses={409: {"description": "这条提案已经裁定过了，或目标计划已收尾"}})
 def post_proposal_decide(

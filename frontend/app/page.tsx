@@ -106,9 +106,13 @@ export default function Home() {
         {" · "}
         <Link href="/report">提交报告</Link>
         {" · "}
-        <Link href="/candidates">候选清单（学什么方向）</Link>
+        <Link href="/candidates">候选清单与规划对话</Link>
         {" · "}
-        <Link href="/proposals">待裁定提案（判一份资料）</Link>
+        <Link href="/judge">判一份资料</Link>
+        {" · "}
+        <Link href="/blueprints">蓝图待批</Link>
+        {" · "}
+        <Link href="/proposals">待裁定提案</Link>
         {" · "}
         <Link href="/providers">LLM 提供商</Link>
         {" · "}
@@ -257,6 +261,27 @@ export default function Home() {
       )}
 
       {error === null && tree === null && <p role="status">正在从后端取计划…</p>}
+
+      {tree !== null && tree.plan !== null && tree.behind_reason !== null && (
+        <section>
+          <h2>落后了，提醒一句</h2>
+          <p>
+            <strong>{tree.behind_reason}。</strong>
+          </p>
+          <p>
+            <small>
+              T29 起这类提醒不再是要你裁定的条目——怎么做由你自己定，下面三个方向只是建议：
+            </small>
+          </p>
+          <ul>
+            {(tree.advice ?? []).map((item) => (
+              <li key={item.kind}>
+                <strong>{item.label}</strong>：{item.detail}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {tree !== null && (
         <PlanTreeView

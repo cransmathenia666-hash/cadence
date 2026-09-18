@@ -89,6 +89,10 @@ export type PlanTree = {
     behind: boolean;
     worst: { id: number; title: string; due_date: string | null; lag_days: number } | null;
   };
+  /** 落后时的一句话提醒（T29 起不再产「重排」提案等人裁定）。没落后时为 null。 */
+  behind_reason: string | null;
+  /** 三个方向（减量 / 顺延 / 换交付物）——只是**建议**，不再有裁定入口。 */
+  advice: { kind: string; label: string; detail: string }[];
   stages: Stage[];
 };
 
@@ -1106,3 +1110,44 @@ export type ProfileChangePayload = {
   /** 这条是从哪个计划的对话里聊出来的。 */
   plan_id?: number;
 };
+
+// ---------- 判资料（T29：`/judge` 页） ----------
+
+/** 判过的一份资料（只读历史里的一条）。`judgment` 是当时的四问答案。 */
+export type JudgmentRecord = {
+  id: number;
+  source_text: string;
+  judgment: Judgment | undefined;
+  /** pending / accepted / rejected（拒绝与批准都留着，历史是回看用的）。 */
+  status: string;
+  decided_at: string | null;
+  created_at: string;
+};
+
+/**
+ * 判资料的**只读历史**：已经裁定过的四问判断，最近的在前。
+ *
+ * 为什么会有这条接口：裁定环节在 `/proposals`，但过去判过的资料也得查得到——
+ * 这一页只回看，不能改也不能重裁。
+ */
+export async function listJudgments(limit = 20): Promise<{ items: JudgmentRecord[] }> {
+  const data = await request<{
+    items: {
+      id: number;
+      status: string;
+      decided_at: string | null;
+      created_at: string;
+      payload: { source_text?: string; judgment?: Judgment };
+    }[];
+  }>(`/api/judgments?limit=${limit}`);
+  return {
+    items: data.items.map((item) => ({
+      id: item.id,
+      source_text: item.payload.source_text ?? "（没记原文）",
+      judgment: item.payload.judgment,
+      status: item.status,
+      decided_at: item.decided_at,
+      created_at: item.created_at,
+    })),
+  };
+}

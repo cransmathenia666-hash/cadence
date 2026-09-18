@@ -90,6 +90,22 @@ def list_pending(conn: sqlite3.Connection, kind: str | None = None) -> dict[str,
     return {"proposals": [_public(row) for row in rows]}
 
 
+def list_decided(
+    conn: sqlite3.Connection, kind: str, limit: int = 20
+) -> dict[str, Any]:
+    """某一类提案里**已经裁定过**的那些，最近的在前（T29 的「判资料」历史用它）。
+
+    为什么要有它：`/judge` 页把裁定环节交回这里之后，过去判过的资料就查不到了——
+    留一条**只读**的历史（不能改、也不能重裁），比让人记不住强。
+    """
+    rows = conn.execute(
+        "SELECT * FROM proposal WHERE kind = ? AND status != 'pending'"
+        " ORDER BY id DESC LIMIT ?",
+        (kind, limit),
+    ).fetchall()
+    return {"items": [{**_public(row), "status": row["status"]} for row in rows]}
+
+
 def _compose_reason(base: str, reason: str | None) -> str:
     extra = str(reason or "").strip()
     return base if not extra else f"{base}——{extra}"
