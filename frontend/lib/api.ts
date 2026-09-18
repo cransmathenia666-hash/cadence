@@ -716,7 +716,7 @@ export async function verdictCandidate(
 
 // ---------- 任务与交付物（T23 三级结构） ----------
 
-/** 打勾 / 跳过的回执。`proposal_id` 不为空 = 这一步让阶段完成、顺势产出了推进提案。 */
+/** 打勾 / 跳过的回执。`proposal_id` 恒为 `null`：T29 起阶段完成不再顺产推进提案（键留着不动形状）。 */
 export type TaskActionResult = {
   node_id: number;
   node_status_before: string;
@@ -758,6 +758,44 @@ export async function submitDeliverable(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, note }),
+  });
+}
+
+/**
+ * 改一个已经建好的节点的字段（T30，SPEC 决策 38）。
+ *
+ * 只传要改的字段：没传 = 不动，`due_date: ""` = 清掉日期（清了就不进落后量），
+ * `deliverable: ""` = 清掉交付物。**理由必填**——它进台账，回答「为什么改」。
+ * 原地改、**id 不变**，报告与交付物引用都不受影响。
+ */
+export type NodeFieldsInput = {
+  title?: string;
+  deliverable?: string;
+  due_date?: string;
+  reason: string;
+};
+
+/** 改字段的回执：`changed` 是这次真动了的字段名，`before` / `after` 只有这些字段。 */
+export type NodeFieldsResult = {
+  node_id: number;
+  changed: string[];
+  before: Record<string, string | null>;
+  after: Record<string, string | null>;
+};
+
+export async function updateNodeFields(
+  nodeId: number,
+  input: NodeFieldsInput,
+): Promise<NodeFieldsResult> {
+  return request<NodeFieldsResult>(`/api/plan/nodes/${nodeId}/fields`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: input.title ?? null,
+      deliverable: input.deliverable ?? null,
+      due_date: input.due_date ?? null,
+      reason: input.reason,
+    }),
   });
 }
 
@@ -809,34 +847,13 @@ export async function getLlmCalls(limit = 50): Promise<LlmCalls> {
 
 // ---------- 待裁定提案（T14） ----------
 
-/** `stage_advance` 的 payload：阶段收尾后的「要不要往前走」。 */
-export type StageAdvancePayload = {
-  plan_id: number;
-  stage_id: number;
-  stage_title: string;
-  /** null = 后面没有更多阶段了；批准这类提案就是把那个计划收尾。 */
-  next_stage_id: number | null;
-  next_stage_title: string | null;
-  settled?: number;
-  done?: number;
-  skipped?: number;
-  /** 提案当时问你的那句话（与 `reason` 同一句）。 */
-  question?: string;
-};
-
-/** 重排提案给的一个出路（减量 / 顺延 / 换交付物）。 */
-export type ReplanOption = { kind: string; label: string; detail: string };
-
-/** `plan_replan` 的 payload：落后、或整周没报告时的重排建议。 */
-export type PlanReplanPayload = {
-  week: string;
-  plan_id: number;
-  stage_id: number | null;
-  stage_title: string | null;
-  why: string;
-  lag_days: number;
-  options: ReplanOption[];
-};
+/**
+ * 一条提案现有的三类，payload 形状随 `kind` 变（页面里按 kind 转成下面几个类型之一）：
+ * `plan_blueprint`（蓝图待批）、`material_judgment`（资料判断）、`profile_change`（档案变更）。
+ *
+ * `stage_advance` 与 `plan_replan` 的 payload 类型已在 T29 随那两类一起删掉：
+ * 它们不再有生产者，批准也不再改任何东西（SPEC 决策 28）。
+ */
 
 /** `material_judgment` 的 payload：一次四问判断的结论。 */
 export type MaterialJudgmentPayload = {
@@ -897,8 +914,8 @@ export type ProposalDecision = {
 /**
  * 批准 / 驳回一条提案。
  *
- * 驳回**必须写理由**（缺理由后端回 400）；批准 `plan_replan` 必须从提案给的
- * 已裁定过回 409、不存在回 404。（T29 起没有 `option`：需要选方向的那一类已删。）
+ * 驳回**必须写理由**（缺理由后端回 400）；已裁定过回 409、不存在回 404。
+ * （T29 起没有 `option`：需要选方向的那一类已随 `plan_replan` 整类删除。）
  * 批准 `plan_blueprint` 时用 `selected` 给勾中的阶段 / 任务下标（见 `Selection`）。
  */
 export async function decideProposal(
@@ -1116,16 +1133,16 @@ export type JudgmentRecord = {
   id: number;
   source_text: string;
   judgment: Judgment | undefined;
-  /** pending / accepted / rejected（拒绝与批准都留着，历史是回看用的）。 */
+  /** `accepted` / `rejected`——历史里只有已裁定过的（待裁定的那份还在 `/proposals` 页）。 */
   status: string;
   decided_at: string | null;
   created_at: string;
 };
 
 /**
- * 判资料的**只读历史**：已经裁定过的四问判断，最近的在前。
+ * 判资料的**只读历史**：裁定过的四问判断，最近的在前。
  *
- * 为什么会有这条接口：裁定环节在 `/proposals`，但过去判过的资料也得查得到——
+ * 为什么会有这条接口：裁定环节搬去 `/proposals` 之后，过去判过的资料也得查得到——
  * 这一页只回看，不能改也不能重裁。
  */
 export async function listJudgments(limit = 20): Promise<{ items: JudgmentRecord[] }> {

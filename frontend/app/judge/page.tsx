@@ -59,7 +59,6 @@ export default function JudgePage() {
     try {
       const asked = await askMaterial(rawText);
       setResult(asked);
-      refreshHistory(); // 刚判的这一份也算历史了（它在 /proposals 被裁定后会显示状态）
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "问模型失败，原因不明");
     } finally {
@@ -75,8 +74,6 @@ export default function JudgePage() {
         {" · "}
         <Link href="/candidates">候选清单（学什么方向）</Link>
         {" · "}
-        <Link href="/blueprints">蓝图待批</Link>
-        {" · "}
         <Link href="/proposals">待裁定提案</Link>
         {" · "}
         <Link href="/profile">长期档案</Link>
@@ -86,7 +83,8 @@ export default function JudgePage() {
         <small>
           这一页只装判资料的：你发一份资料、模型按四问回答，下面留一条只读的历史。
           想找<strong>学什么方向</strong>去<Link href="/candidates">候选清单</Link>；
-          要让模型出一棵树去<Link href="/blueprints">蓝图待批</Link>。
+          想让模型出一棵树，就在候选清单里聊出来之后去
+          <Link href="/proposals">待裁定提案</Link>页勾选。
         </small>
       </p>
 
@@ -143,8 +141,9 @@ export default function JudgePage() {
         <h2>判过的资料（只读）</h2>
         <p>
           <small>
-            这里只回看，不能改也不能重裁。裁定过的与还在待裁定的都列出来，
-            状态写着「待裁定」的那些在<Link href="/proposals">待裁定提案</Link>页处理。
+            这里只回看，不能改也不能重裁；列的是<strong>已经裁定过</strong>的判断——
+            刚问的那一份还在<Link href="/proposals">待裁定提案</Link>页等你点头，
+            裁定完就会出现在这里。
           </small>
         </p>
         {historyError !== null && (
@@ -154,7 +153,7 @@ export default function JudgePage() {
           </p>
         )}
         {history !== null && history.length === 0 && (
-          <p role="status">还没有判过资料。</p>
+          <p role="status">还没有裁定过的判断。</p>
         )}
         <ol>
           {(history ?? []).map((item) => (
@@ -163,11 +162,7 @@ export default function JudgePage() {
                 <strong>{item.source_text}</strong>{" "}
                 <small>
                   （提案 #{item.id}·
-                  {item.status === "pending"
-                    ? "待裁定"
-                    : item.status === "accepted"
-                      ? "已批准（只记账）"
-                      : "已驳回"}
+                  {item.status === "accepted" ? "已批准（只记账）" : "已驳回"}
                   {item.decided_at !== null && ` · ${item.decided_at.slice(0, 16).replace("T", " ")}`}
                   ）
                 </small>

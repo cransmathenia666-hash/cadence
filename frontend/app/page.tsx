@@ -15,6 +15,7 @@ import {
   reopenPlan,
   skipTask,
   submitDeliverable,
+  updateNodeFields,
   voidPlan,
   type PlanSummary,
   type PlanTree,
@@ -22,10 +23,12 @@ import {
 
 /**
  * T8 计划表页面；T23 起承担任务层的写动作；T24 起承担**多计划切换与生命周期**；
- * T27 起生命周期拆成四态（暂停 / 收尾 / 作废）并补上**历史计划**这个出口。
+ * T27 起生命周期拆成四态（暂停 / 收尾 / 作废）并补上**历史计划**这个出口；
+ * T29 起落后不再产提案，改成这里的一句提醒 + 三个建议（怎么定由你自己定）。
  *
  * T28 起页面底部还有一块**计划级对话**（`components/plan-dialogue.tsx`）：蓝图落地之后
- * 接着聊这个计划——那一段只说话与提炼档案提案，改不了计划结构。
+ * 接着聊这个计划——那一段只说话与提炼档案提案，改不了计划结构（「聊 → 改」另立项）。
+ * 改计划的入口在计划表本身：每个节点旁边都能就地改字段（T30）。
  *
  * 取数、加载态、错误态在这里管；"画成什么样"与动作按钮在 `components/plan-tree.tsx`。
  * 数据全部来自 `GET /api/plan`（T24 起带 `plan_id`）——落后量、当前阶段、进度、
@@ -109,8 +112,6 @@ export default function Home() {
         <Link href="/candidates">候选清单与规划对话</Link>
         {" · "}
         <Link href="/judge">判一份资料</Link>
-        {" · "}
-        <Link href="/blueprints">蓝图待批</Link>
         {" · "}
         <Link href="/proposals">待裁定提案</Link>
         {" · "}
@@ -292,6 +293,7 @@ export default function Home() {
             run(() => (action === "check" ? checkTask(taskId) : skipTask(taskId, reason ?? "")))
           }
           onDeliverable={(stageId, url, note) => run(() => submitDeliverable(stageId, url, note))}
+          onFields={(nodeId, input) => run(() => updateNodeFields(nodeId, input))}
         />
       )}
 

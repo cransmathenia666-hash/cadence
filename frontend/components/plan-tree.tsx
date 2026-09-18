@@ -4,18 +4,20 @@ import { useState } from "react";
 
 import {
   type Checkpoint,
+  type NodeFieldsInput,
   type PlanTree,
   type Stage,
   type TaskNode,
 } from "@/lib/api";
 
 /**
- * 计划表里"长什么样"的那一半：只把后端给的数据画出来，外加三个写动作。
+ * 计划表里"长什么样"的那一半：只把后端给的数据画出来，外加四个写动作。
  *
- * 三个动作都直通后端、写完让页面重新取一次计划（刷新归 `app/page.tsx`）：
+ * 四个动作都直通后端、写完让页面重新取一次计划（刷新归 `app/page.tsx`）：
  * - 任务打勾（`POST /nodes/{id}/check`）——一步到完成，不写理由；
  * - 任务跳过（`/skip`）——跳过算完成，但必须写一句理由；
- * - 提交交付物（`/deliverable`）——阶段上的独立动作，可重新提交。
+ * - 提交交付物（`/deliverable`）——阶段上的独立动作，可重新提交；
+ * - 改字段（`/fields`，T30）——标题 / 交付物（只阶段）/ 截止日，**理由必填**。
  *
  * 业务判定按 SPEC 第 10 节全在后端：前端不猜"这个阶段算不算完成"，
  * 阶段头上的「完成 / 未完成」直接读后端给的 `finished`。
@@ -41,6 +43,118 @@ function lagLabel(lagDays: number | null): string {
   return "按时";
 }
 
+/**
+ * 就地改一个已经建好的节点（T30，SPEC 决策 38）：默认只是一个「改字段」按钮，
+ * 点开才出现输入框。
+ *
+ * 为什么能改而不是重建成新的一条：改字段**原地改、id 不变**——报告和交付物都指着
+ * 这个 id，换成新节点它们全断。改动会进台账（改前改后 + 理由），理由必填。
+ * 「不要它了」不该走这里，那是跳过（`skipped`）。
+ */
+function NodeFieldsEditor({
+  node,
+  busy,
+  withDeliverable,
+  onSave,
+}: {
+  node: { id: number; title: string; due_date: string | null; deliverable?: string | null };
+  busy: boolean;
+  /** 只有阶段有「要交的东西」，任务与周打卡上没有这个概念。 */
+  withDeliverable: boolean;
+  onSave: (nodeId: number, input: NodeFieldsInput) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(node.title);
+  const [deliverable, setDeliverable] = useState(node.deliverable ?? "");
+  const [dueDate, setDueDate] = useState(node.due_date ?? "");
+  const [reason, setReason] = useState("");
+
+  if (!editing) {
+    return (
+      <>
+        {" "}
+        <button type="button" onClick={() => setEditing(true)} disabled={busy}>
+          改字段
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <div>
+      <p>
+        <label>
+          标题：
+          <input
+            aria-label={`「${node.title}」的新标题`}
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+          />
+        </label>
+        {withDeliverable && (
+          <>
+            <br />
+            <label>
+              要交的东西：
+              <input
+                aria-label={`「${node.title}」要交的东西`}
+                value={deliverable}
+                onChange={(event) => setDeliverable(event.target.value)}
+                placeholder="留空 = 清掉"
+              />
+            </label>
+          </>
+        )}
+        <br />
+        <label>
+          截止日：
+          <input
+            aria-label={`「${node.title}」的截止日`}
+            value={dueDate}
+            onChange={(event) => setDueDate(event.target.value)}
+            placeholder="YYYY-MM-DD，留空 = 清掉（清了就不算落后）"
+          />
+        </label>
+        <br />
+        <label>
+          为什么改（必填，进台账）：
+          <input
+            aria-label={`改「${node.title}」的理由`}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="例如：这周有别的安排，挪到下月"
+          />
+        </label>
+      </p>
+      <p>
+        <button
+          type="button"
+          onClick={() => {
+            setEditing(false);
+            onSave(node.id, {
+              title,
+              due_date: dueDate,
+              deliverable: withDeliverable ? deliverable : undefined,
+              reason,
+            });
+          }}
+          disabled={busy || reason.trim() === ""}
+        >
+          保存改动
+        </button>{" "}
+        <button type="button" onClick={() => setEditing(false)} disabled={busy}>
+          取消
+        </button>
+        <br />
+        <small>
+          这里只改字段、不换节点：id 与报告、交付物的引用一个不动。标题不能留空——
+          想「不要它了」就跳过它。跟现在一模一样的话后端会拒（免得台账多一条没改什么的流水）。
+        </small>
+      </p>
+    </div>
+  );
+}
+
 function ChildLine({ node }: { node: TaskNode }) {
   return (
     <>
@@ -51,15 +165,17 @@ function ChildLine({ node }: { node: TaskNode }) {
   );
 }
 
-/** 一条任务：显示状态 + 打勾 / 跳过两个动作（已完成或已跳过的就只剩状态）。 */
+/** 一条任务：显示状态 + 打勾 / 跳过 / 改字段（已完成或已跳过的就只剩状态与改字段）。 */
 function TaskItem({
   task,
   busy,
   onAct,
+  onFields,
 }: {
   task: TaskNode;
   busy: boolean;
   onAct: (taskId: number, action: "check" | "skip", reason?: string) => void;
+  onFields: (nodeId: number, input: NodeFieldsInput) => void;
 }) {
   const [skipping, setSkipping] = useState(false);
   const [reason, setReason] = useState("");
@@ -100,6 +216,7 @@ function TaskItem({
           )}
         </>
       )}
+      <NodeFieldsEditor node={task} busy={busy} withDeliverable={false} onSave={onFields} />
     </li>
   );
 }
@@ -180,11 +297,13 @@ function StageItem({
   busy,
   onTask,
   onDeliverable,
+  onFields,
 }: {
   stage: Stage;
   busy: boolean;
   onTask: (taskId: number, action: "check" | "skip", reason?: string) => void;
   onDeliverable: (stageId: number, url: string, note: string) => void;
+  onFields: (nodeId: number, input: NodeFieldsInput) => void;
 }) {
   const { progress } = stage;
 
@@ -194,6 +313,7 @@ function StageItem({
         {stage.title} — <strong>{statusLabel(stage.status)}</strong>
         {" · "}
         {stage.finished ? <strong>完成</strong> : "未完成"}
+        <NodeFieldsEditor node={stage} busy={busy} withDeliverable onSave={onFields} />
       </h3>
       <DeliverableBlock stage={stage} busy={busy} onAct={onDeliverable} />
       <ul>
@@ -218,7 +338,7 @@ function StageItem({
       ) : (
         <ul>
           {stage.tasks.map((task) => (
-            <TaskItem key={task.id} task={task} busy={busy} onAct={onTask} />
+            <TaskItem key={task.id} task={task} busy={busy} onAct={onTask} onFields={onFields} />
           ))}
         </ul>
       )}
@@ -233,6 +353,12 @@ function StageItem({
           {stage.checkpoints.map((checkpoint: Checkpoint) => (
             <li key={checkpoint.id}>
               <ChildLine node={checkpoint} />
+              <NodeFieldsEditor
+                node={checkpoint}
+                busy={busy}
+                withDeliverable={false}
+                onSave={onFields}
+              />
             </li>
           ))}
         </ul>
@@ -247,12 +373,14 @@ export function PlanTreeView({
   busy = false,
   onTask = () => {},
   onDeliverable = () => {},
+  onFields = () => {},
   error = null,
 }: {
   tree: PlanTree;
   busy?: boolean;
   onTask?: (taskId: number, action: "check" | "skip", reason?: string) => void;
   onDeliverable?: (stageId: number, url: string, note: string) => void;
+  onFields?: (nodeId: number, input: NodeFieldsInput) => void;
   error?: string | null;
 }) {
   const { plan, current_stage: currentStage, lag, stages } = tree;
@@ -311,6 +439,7 @@ export function PlanTreeView({
               busy={busy}
               onTask={onTask}
               onDeliverable={onDeliverable}
+              onFields={onFields}
             />
           ))}
         </ol>
