@@ -14,16 +14,6 @@ import {
   type ProfileView,
 } from "@/lib/api";
 
-/**
- * T29：判一份资料的**独立页**。
- *
- * 从 `/proposals` 拆出来的原因是用户走查时说的原话——**「学什么那一类的产物不要出现在
- * 『值不值得学』这个界面」**：那一页既要问资料、又被候选与蓝图的东西占着，两件事混在一起。
- * 现在这一页只装判资料的：四问输入 + 当次答案 + 一条**只读的历史记录**。
- *
- * 裁定环节不在这里：`material_judgment` 提案的批准只记账，留在 `/proposals` 那页；
- * 这里的历史只给人回看「上次那份资料当时怎么判的」，不能改也不能重裁。
- */
 export default function JudgePage() {
   const [profile, setProfile] = useState<ProfileView | null>(null);
   const [rawText, setRawText] = useState("");
@@ -34,8 +24,6 @@ export default function JudgePage() {
   const [history, setHistory] = useState<JudgmentRecord[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
-  // 两个取数函数都声明在 effect 之前——否则 lint 会拦「先用后声明」；
-  // setState 一律放进 .then 回调（effect 体内同步 setState 也会被拦）
   function refreshHistory() {
     listJudgments()
       .then((data) => setHistory(data.items))
@@ -67,111 +55,127 @@ export default function JudgePage() {
   }
 
   return (
-    <main>
-      <h1>判一份资料：值不值得学</h1>
-      <p>
-        <Link href="/">← 回计划表</Link>
-        {" · "}
-        <Link href="/candidates">候选清单（学什么方向）</Link>
-        {" · "}
-        <Link href="/proposals">待裁定提案</Link>
-        {" · "}
-        <Link href="/profile">长期档案</Link>
-      </p>
+    <div>
+      <div className="flex-between" style={{ marginBottom: "16px" }}>
+        <div>
+          <h1>判一份资料：值不值得学</h1>
+          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
+            输入你偶然看到的课程、书籍或开源项目，决策引擎结合你的长期档案进行严谨的四问评估。
+          </p>
+        </div>
+        {profile !== null && (
+          <span className="badge badge-not_started">
+            当前长期档案 {profile.items.length} 条
+          </span>
+        )}
+      </div>
 
-      <p>
-        <small>
-          这一页只装判资料的：你发一份资料、模型按四问回答，下面留一条只读的历史。
-          想找<strong>学什么方向</strong>去<Link href="/candidates">候选清单</Link>；
-          想让模型出一棵树，就在候选清单里聊出来之后去
-          <Link href="/proposals">待裁定提案</Link>页勾选。
-        </small>
-      </p>
+      <div className="card">
+        <form onSubmit={onSubmit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div>
+            <label htmlFor="raw" style={{ fontWeight: 600 }}>
+              输入待评估资料或主题：
+            </label>
+            <textarea
+              id="raw"
+              rows={3}
+              value={rawText}
+              onChange={(event) => setRawText(event.target.value)}
+              placeholder="例如：我看到一个 Rust 异步并发与网络协议实战课，要不要学？"
+              disabled={asking}
+              style={{ width: "100%" }}
+              required
+            />
+          </div>
+          <div className="flex-between">
+            <small style={{ color: "var(--text-muted)" }}>
+              四问将输出：①值不值得学 ②目标深度 ③板块取舍 ④时间预算
+            </small>
+            <button type="submit" className="primary" disabled={asking || rawText.trim() === ""}>
+              {asking ? (
+                <>
+                  <span className="spinner" />
+                  <span>正在严格按四问评判…</span>
+                </>
+              ) : (
+                "开始评判"
+              )}
+            </button>
+          </div>
+        </form>
 
-      {profile !== null && (
-        <p>
-          <small>
-            判据来自你的长期档案：现有 <strong>{profile.items.length}</strong> 条
-            {profile.items.length === 0 && "——先补档案，否则只会得到「依据不足」"}
-          </small>
-        </p>
-      )}
-
-      <form onSubmit={onSubmit}>
-        <p>
-          <label htmlFor="raw">我发现了什么（必填）：</label>
-          <br />
-          <textarea
-            id="raw"
-            rows={3}
-            cols={60}
-            value={rawText}
-            onChange={(event) => setRawText(event.target.value)}
-            placeholder="例如：我看到一个 Rust 异步编程教程，要不要学？"
-            required
-          />
-        </p>
-        <button type="submit" disabled={asking}>
-          {asking ? "正在问模型…（四问几秒到几十秒）" : "问一下"}
-        </button>
-      </form>
-
-      {error !== null && (
-        <p role="alert">
-          <strong>失败：</strong>
-          {error}
-        </p>
-      )}
+        {error !== null && (
+          <div className="alert alert-danger" style={{ marginTop: "14px" }}>
+            <strong>评判失败：</strong>
+            {error}
+          </div>
+        )}
+      </div>
 
       {result !== null && (
-        <section>
-          <h2>这一份的四问结果</h2>
+        <div className="card" style={{ borderColor: "var(--primary)" }}>
+          <div className="card-header">
+            <div className="flex-row gap-sm">
+              <span className="badge badge-done">四问评判结果</span>
+              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                （依据 {result.profile_basis.total} 条档案 · 耗时/调用 {result.calls} 次）
+              </span>
+            </div>
+            <Link href="/proposals" className="btn sm primary">
+              前往待裁定页记账 (#{result.proposal_id}) →
+            </Link>
+          </div>
+
           <JudgmentView judgment={result.judgment} />
-          <p>
-            <small>
-              已存成<strong>待裁定</strong>提案 #{result.proposal_id}（依据了{" "}
-              {result.profile_basis.total} 条档案，调了 {result.calls} 次模型），
-              去<Link href="/proposals">待裁定提案</Link>页批准或驳回——批准只记账。
-            </small>
+
+          <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: "10px 0 0" }}>
+            此评判已生成待裁定提案。四问评判的批准仅作决策留痕记账，不会自动变更你的执行计划。
           </p>
-        </section>
+        </div>
       )}
 
-      <section>
-        <h2>判过的资料（只读）</h2>
-        <p>
-          <small>
-            这里只回看，不能改也不能重裁；列的是<strong>已经裁定过</strong>的判断——
-            刚问的那一份还在<Link href="/proposals">待裁定提案</Link>页等你点头，
-            裁定完就会出现在这里。
-          </small>
-        </p>
+      <div style={{ marginTop: "24px" }}>
+        <div className="flex-between" style={{ marginBottom: "12px" }}>
+          <h2>已裁定的资料评估历史（只读回看）</h2>
+          <small>仅展示已裁定生效的判断记录</small>
+        </div>
+
         {historyError !== null && (
-          <p role="alert">
-            <strong>取历史失败：</strong>
-            {historyError}
-          </p>
+          <div className="alert alert-danger">{historyError}</div>
         )}
+
+        {history === null && (
+          <div className="card" style={{ textAlign: "center", padding: "30px" }}>
+            <span className="spinner" style={{ width: "18px", height: "18px" }} />
+            <p style={{ color: "var(--text-muted)", marginTop: "8px" }}>读取历史评估中…</p>
+          </div>
+        )}
+
         {history !== null && history.length === 0 && (
-          <p role="status">还没有裁定过的判断。</p>
+          <div className="card" style={{ textAlign: "center", padding: "30px" }}>
+            <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无历史判断记录。</p>
+          </div>
         )}
-        <ol>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
           {(history ?? []).map((item) => (
-            <li key={item.id}>
-              <p>
-                <strong>{item.source_text}</strong>{" "}
-                <small>
-                  （提案 #{item.id}·
-                  {item.status === "accepted" ? "已批准（只记账）" : "已驳回"}
-                  {item.decided_at !== null && ` · ${item.decided_at.slice(0, 16).replace("T", " ")}`}
-                  ）
-                </small>
-              </p>
-              {item.judgment !== undefined && <JudgmentView judgment={item.judgment} />}
-            </li>
+            <div key={item.id} className="card" style={{ margin: 0, padding: "14px 18px" }}>
+              <div className="flex-between" style={{ marginBottom: "8px" }}>
+                <span style={{ fontWeight: 600 }}>{item.source_text}</span>
+                <div className="flex-row gap-sm">
+                  <span className={`badge ${item.status === "accepted" ? "badge-done" : "badge-stuck"}`}>
+                    {item.status === "accepted" ? "裁定通过" : "裁定否决"}
+                  </span>
+                  <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                    {item.decided_at?.slice(0, 10)}
+                  </span>
+                </div>
+              </div>
+              {item.judgment && <JudgmentView judgment={item.judgment} />}
+            </div>
           ))}
-        </ol>
-      </section>
-    </main>
+        </div>
+      </div>
+    </div>
   );
 }

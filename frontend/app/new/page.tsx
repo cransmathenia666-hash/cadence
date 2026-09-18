@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 
 import {
@@ -13,13 +12,6 @@ import {
   type PlanSummary,
   type PlanTree,
 } from "@/lib/api";
-
-/**
- * 建计划与建节点（T23 起三级：阶段 / 任务 / 周打卡）。
- *
- * 这些写接口在 P1 时是"为了能在 /docs 里手工建计划"才加的。这一页给它们一个入口——
- * 三级的结构校验仍然全在后端，前端只负责把参数送过去、把后端的错误显示出来。
- */
 
 const LOAD_FAILED = "取计划时出了意外错误";
 
@@ -36,16 +28,15 @@ function messageOf(cause: unknown, fallback: string): string {
 export default function NewPage() {
   const [tree, setTree] = useState<PlanTree | null>(null);
   const [plans, setPlans] = useState<PlanSummary[]>([]);
-  /** 节点建到哪个计划里；"" = 最新建的那个（与取计划树的默认一致）。 */
   const [targetPlanId, setTargetPlanId] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, setPending] = useState(false);
 
-  // 建计划的表单
+  // 建计划
   const [goal, setGoal] = useState("");
 
-  // 建节点的表单
+  // 建节点
   const [level, setLevel] = useState<NodeLevel>("task");
   const [title, setTitle] = useState("");
   const [deliverable, setDeliverable] = useState("");
@@ -53,18 +44,17 @@ export default function NewPage() {
   const [dueDate, setDueDate] = useState("");
 
   useEffect(() => {
-    getPlan().then((data) => {
-      setTree(data);
-      setLoadError(null);
-    }).catch((cause: unknown) => setLoadError(messageOf(cause, LOAD_FAILED)));
-    listPlans()
-      .then((items) => {
-        setPlans(items);
+    getPlan()
+      .then((data) => {
+        setTree(data);
+        setLoadError(null);
       })
+      .catch((cause: unknown) => setLoadError(messageOf(cause, LOAD_FAILED)));
+    listPlans()
+      .then(setPlans)
       .catch(() => setPlans([]));
   }, []);
 
-  /** 建完之后重新取一次（树 + 计划列表），页面上的树就跟着变了。 */
   async function refresh() {
     try {
       setTree(await getPlan(targetPlanId === "" ? undefined : Number(targetPlanId)));
@@ -75,7 +65,6 @@ export default function NewPage() {
     }
   }
 
-  // 建节点要有明确的落点（T24）：下拉选了就用它，没选就沿用「最新建的那个计划」
   const planId = targetPlanId === "" ? (tree?.plan?.id ?? null) : Number(targetPlanId);
   const stages = tree?.stages ?? [];
 
@@ -85,9 +74,9 @@ export default function NewPage() {
     setFeedback(null);
     try {
       const created = await createPlan(goal);
-      setFeedback({ ok: true, text: `已建计划 #${created.id}：${created.goal}` });
+      setFeedback({ ok: true, text: `成功建立计划 #${created.id}：${created.goal}` });
       setGoal("");
-      setTargetPlanId(String(created.id));  // 建完就对准它，接着往里面放阶段与任务
+      setTargetPlanId(String(created.id));
       await refresh();
     } catch (cause) {
       setFeedback({ ok: false, text: messageOf(cause, "建计划失败，原因不明") });
@@ -106,15 +95,13 @@ export default function NewPage() {
         planId,
         level,
         title,
-        // 任务与检查点都要「所属阶段」；阶段带 parentId 会被后端判为 400
         parentId: level === "stage" ? null : Number(parentId),
-        // 只有阶段用交付物描述
         deliverable: level === "stage" ? deliverable : null,
         dueDate: dueDate === "" ? null : dueDate,
       });
       setFeedback({
         ok: true,
-        text: `已建${LEVEL_LABELS[level]} #${created.id}：${created.title}`,
+        text: `已在计划 #${planId} 下创建${LEVEL_LABELS[level]} #${created.id}：${created.title}`,
       });
       setTitle("");
       setDeliverable("");
@@ -128,179 +115,170 @@ export default function NewPage() {
   }
 
   return (
-    <main>
-      <h1>建计划 / 建节点</h1>
-      <p>
-        <Link href="/">← 回计划表</Link>
-      </p>
+    <div>
+      <div className="flex-between" style={{ marginBottom: "16px" }}>
+        <div>
+          <h1>新建计划与节点</h1>
+          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
+            手动新建顶级计划，或为现有计划手动补充阶段、任务与周打卡节点。
+          </p>
+        </div>
+      </div>
 
       {loadError !== null && (
-        <p role="alert">
-          <strong>取计划失败：</strong>
+        <div className="alert alert-danger" role="alert">
+          <strong>加载失败：</strong>
           {loadError}
-        </p>
+        </div>
       )}
 
       {feedback !== null && (
-        <p role={feedback.ok ? "status" : "alert"}>
-          <strong>{feedback.ok ? "成功：" : "失败："}</strong>
+        <div className={`alert ${feedback.ok ? "alert-success" : "alert-danger"}`} role="status">
           {feedback.text}
-        </p>
+        </div>
       )}
 
-      <section>
-        <h2>建一个计划</h2>
-        <form onSubmit={onCreatePlan}>
-          <p>
-            <label htmlFor="goal">目标（必填）：</label>
-            <input
-              id="goal"
-              value={goal}
-              onChange={(event) => setGoal(event.target.value)}
-              required
-            />
-          </p>
-          <button type="submit" disabled={pending}>
-            {pending ? "提交中…" : "建计划"}
-          </button>
-        </form>
-      </section>
-
-      <section>
-        <h2>在这个计划里建节点</h2>
-        {planId === null ? (
-          <p role="status">还没有计划，先在上面建一个。</p>
-        ) : (
-          <>
-            {/*
-              必须写明目标计划是哪一个：建节点时前端只把 plan_id 送给后端，
-              而 GET /api/plan 不传参数时拿的是"最新建的那个有效计划"。
-              不写出来的话，你根本不知道节点会落进哪个计划——这是用户实际踩到的坑。
-            */}
-            <p>
-              <label htmlFor="target-plan">建到哪个计划：</label>
-              <select
-                id="target-plan"
-                value={targetPlanId}
-                onChange={async (event) => {
-                  const next = event.target.value;
-                  setTargetPlanId(next);
-                  setTree(await getPlan(next === "" ? undefined : Number(next)));
-                }}
-              >
-                <option value="">（最新建的那个计划）</option>
-                {plans.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    #{item.id}：{item.goal}
-                  </option>
-                ))}
-              </select>
-              {planId !== null && (
-                <>
-                  <br />
-                  <small>
-                    将建在 <strong>计划 #{planId}「{tree?.plan?.goal}」</strong> 里；
-                    采纳候选时也会按候选自带的计划归属落进对应的计划。
-                  </small>
-                </>
-              )}
-            </p>
-            <form onSubmit={onCreateNode}>
-            <fieldset>
-              <legend>层级</legend>
-              <label>
-                <input
-                  type="radio"
-                  name="level"
-                  value="stage"
-                  checked={level === "stage"}
-                  onChange={() => setLevel("stage")}
-                />
-                阶段（一段有产出的方向，带交付物）
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="level"
-                  value="task"
-                  checked={level === "task"}
-                  onChange={() => setLevel("task")}
-                />
-                任务（要干的活，打勾即完成）
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="level"
-                  value="checkpoint"
-                  checked={level === "checkpoint"}
-                  onChange={() => setLevel("checkpoint")}
-                />
-                周打卡（只管节奏，不影响阶段完成）
-              </label>
-            </fieldset>
-
-            <p>
-              <label htmlFor="title">标题（必填）：</label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+        {/* 建计划 */}
+        <div className="card" style={{ margin: 0 }}>
+          <h2>① 创建新计划</h2>
+          <form onSubmit={onCreatePlan} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <div>
+              <label htmlFor="goal">计划核心目标（必填）：</label>
               <input
-                id="title"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
+                id="goal"
+                value={goal}
+                onChange={(event) => setGoal(event.target.value)}
+                placeholder="例如：Web 后端工程基础与实战上线"
                 required
+                style={{ width: "100%" }}
               />
-            </p>
+            </div>
+            <div className="flex-between" style={{ marginTop: "4px" }}>
+              <small>新计划建好后可直接作为活动目标</small>
+              <button type="submit" className="primary" disabled={pending || goal.trim() === ""}>
+                {pending ? "正在创建…" : "创建新计划"}
+              </button>
+            </div>
+          </form>
+        </div>
 
-            {level === "stage" ? (
-              <p>
-                <label htmlFor="deliverable">交付物（可选）：</label>
-                <input
-                  id="deliverable"
-                  value={deliverable}
-                  onChange={(event) => setDeliverable(event.target.value)}
-                />
-              </p>
-            ) : (
-              <p>
-                <label htmlFor="parent">所属阶段（必填）：</label>
+        {/* 建节点 */}
+        <div className="card" style={{ margin: 0 }}>
+          <h2>② 添加三级节点</h2>
+          {planId === null ? (
+            <p style={{ color: "var(--text-muted)", fontSize: "13px" }}>
+              尚未选择目标计划。请先在左侧新建计划，或在下拉中指定。
+            </p>
+          ) : (
+            <form onSubmit={onCreateNode} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div>
+                <label htmlFor="target-plan">目标归属计划：</label>
                 <select
-                  id="parent"
-                  value={parentId}
-                  onChange={(event) => setParentId(event.target.value)}
-                  required
+                  id="target-plan"
+                  value={targetPlanId}
+                  onChange={(event) => {
+                    setTargetPlanId(event.target.value);
+                    getPlan(event.target.value === "" ? undefined : Number(event.target.value)).then(
+                      setTree,
+                    );
+                  }}
+                  style={{ width: "100%" }}
                 >
-                  <option value="" disabled>
-                    请选择…
-                  </option>
-                  {stages.map((stage) => (
-                    <option key={stage.id} value={stage.id}>
-                      {stage.title}
+                  <option value="">（最新建的计划）#{tree?.plan?.id} {tree?.plan?.goal}</option>
+                  {plans.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      #{p.id}：{p.goal}
                     </option>
                   ))}
                 </select>
-              </p>
-            )}
+              </div>
 
-            <p>
-              {/*
-                用 type="date" 而不是文本框：后端只认零填充的 ISO 日期
-                （2026-09-30），2026-9-3 会被 422 拒掉；这个控件正好只产出前者。
-              */}
-              <label htmlFor="due">计划完成日（可选）：</label>
-              <input
-                id="due"
-                type="date"
-                value={dueDate}
-                onChange={(event) => setDueDate(event.target.value)}
-              />
-            </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "10px" }}>
+                <div>
+                  <label htmlFor="level">节点层级：</label>
+                  <select
+                    id="level"
+                    value={level}
+                    onChange={(event) => setLevel(event.target.value as NodeLevel)}
+                    style={{ width: "100%" }}
+                  >
+                    <option value="task">任务（可打勾/跳过）</option>
+                    <option value="stage">阶段（大阶段容器）</option>
+                    <option value="checkpoint">周打卡（节奏检查点）</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="title">节点标题（必填）：</label>
+                  <input
+                    id="title"
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    placeholder="输入阶段或任务标题"
+                    required
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              </div>
 
-            <button type="submit" disabled={pending}>
-              {pending ? "提交中…" : "建节点"}
-            </button>
+              {level === "stage" ? (
+                <div>
+                  <label htmlFor="deliverable">阶段交付物（验收指标）：</label>
+                  <input
+                    id="deliverable"
+                    value={deliverable}
+                    onChange={(event) => setDeliverable(event.target.value)}
+                    placeholder="例如：输出一份可测试运行的代码仓库"
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label htmlFor="parent">所属父阶段（必填）：</label>
+                  <select
+                    id="parent"
+                    value={parentId}
+                    onChange={(event) => setParentId(event.target.value)}
+                    required
+                    style={{ width: "100%" }}
+                  >
+                    <option value="" disabled>
+                      请选择归属哪个阶段…
+                    </option>
+                    {stages.map((stage) => (
+                      <option key={stage.id} value={stage.id}>
+                        阶段 #{stage.id}：{stage.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="due">建议截止日期（可选）：</label>
+                <input
+                  id="due"
+                  type="date"
+                  value={dueDate}
+                  onChange={(event) => setDueDate(event.target.value)}
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div className="flex-between" style={{ marginTop: "4px" }}>
+                <small>新建节点实时进台账</small>
+                <button
+                  type="submit"
+                  className="primary"
+                  disabled={pending || title.trim() === "" || (level !== "stage" && parentId === "")}
+                >
+                  {pending ? "正在添加…" : "添加节点"}
+                </button>
+              </div>
             </form>
-          </>
-        )}
-      </section>
-    </main>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

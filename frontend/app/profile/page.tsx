@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 
 import {
@@ -13,19 +12,6 @@ import {
   type ProfileCategory,
   type ProfileView,
 } from "@/lib/api";
-
-/**
- * 长期档案页：档案录入（此前档案只有读、没有写，两条主线是当年直接改库塞进去的）。
- *
- * 一页装下三件事：看五类现状与缺口、补一条、改 / 作废一条。
- * 与 P2 那几个页面同一个态度：不拆组件、不做样式，先把「档案能自己维护」走通。
- *
- * 两条边界在这页的体现：
- * - **前端不算业务规则**：类别词表、理由必填、历史行不许改，都归后端判，
- *   这页只把参数送过去、把后端那句中文 `detail` 显示出来。
- * - **档案是结论不是资料库**：输入框旁边的小字提醒你写提炼后的一两句话，
- *   不是把原始笔记搬进来。
- */
 
 const LOAD_FAILED = "取档案时出了意外错误";
 
@@ -41,21 +27,16 @@ export default function ProfilePage() {
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, setPending] = useState(false);
 
-  // 新增表单
   const [newCategory, setNewCategory] = useState<ProfileCategory>("long_axis");
   const [newContent, setNewContent] = useState("");
 
-  // 行内编辑：改内容必须写理由（台账要求）
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editContent, setEditContent] = useState("");
   const [editReason, setEditReason] = useState("");
 
-  // 两步作废：先点「作废」填理由，再确认——防手滑，也不弹系统对话框
   const [voidingId, setVoidingId] = useState<number | null>(null);
   const [voidReason, setVoidReason] = useState("");
 
-  // setState 放在 .then 回调里而不是 effect 体内同步调用，
-  // 否则会被 eslint 的 react-hooks/set-state-in-effect 拦下。
   useEffect(() => {
     getProfile()
       .then((data) => {
@@ -65,7 +46,6 @@ export default function ProfilePage() {
       .catch((cause: unknown) => setLoadError(messageOf(cause, LOAD_FAILED)));
   }, []);
 
-  /** 每次写完都重新取一遍：五类缺口的增减跟着后端走。 */
   async function refresh() {
     try {
       setProfile(await getProfile());
@@ -81,60 +61,47 @@ export default function ProfilePage() {
     setFeedback(null);
     try {
       const created = await createProfileItem({ category: newCategory, content: newContent });
-      setFeedback({
-        ok: true,
-        text: `已补入 #${created.id}（${PROFILE_CATEGORIES[created.category]}）`,
-      });
+      setFeedback({ ok: true, text: `已补入档案 #${created.id}（${PROFILE_CATEGORIES[newCategory]}）` });
       setNewContent("");
       await refresh();
     } catch (cause) {
-      setFeedback({ ok: false, text: messageOf(cause, "补入失败，原因不明") });
+      setFeedback({ ok: false, text: messageOf(cause, "补入档案失败，原因不明") });
     } finally {
       setPending(false);
     }
   }
 
-  function startEdit(itemId: number, content: string) {
-    setEditingId(itemId);
-    setVoidingId(null);
-    setEditContent(content);
-    setEditReason("");
-  }
-
-  async function onSaveEdit(event: FormEvent<HTMLFormElement>, itemId: number) {
-    event.preventDefault();
+  async function onUpdate(id: number) {
     setPending(true);
     setFeedback(null);
     try {
-      const updated = await updateProfileItem({
-        itemId,
-        content: editContent,
-        reason: editReason,
-      });
+      const updated = await updateProfileItem({ itemId: id, content: editContent, reason: editReason });
       setFeedback({
         ok: true,
-        text: `已取代：#${updated.superseded} → #${updated.id}（旧值与理由留在台账）`,
+        text: `已更新档案 #${id} → 新条目 #${updated.id}（旧条目已置为 superseded 留痕）`,
       });
       setEditingId(null);
+      setEditContent("");
+      setEditReason("");
       await refresh();
     } catch (cause) {
-      setFeedback({ ok: false, text: messageOf(cause, "保存失败，原因不明") });
+      setFeedback({ ok: false, text: messageOf(cause, "更新档案失败，原因不明") });
     } finally {
       setPending(false);
     }
   }
 
-  async function onVoid(itemId: number) {
+  async function onVoid(id: number) {
     setPending(true);
     setFeedback(null);
     try {
-      await voidProfileItem(itemId, voidReason);
-      setFeedback({ ok: true, text: `已作废 #${itemId}（理由与旧值留在台账）` });
+      await voidProfileItem(id, voidReason);
+      setFeedback({ ok: true, text: `已作废档案 #${id}（状态置为 void，理由已记入台账）` });
       setVoidingId(null);
       setVoidReason("");
       await refresh();
     } catch (cause) {
-      setFeedback({ ok: false, text: messageOf(cause, "作废失败，原因不明") });
+      setFeedback({ ok: false, text: messageOf(cause, "作废档案失败，原因不明") });
     } finally {
       setPending(false);
     }
@@ -143,214 +110,219 @@ export default function ProfilePage() {
   const items = profile?.items ?? [];
 
   return (
-    <main>
-      <h1>长期档案</h1>
-      <p>
-        <Link href="/">← 回计划表</Link>
-      </p>
+    <div>
+      <div className="flex-between" style={{ marginBottom: "16px" }}>
+        <div>
+          <h1>长期个人档案底座</h1>
+          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
+            这是决策引擎判断「值不值得学」与推荐方向的唯一直相依据。提炼后的结论，不存原始冗长笔记。
+          </p>
+        </div>
+        {profile && (
+          <span className="badge badge-in_progress">
+            有效档案 {items.length} 条 · 缺口 {profile.missing_categories.length} 类
+          </span>
+        )}
+      </div>
 
       {loadError !== null && (
-        <p role="alert">
-          <strong>取档案失败：</strong>
+        <div className="alert alert-danger" role="alert">
+          <strong>加载失败：</strong>
           {loadError}
-        </p>
+        </div>
       )}
-
-      {loadError === null && profile === null && <p role="status">正在取档案…</p>}
 
       {feedback !== null && (
-        <p role={feedback.ok ? "status" : "alert"}>
-          <strong>{feedback.ok ? "成功：" : "失败："}</strong>
+        <div className={`alert ${feedback.ok ? "alert-success" : "alert-danger"}`} role="status">
           {feedback.text}
-        </p>
+        </div>
       )}
 
-      <section>
-        <h2>补一条</h2>
-        <form onSubmit={onCreate}>
-          <p>
-            <label htmlFor="new-category">类别：</label>
-            <select
-              id="new-category"
-              value={newCategory}
-              onChange={(event) => setNewCategory(event.target.value as ProfileCategory)}
-            >
-              {CATEGORY_KEYS.map((key) => (
-                <option key={key} value={key}>
-                  {PROFILE_CATEGORIES[key]}
-                </option>
-              ))}
-            </select>
-          </p>
-          <p>
-            <label htmlFor="new-content">内容（一两句话的提炼结论）：</label>
-            <textarea
-              id="new-content"
-              value={newContent}
-              onChange={(event) => setNewContent(event.target.value)}
-              rows={2}
-              placeholder="例如：每天能稳定投入 2 小时，工作日晚上精力一般"
-              required
-            />
-            <br />
-            <small>这里是给 AI 判断用的「结论」，不是资料库——原始笔记不用搬进来。</small>
-          </p>
-          <button type="submit" disabled={pending}>
-            {pending ? "提交中…" : "补入档案"}
-          </button>
-        </form>
-      </section>
+      {profile !== null && profile.missing_categories.length > 0 && (
+        <div className="alert alert-warning" style={{ fontSize: "13px" }}>
+          <strong>当前档案缺口分类：</strong>
+          {profile.missing_categories
+            .map((key) => PROFILE_CATEGORIES[key as ProfileCategory] ?? key)
+            .join("、")}
+          。缺失此类别的四问回答将被判定为「依据不足」，建议尽快补充。
+        </div>
+      )}
 
-      <section>
-        <h2>五类现状</h2>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "20px" }}>
+        {/* 左侧：录入新档案 */}
+        <div className="card" style={{ height: "fit-content" }}>
+          <h2>添加新档案条目</h2>
+          <form onSubmit={onCreate} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <div>
+              <label htmlFor="new-category">档案类别：</label>
+              <select
+                id="new-category"
+                value={newCategory}
+                onChange={(event) => setNewCategory(event.target.value as ProfileCategory)}
+                style={{ width: "100%" }}
+              >
+                {CATEGORY_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {PROFILE_CATEGORIES[key]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="new-content">提炼结论（一两句话）：</label>
+              <textarea
+                id="new-content"
+                value={newContent}
+                onChange={(event) => setNewContent(event.target.value)}
+                rows={3}
+                placeholder="例如：每天能稳定投入 1.5 小时，精力主要集中在清晨与周末"
+                required
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="flex-between">
+              <small style={{ color: "var(--text-muted)" }}>录入即刻生效</small>
+              <button type="submit" className="primary" disabled={pending || newContent.trim() === ""}>
+                {pending ? "正在保存…" : "保存进档案"}
+              </button>
+            </div>
+          </form>
+        </div>
 
-        {profile !== null && profile.missing_categories.length > 0 && (
-          <p role="status">
-            <strong>还空着：</strong>
-            {profile.missing_categories
-              .map(
-                (key) =>
-                  PROFILE_CATEGORIES[key as ProfileCategory] ?? key,
-              )
-              .join("、")}
-            。四问里靠这些类别判断的问题只能答「依据不足」——想让 AI 答得实，先补这几类。
-          </p>
-        )}
+        {/* 右侧：五类分类视图 */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          {CATEGORY_KEYS.map((key) => {
+            const categoryItems = items.filter((item) => item.category === key);
+            return (
+              <div key={key} className="card" style={{ margin: 0, padding: "16px 18px" }}>
+                <div className="flex-between" style={{ marginBottom: "10px" }}>
+                  <div className="flex-row gap-sm">
+                    <span className="badge badge-in_progress">{key}</span>
+                    <h3 style={{ margin: 0 }}>{PROFILE_CATEGORIES[key]}</h3>
+                  </div>
+                  <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                    {categoryItems.length} 条有效记录
+                  </span>
+                </div>
 
-        {profile !== null && items.length === 0 && (
-          <p role="status">档案还一条都没有。上面补一条试试。</p>
-        )}
-
-        {CATEGORY_KEYS.map((key) => {
-          const categoryItems = items.filter((item) => item.category === key);
-          return (
-            <div key={key}>
-              <h3>
-                {PROFILE_CATEGORIES[key]}
-                <small>（{key}，{categoryItems.length} 条）</small>
-              </h3>
-              {categoryItems.length === 0 && <p role="status">这一类还空着。</p>}
-              <ul>
-                {categoryItems.map((item) => (
-                  <li key={item.id}>
-                    <p>
-                      #{item.id}（{item.valid_from} 起生效）：{item.content}
-                    </p>
-
-                    <p>
-                      <button
-                        type="button"
-                        onClick={() => startEdit(item.id, item.content)}
-                        disabled={pending}
+                {categoryItems.length === 0 ? (
+                  <p style={{ color: "var(--text-muted)", fontSize: "12px", margin: 0 }}>
+                    该类别暂无档案条目，四问涉及此项将依据不足。
+                  </p>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                    {categoryItems.map((item) => (
+                      <div
+                        key={item.id}
+                        style={{
+                          background: "var(--bg-subtle)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius-sm)",
+                          padding: "10px 12px",
+                        }}
                       >
-                        改
-                      </button>{" "}
-                      {voidingId === item.id ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => onVoid(item.id)}
-                            disabled={pending || voidReason.trim() === ""}
-                          >
-                            确认作废
-                          </button>{" "}
-                          <button
-                            type="button"
-                            onClick={() => setVoidingId(null)}
-                            disabled={pending}
-                          >
-                            取消
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setVoidingId(item.id);
-                            setVoidReason("");
-                            setEditingId(null);
-                          }}
-                          disabled={pending}
-                        >
-                          作废
-                        </button>
-                      )}
-                    </p>
+                        <div className="flex-between" style={{ alignItems: "flex-start" }}>
+                          <div style={{ fontSize: "13px", lineHeight: 1.5, color: "var(--text-main)", flex: 1 }}>
+                            {item.content}
+                          </div>
+                          <div className="flex-row gap-sm" style={{ marginLeft: "12px" }}>
+                            <button
+                              type="button"
+                              className="sm ghost"
+                              onClick={() => {
+                                setEditingId(item.id);
+                                setEditContent(item.content);
+                                setEditReason("");
+                                setVoidingId(null);
+                              }}
+                              disabled={pending}
+                            >
+                              修改
+                            </button>
+                            <button
+                              type="button"
+                              className="sm ghost danger"
+                              onClick={() => {
+                                setVoidingId(item.id);
+                                setVoidReason("");
+                                setEditingId(null);
+                              }}
+                              disabled={pending}
+                            >
+                              作废
+                            </button>
+                          </div>
+                        </div>
 
-                    {voidingId === item.id && (
-                      <p>
-                        <label htmlFor={`void-reason-${item.id}`}>作废理由（必填，进台账）：</label>
-                        <input
-                          id={`void-reason-${item.id}`}
-                          value={voidReason}
-                          onChange={(event) => setVoidReason(event.target.value)}
-                          placeholder="例如：这条信息过期了"
-                        />
-                      </p>
-                    )}
+                        <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                          条目 #{item.id} · 生效于 {item.valid_from?.slice(0, 10)}
+                        </div>
 
-                    {editingId === item.id && (
-                      <form onSubmit={(event) => onSaveEdit(event, item.id)}>
-                        <fieldset>
-                          <legend>改 #{item.id}（旧值会被取代、留痕，不删除）</legend>
-                          <p>
-                            <label htmlFor={`edit-content-${item.id}`}>新内容：</label>
+                        {editingId === item.id && (
+                          <div className="inline-edit-box">
+                            <label style={{ fontSize: "11px" }}>修改后的内容：</label>
                             <textarea
-                              id={`edit-content-${item.id}`}
                               value={editContent}
                               onChange={(event) => setEditContent(event.target.value)}
                               rows={2}
-                              required
+                              style={{ width: "100%" }}
                             />
-                          </p>
-                          <p>
-                            <label htmlFor={`edit-reason-${item.id}`}>为什么改（必填，进台账）：</label>
+                            <label style={{ fontSize: "11px" }}>修改理由（必填，记录不可逆变更）：</label>
                             <input
-                              id={`edit-reason-${item.id}`}
                               value={editReason}
                               onChange={(event) => setEditReason(event.target.value)}
-                              placeholder="例如：方向变了 / 信息过期了"
-                              required
+                              placeholder="例如：作息变动，重新核算时间"
+                              style={{ width: "100%" }}
                             />
-                          </p>
-                          <button type="submit" disabled={pending}>
-                            {pending ? "保存中…" : "保存"}
-                          </button>{" "}
-                          <button
-                            type="button"
-                            onClick={() => setEditingId(null)}
-                            disabled={pending}
-                          >
-                            取消
-                          </button>
-                        </fieldset>
-                      </form>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          );
-        })}
+                            <div className="flex-row gap-sm" style={{ marginTop: "4px" }}>
+                              <button
+                                type="button"
+                                className="primary sm"
+                                onClick={() => onUpdate(item.id)}
+                                disabled={pending || editReason.trim() === "" || editContent.trim() === ""}
+                              >
+                                保存替换
+                              </button>
+                              <button type="button" className="sm" onClick={() => setEditingId(null)}>
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        )}
 
-        {items.some((item) => !(item.category in PROFILE_CATEGORIES)) && (
-          <div>
-            <h3>其他类别</h3>
-            <p>
-              <small>下面这些不在约定词表里（多半是早期手工写库留下的），照常显示、不丢。</small>
-            </p>
-            <ul>
-              {items
-                .filter((item) => !(item.category in PROFILE_CATEGORIES))
-                .map((item) => (
-                  <li key={item.id}>
-                    #{item.id}（{item.category}）：{item.content}
-                  </li>
-                ))}
-            </ul>
-          </div>
-        )}
-      </section>
-    </main>
+                        {voidingId === item.id && (
+                          <div className="inline-edit-box">
+                            <label style={{ fontSize: "11px" }}>作废理由（必填，单向门操作）：</label>
+                            <input
+                              value={voidReason}
+                              onChange={(event) => setVoidReason(event.target.value)}
+                              placeholder="例如：原痛点已彻底解决，不再作为约束"
+                              style={{ width: "100%" }}
+                            />
+                            <div className="flex-row gap-sm" style={{ marginTop: "4px" }}>
+                              <button
+                                type="button"
+                                className="danger sm"
+                                onClick={() => onVoid(item.id)}
+                                disabled={pending || voidReason.trim() === ""}
+                              >
+                                确认作废
+                              </button>
+                              <button type="button" className="sm" onClick={() => setVoidingId(null)}>
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
   );
 }

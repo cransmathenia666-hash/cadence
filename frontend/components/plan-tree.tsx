@@ -10,19 +10,6 @@ import {
   type TaskNode,
 } from "@/lib/api";
 
-/**
- * 计划表里"长什么样"的那一半：只把后端给的数据画出来，外加四个写动作。
- *
- * 四个动作都直通后端、写完让页面重新取一次计划（刷新归 `app/page.tsx`）：
- * - 任务打勾（`POST /nodes/{id}/check`）——一步到完成，不写理由；
- * - 任务跳过（`/skip`）——跳过算完成，但必须写一句理由；
- * - 提交交付物（`/deliverable`）——阶段上的独立动作，可重新提交；
- * - 改字段（`/fields`，T30）——标题 / 交付物（只阶段）/ 截止日，**理由必填**。
- *
- * 业务判定按 SPEC 第 10 节全在后端：前端不猜"这个阶段算不算完成"，
- * 阶段头上的「完成 / 未完成」直接读后端给的 `finished`。
- */
-
 const STATUS_LABELS: Record<string, string> = {
   not_started: "未开始",
   in_progress: "进行中",
@@ -35,22 +22,26 @@ function statusLabel(status: string): string {
   return STATUS_LABELS[status] ?? status;
 }
 
-/** 落后的说法。null 表示无从判断（没定完成日，或已跳过）。 */
-function lagLabel(lagDays: number | null): string {
-  if (lagDays === null) return "无到期日";
-  if (lagDays > 0) return `落后 ${lagDays} 天`;
-  if (lagDays < 0) return `提前 ${-lagDays} 天`;
-  return "按时";
+function statusBadgeClass(status: string): string {
+  if (status === "done") return "badge-done";
+  if (status === "in_progress") return "badge-in_progress";
+  if (status === "stuck") return "badge-stuck";
+  if (status === "skipped") return "badge-skipped";
+  return "badge-not_started";
 }
 
-/**
- * 就地改一个已经建好的节点（T30，SPEC 决策 38）：默认只是一个「改字段」按钮，
- * 点开才出现输入框。
- *
- * 为什么能改而不是重建成新的一条：改字段**原地改、id 不变**——报告和交付物都指着
- * 这个 id，换成新节点它们全断。改动会进台账（改前改后 + 理由），理由必填。
- * 「不要它了」不该走这里，那是跳过（`skipped`）。
- */
+function lagBadge(lagDays: number | null) {
+  if (lagDays === null) return null;
+  if (lagDays > 0) {
+    return <span className="badge badge-lag-danger">落后 {lagDays} 天</span>;
+  }
+  if (lagDays < 0) {
+    return <span className="badge badge-lag-ahead">提前 {-lagDays} 天</span>;
+  }
+  return <span className="badge badge-lag-normal">按时</span>;
+}
+
+/** 就地改一个已经建好的节点（T30，原地改，理由必填） */
 function NodeFieldsEditor({
   node,
   busy,
@@ -59,7 +50,6 @@ function NodeFieldsEditor({
 }: {
   node: { id: number; title: string; due_date: string | null; deliverable?: string | null };
   busy: boolean;
-  /** 只有阶段有「要交的东西」，任务与周打卡上没有这个概念。 */
   withDeliverable: boolean;
   onSave: (nodeId: number, input: NodeFieldsInput) => void;
 }) {
@@ -71,64 +61,63 @@ function NodeFieldsEditor({
 
   if (!editing) {
     return (
-      <>
-        {" "}
-        <button type="button" onClick={() => setEditing(true)} disabled={busy}>
-          改字段
-        </button>
-      </>
+      <button
+        type="button"
+        className="ghost sm"
+        onClick={() => setEditing(true)}
+        disabled={busy}
+        style={{ fontSize: "11px", padding: "2px 6px" }}
+      >
+        改字段
+      </button>
     );
   }
 
   return (
-    <div>
-      <p>
-        <label>
-          标题：
+    <div className="inline-edit-box">
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+        <div>
+          <label style={{ fontSize: "11px" }}>标题：</label>
           <input
-            aria-label={`「${node.title}」的新标题`}
+            style={{ width: "100%" }}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
           />
-        </label>
-        {withDeliverable && (
-          <>
-            <br />
-            <label>
-              要交的东西：
-              <input
-                aria-label={`「${node.title}」要交的东西`}
-                value={deliverable}
-                onChange={(event) => setDeliverable(event.target.value)}
-                placeholder="留空 = 清掉"
-              />
-            </label>
-          </>
-        )}
-        <br />
-        <label>
-          截止日：
+        </div>
+        <div>
+          <label style={{ fontSize: "11px" }}>截止日期（YYYY-MM-DD，留空清掉）：</label>
           <input
-            aria-label={`「${node.title}」的截止日`}
+            style={{ width: "100%" }}
             value={dueDate}
             onChange={(event) => setDueDate(event.target.value)}
-            placeholder="YYYY-MM-DD，留空 = 清掉（清了就不算落后）"
+            placeholder="留空 = 清除到期日"
           />
-        </label>
-        <br />
-        <label>
-          为什么改（必填，进台账）：
+        </div>
+      </div>
+      {withDeliverable && (
+        <div>
+          <label style={{ fontSize: "11px" }}>阶段要交的东西（交付物指标）：</label>
           <input
-            aria-label={`改「${node.title}」的理由`}
-            value={reason}
-            onChange={(event) => setReason(event.target.value)}
-            placeholder="例如：这周有别的安排，挪到下月"
+            style={{ width: "100%" }}
+            value={deliverable}
+            onChange={(event) => setDeliverable(event.target.value)}
+            placeholder="例如：可访问的 Demo 链接，或通过测试的代码仓库"
           />
-        </label>
-      </p>
-      <p>
+        </div>
+      )}
+      <div>
+        <label style={{ fontSize: "11px" }}>修改理由（必填，记入不可逆台账）：</label>
+        <input
+          style={{ width: "100%" }}
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          placeholder="例如：课业变重调整进度；或重构了目标交付物"
+        />
+      </div>
+      <div className="flex-row gap-sm" style={{ marginTop: "4px" }}>
         <button
           type="button"
+          className="primary sm"
           onClick={() => {
             setEditing(false);
             onSave(node.id, {
@@ -140,32 +129,17 @@ function NodeFieldsEditor({
           }}
           disabled={busy || reason.trim() === ""}
         >
-          保存改动
-        </button>{" "}
-        <button type="button" onClick={() => setEditing(false)} disabled={busy}>
+          保存变更
+        </button>
+        <button type="button" className="sm" onClick={() => setEditing(false)} disabled={busy}>
           取消
         </button>
-        <br />
-        <small>
-          这里只改字段、不换节点：id 与报告、交付物的引用一个不动。标题不能留空——
-          想「不要它了」就跳过它。跟现在一模一样的话后端会拒（免得台账多一条没改什么的流水）。
-        </small>
-      </p>
+      </div>
     </div>
   );
 }
 
-function ChildLine({ node }: { node: TaskNode }) {
-  return (
-    <>
-      {node.title} — <strong>{statusLabel(node.status)}</strong>
-      {node.due_date !== null && <>，到期 {node.due_date}</>}
-      {node.lag_days !== null && <>，{lagLabel(node.lag_days)}</>}
-    </>
-  );
-}
-
-/** 一条任务：显示状态 + 打勾 / 跳过 / 改字段（已完成或已跳过的就只剩状态与改字段）。 */
+/** 一条任务：显示状态 + 打勾 / 跳过 / 改字段 */
 function TaskItem({
   task,
   busy,
@@ -182,46 +156,66 @@ function TaskItem({
   const decided = task.status === "done" || task.status === "skipped";
 
   return (
-    <li>
-      <ChildLine node={task} />
-      {!decided && (
-        <>
-          {" "}
-          <button type="button" onClick={() => onAct(task.id, "check")} disabled={busy}>
-            打勾完成
-          </button>{" "}
-          {skipping ? (
-            <>
-              <input
-                aria-label={`跳过「${task.title}」的理由`}
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder="为什么跳过（必填）"
-              />
+    <div className={`task-item-row ${decided ? "is-done" : ""}`}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1 }}>
+        <span className={`badge ${statusBadgeClass(task.status)}`}>{statusLabel(task.status)}</span>
+        <span style={{ fontWeight: decided ? 400 : 500 }}>{task.title}</span>
+        {task.due_date && (
+          <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>到期：{task.due_date}</span>
+        )}
+        {lagBadge(task.lag_days)}
+      </div>
+
+      <div className="flex-row gap-sm">
+        {!decided && (
+          <>
+            <button
+              type="button"
+              className="primary sm"
+              onClick={() => onAct(task.id, "check")}
+              disabled={busy}
+            >
+              打勾完成
+            </button>
+            {skipping ? (
+              <div className="flex-row gap-sm">
+                <input
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  placeholder="跳过理由（必填）"
+                  style={{ width: "130px", fontSize: "12px", padding: "2px 6px" }}
+                />
+                <button
+                  type="button"
+                  className="danger sm"
+                  onClick={() => onAct(task.id, "skip", reason)}
+                  disabled={busy || reason.trim() === ""}
+                >
+                  确认
+                </button>
+                <button type="button" className="sm" onClick={() => setSkipping(false)} disabled={busy}>
+                  取消
+                </button>
+              </div>
+            ) : (
               <button
                 type="button"
-                onClick={() => onAct(task.id, "skip", reason)}
-                disabled={busy || reason.trim() === ""}
+                className="sm"
+                onClick={() => setSkipping(true)}
+                disabled={busy}
               >
-                确认跳过
-              </button>{" "}
-              <button type="button" onClick={() => setSkipping(false)} disabled={busy}>
-                取消
+                跳过
               </button>
-            </>
-          ) : (
-            <button type="button" onClick={() => setSkipping(true)} disabled={busy}>
-              跳过
-            </button>
-          )}
-        </>
-      )}
-      <NodeFieldsEditor node={task} busy={busy} withDeliverable={false} onSave={onFields} />
-    </li>
+            )}
+          </>
+        )}
+        <NodeFieldsEditor node={task} busy={busy} withDeliverable={false} onSave={onFields} />
+      </div>
+    </div>
   );
 }
 
-/** 阶段上的交付物区：显示当前提交（如果有），并提供「提交 / 重新提交」表单。 */
+/** 阶段交付物 */
 function DeliverableBlock({
   stage,
   busy,
@@ -237,46 +231,27 @@ function DeliverableBlock({
   const submission = stage.deliverable_submission;
 
   return (
-    <ul>
-      {stage.deliverable !== null && <li>计划交付物：{stage.deliverable}</li>}
-      <li>
-        交付物：
-        {submission === null ? (
-          <strong>未提交</strong>
-        ) : (
-          <>
-            <strong>已提交</strong>：<a href={submission.url}>{submission.url}</a>（
-            {submission.note}，{submission.created_at.slice(0, 16).replace("T", " ")}）
-          </>
-        )}{" "}
-        {editing ? (
-          <>
-            <input
-              aria-label={`「${stage.title}」交付物链接`}
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder="链接：仓库 / URL / 录屏"
-            />
-            <input
-              aria-label={`「${stage.title}」交付物说明`}
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              placeholder="一句话说明"
-            />
-            <button
-              type="button"
-              onClick={() => onAct(stage.id, url, note)}
-              disabled={busy || url.trim() === "" || note.trim() === ""}
-            >
-              确认提交
-            </button>{" "}
-            <button type="button" onClick={() => setEditing(false)} disabled={busy}>
-              取消
-            </button>
-          </>
-        ) : (
+    <div
+      style={{
+        background: "var(--bg-subtle)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-sm)",
+        padding: "10px 14px",
+        margin: "10px 0 14px",
+        fontSize: "13px",
+      }}
+    >
+      <div className="flex-between">
+        <div>
+          <span style={{ fontWeight: 600, color: "var(--text-main)" }}>目标交付物：</span>
+          <span style={{ color: "var(--text-main)" }}>
+            {stage.deliverable || <span style={{ color: "var(--text-muted)" }}>未设定</span>}
+          </span>
+        </div>
+        {!editing && (
           <button
             type="button"
+            className="sm primary"
             onClick={() => {
               setUrl(submission?.url ?? "");
               setNote("");
@@ -287,8 +262,63 @@ function DeliverableBlock({
             {submission === null ? "提交交付物" : "重新提交"}
           </button>
         )}
-      </li>
-    </ul>
+      </div>
+
+      <div style={{ marginTop: "6px", fontSize: "12px" }}>
+        <span style={{ fontWeight: 600 }}>验收状态：</span>
+        {submission === null ? (
+          <span className="badge badge-not_started">未提交验收凭据</span>
+        ) : (
+          <span className="badge badge-done">
+            已提交：
+            <a
+              href={submission.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ marginLeft: "4px", color: "var(--primary)" }}
+            >
+              {submission.url}
+            </a>
+            <span style={{ marginLeft: "6px", color: "var(--text-muted)" }}>
+              ({submission.note} · {submission.created_at.slice(0, 10)})
+            </span>
+          </span>
+        )}
+      </div>
+
+      {editing && (
+        <div style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "6px" }}>
+          <input
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder="凭据链接（如 Github 仓库、在线 Demo、飞书文档、视频链接）"
+            style={{ width: "100%" }}
+          />
+          <input
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="一句话说明本次交付内容或亮点"
+            style={{ width: "100%" }}
+          />
+          <div className="flex-row gap-sm" style={{ marginTop: "2px" }}>
+            <button
+              type="button"
+              className="primary sm"
+              onClick={() => {
+                onAct(stage.id, url, note);
+                setEditing(false);
+              }}
+              disabled={busy || url.trim() === "" || note.trim() === ""}
+            >
+              确认提交验收
+            </button>
+            <button type="button" className="sm" onClick={() => setEditing(false)} disabled={busy}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -308,66 +338,71 @@ function StageItem({
   const { progress } = stage;
 
   return (
-    <li>
-      <h3>
-        {stage.title} — <strong>{statusLabel(stage.status)}</strong>
-        {" · "}
-        {stage.finished ? <strong>完成</strong> : "未完成"}
+    <div className={`stage-card ${stage.finished ? "stage-done" : ""}`}>
+      <div className="stage-header">
+        <div>
+          <div className="flex-row gap-sm" style={{ marginBottom: "4px" }}>
+            <h3 style={{ margin: 0, fontSize: "15px" }}>{stage.title}</h3>
+            <span className={`badge ${statusBadgeClass(stage.status)}`}>
+              {statusLabel(stage.status)}
+            </span>
+            <span className={`badge ${stage.finished ? "badge-done" : "badge-not_started"}`}>
+              {stage.finished ? "阶段已达成" : "阶段未达成"}
+            </span>
+            {lagBadge(stage.lag_days)}
+          </div>
+          <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+            任务达成度：{progress.settled}/{progress.total}（完成 {progress.done}，跳过 {progress.skipped}）
+            {progress.total === 0 ? " · 阶段无任务，直接以交付物验收" : progress.complete ? " · 任务已清空" : ""}
+            {stage.due_date && ` · 截止日 ${stage.due_date}`}
+          </div>
+        </div>
+
         <NodeFieldsEditor node={stage} busy={busy} withDeliverable onSave={onFields} />
-      </h3>
-      <DeliverableBlock stage={stage} busy={busy} onAct={onDeliverable} />
-      <ul>
-        {stage.due_date !== null && <li>计划完成日：{stage.due_date}</li>}
-        {stage.lag_days !== null && <li>{lagLabel(stage.lag_days)}</li>}
-        <li>
-          任务 {progress.settled} / {progress.total} 收尾（完成 {progress.done}、跳过{" "}
-          {progress.skipped}）
-          {progress.total === 0
-            ? "——没有任务，只看交付物"
-            : progress.complete
-              ? "，已全部收尾"
-              : `，还开着：${progress.open_titles.join("、")}`}
-        </li>
-      </ul>
+      </div>
 
-      <h4>任务</h4>
-      {stage.tasks.length === 0 ? (
-        <p>
-          <small>这个阶段还没有任务。</small>
-        </p>
-      ) : (
-        <ul>
-          {stage.tasks.map((task) => (
-            <TaskItem key={task.id} task={task} busy={busy} onAct={onTask} onFields={onFields} />
-          ))}
-        </ul>
-      )}
+      <div className="stage-content">
+        <DeliverableBlock stage={stage} busy={busy} onAct={onDeliverable} />
 
-      <h4>周打卡</h4>
-      {stage.checkpoints.length === 0 ? (
-        <p>
-          <small>这个阶段还没有周打卡（它只管节奏，不影响阶段完成）。</small>
-        </p>
-      ) : (
-        <ul>
-          {stage.checkpoints.map((checkpoint: Checkpoint) => (
-            <li key={checkpoint.id}>
-              <ChildLine node={checkpoint} />
-              <NodeFieldsEditor
-                node={checkpoint}
-                busy={busy}
-                withDeliverable={false}
-                onSave={onFields}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-    </li>
+        <div style={{ marginBottom: "12px" }}>
+          <h4>阶段拆解任务 ({stage.tasks.length})</h4>
+          {stage.tasks.length === 0 ? (
+            <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+              该阶段暂无具体任务清单，可随时在「新建」页面添加。
+            </p>
+          ) : (
+            <div>
+              {stage.tasks.map((task) => (
+                <TaskItem key={task.id} task={task} busy={busy} onAct={onTask} onFields={onFields} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {stage.checkpoints.length > 0 && (
+          <details style={{ padding: "6px 10px", margin: 0, background: "var(--bg-subtle)" }}>
+            <summary style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+              周节奏打卡节点（{stage.checkpoints.length} 个，仅管节奏，不阻碍阶段达成）
+            </summary>
+            <div style={{ marginTop: "6px" }}>
+              {stage.checkpoints.map((cp: Checkpoint) => (
+                <div key={cp.id} className="task-item-row" style={{ fontSize: "12px", padding: "4px 8px" }}>
+                  <div className="flex-row gap-sm">
+                    <span className={`badge ${statusBadgeClass(cp.status)}`}>{statusLabel(cp.status)}</span>
+                    <span>{cp.title}</span>
+                    {cp.due_date && <span>({cp.due_date})</span>}
+                  </div>
+                  <NodeFieldsEditor node={cp} busy={busy} withDeliverable={false} onSave={onFields} />
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    </div>
   );
 }
 
-/** 计划的全部信息。数据全部来自 `GET /api/plan`；写动作由页面传进来。 */
 export function PlanTreeView({
   tree,
   busy = false,
@@ -386,64 +421,77 @@ export function PlanTreeView({
   const { plan, current_stage: currentStage, lag, stages } = tree;
 
   if (plan === null) {
-    return <p role="status">后端连上了，但库里还没有计划。先去「建计划 / 建节点」建一个。</p>;
+    return (
+      <div className="card" style={{ textAlign: "center", padding: "30px 20px" }}>
+        <p style={{ color: "var(--text-muted)" }}>
+          当前库里尚未建立有效计划。请前往导航栏「新建」创建一个主目标计划。
+        </p>
+      </div>
+    );
   }
 
   return (
     <div>
-      <h2>
-        计划 #{plan.id}：{plan.goal}
-      </h2>
-      <ul>
-        <li>状态：{plan.status}</li>
-        <li>建于：{plan.valid_from}</li>
-        <li>
-          落后量：
-          {lag.behind ? `落后 ${lag.lag_days} 天` : "没有落后"}
-          {lag.worst !== null && (
-            <>（最堵的是「{lag.worst.title}」，到期 {lag.worst.due_date ?? "未定"}）</>
-          )}
-        </li>
-      </ul>
-
       {error !== null && (
-        <p role="alert">
+        <div className="alert alert-danger" role="alert">
           <strong>操作失败：</strong>
           {error}
-        </p>
+        </div>
       )}
 
-      <h2>当前阶段</h2>
-      {currentStage === null ? (
-        <p>没有进行中的阶段——要么全收尾了，要么还没建阶段。</p>
-      ) : (
-        <ul>
-          <li>名称：{currentStage.title}</li>
-          <li>状态：{statusLabel(currentStage.status)}</li>
-          {currentStage.deliverable !== null && <li>计划交付物：{currentStage.deliverable}</li>}
-          <li>
-            任务进度：{currentStage.progress.settled} / {currentStage.progress.total} 收尾
-          </li>
-        </ul>
-      )}
+      <div className="card" style={{ marginBottom: "16px", padding: "16px 20px" }}>
+        <div className="flex-between">
+          <div>
+            <span style={{ fontSize: "12px", color: "var(--text-muted)", fontWeight: 600 }}>
+              当前正在推进的阶段：
+            </span>
+            {currentStage === null ? (
+              <span style={{ marginLeft: "8px", color: "var(--text-muted)" }}>暂无进行中的阶段</span>
+            ) : (
+              <span style={{ marginLeft: "8px", fontWeight: 700, fontSize: "15px" }}>
+                {currentStage.title}
+              </span>
+            )}
+          </div>
+          <div className="flex-row gap-sm">
+            {lag.behind ? (
+              <span className="badge badge-lag-danger">总体进度落后 {lag.lag_days} 天</span>
+            ) : (
+              <span className="badge badge-lag-ahead">整体进度按期进行</span>
+            )}
+          </div>
+        </div>
+      </div>
 
-      <h2>阶段 · 任务 · 周打卡</h2>
-      {stages.length === 0 ? (
-        <p>还没有阶段。</p>
-      ) : (
-        <ol>
-          {stages.map((stage) => (
-            <StageItem
-              key={stage.id}
-              stage={stage}
-              busy={busy}
-              onTask={onTask}
-              onDeliverable={onDeliverable}
-              onFields={onFields}
-            />
-          ))}
-        </ol>
-      )}
+      <div style={{ marginBottom: "20px" }}>
+        <div className="flex-between" style={{ marginBottom: "10px" }}>
+          <h2>阶段与任务执行树 ({stages.length} 个阶段)</h2>
+          <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+            任务全勾/跳过 ＋ 提交交付物 ＝ 阶段达成
+          </span>
+        </div>
+
+        {stages.length === 0 ? (
+          <div className="card" style={{ textAlign: "center", padding: "30px" }}>
+            <p style={{ color: "var(--text-muted)" }}>
+              计划下还没有阶段节点。可在「新建」页面手动补充，或在「候选清单」采纳提案生成蓝图。
+            </p>
+          </div>
+        ) : (
+          <div>
+            {stages.map((stage) => (
+              <StageItem
+                key={stage.id}
+                stage={stage}
+                busy={busy}
+                onTask={onTask}
+                onDeliverable={onDeliverable}
+                onFields={onFields}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

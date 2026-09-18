@@ -2,24 +2,6 @@
 
 import { type BlueprintPayload, type Proposal } from "@/lib/api";
 
-/**
- * 蓝图提案的正文：把 payload 里的那棵树画成可勾选的清单（T26 起，T29 从页面里抽出来）。
- *
- * 为什么抽出来：待裁定提案只有一页（SPEC 决策 29），蓝图、档案变更、资料判断都在这页上
- * 按 `kind` 分流渲染，勾选这套交互不该跟页面取数、裁定流程混在一个文件里。
- *
- * 勾选与提交的关系：**勾中的才建进计划，没勾的直接丢弃**——蓝图是版本化的，想要别的
- * 可以沿对话再出一版。
- */
-
-/**
- * 勾选的规范形状：`"2"` = 第 3 个阶段整段；`"2.1"` = 其中第 2 件任务（下标从 0 起）。
- *
- * 为什么要收敛：`"4"`（整段）与 `"4.0","4.1","4.2"`（逐条勾满）在库里建出来的东西
- * **完全一样**，但显示会分叉——用户走查时就遇到「三件任务都勾着、阶段那格空着」，
- * 看着像漏选。所以选区只留一种写法：逐条勾满 → 收成整段；整段已在 → 丢掉它下面逐条
- * 的那些；这一段一件没勾 → 整段清掉。顺带把认不出 / 越界的路径丢掉（后端也会拒）。
- */
 export function normalize(raw: string[], stages: BlueprintPayload["stages"]): string[] {
   const whole = new Set<number>();
   const tasks = new Map<number, Set<number>>();
@@ -60,7 +42,6 @@ export function normalize(raw: string[], stages: BlueprintPayload["stages"]): st
   return next;
 }
 
-/** 这条蓝图当前该勾什么。没有记录时默认**整份都要**——不勾就点批准等于全采纳（后端也是这个口径）。 */
 export function selectionOf(
   proposal: Proposal,
   selections: Record<number, string[]>,
@@ -86,7 +67,6 @@ export function BlueprintBody({
   const tickedTask = (index: number, taskIndex: number) =>
     whole(index) || selection.includes(`${index}.${taskIndex}`);
 
-  /** 勾/取消一个阶段：整段都要，或整段全不要（逐条勾的那些一起清掉）。 */
   function toggleStage(index: number) {
     const others = selection.filter(
       (item) => item !== String(index) && !item.startsWith(`${index}.`),
@@ -94,7 +74,6 @@ export function BlueprintBody({
     onSelection(normalize(whole(index) ? others : [...others, String(index)], stages));
   }
 
-  /** 勾/取消一件任务：整段被勾着时，先把它拆成逐条勾，再动这一条。 */
   function toggleTask(index: number, taskIndex: number) {
     const path = `${index}.${taskIndex}`;
     if (whole(index)) {
@@ -123,64 +102,124 @@ export function BlueprintBody({
   );
 
   return (
-    <>
-      <p>
-        计划 #{payload.plan_id} 的这一版（{stages.length} 个阶段，{taskTotal} 件任务
-        {payload.candidate_id !== undefined && `，出自候选 #${payload.candidate_id}`}）。
-        <br />
-        <small>目标：{payload.goal}</small>
-      </p>
-      <ol>
-        {stages.map((item, index) => (
-          <li key={`${item.title}-${index}`}>
-            <label>
-              <input
-                type="checkbox"
-                // 选区是规范形状（见 `normalize`），所以「整段」这一个标记就够判断
-                checked={whole(index)}
-                onChange={() => toggleStage(index)}
-              />
-              <strong>{item.title}</strong>
-            </label>
-            {item.why !== "" && (
-              <>
-                <br />
-                <small>{item.why}</small>
-              </>
-            )}
-            <br />
-            <small>要交的东西：{item.deliverable}</small>
-            {(item.tasks ?? []).length > 0 && (
-              <ul>
-                {(item.tasks ?? []).map((task, taskIndex) => (
-                  <li key={`${task.title}-${taskIndex}`}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={tickedTask(index, taskIndex)}
-                        onChange={() => toggleTask(index, taskIndex)}
-                      />
-                      {task.title}
-                    </label>
-                    <small>{task.due_date === null ? "（没定日期）" : `（${task.due_date}）`}</small>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
-      </ol>
-      <p>
-        <strong>
-          当前勾选：{tickedStages} / {stages.length} 个阶段，{tickedTaskCount} / {taskTotal} 件任务
-        </strong>
-        <br />
-        <small>
-          勾了阶段 = 连它的任务一起要；一件任务都没勾的阶段不会建。同名阶段不会重复建——
-          采纳候选时已经建了那个阶段，任务挂到它下面，「要交的东西」也按这一版里写的更新
-          （改前改后进台账）。
-        </small>
-      </p>
-    </>
+    <div style={{ marginTop: "10px" }}>
+      <div
+        style={{
+          background: "var(--bg-subtle)",
+          padding: "10px 14px",
+          borderRadius: "var(--radius-sm)",
+          marginBottom: "14px",
+          fontSize: "13px",
+        }}
+      >
+        <div>
+          <strong>所属计划：</strong>计划 #{payload.plan_id}
+          {payload.candidate_id !== undefined && `（源自候选 #${payload.candidate_id}）`}
+        </div>
+        <div style={{ marginTop: "4px" }}>
+          <strong>核心目标：</strong>
+          <span>{payload.goal}</span>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {stages.map((item, index) => {
+          const isStageSelected = whole(index);
+          return (
+            <div
+              key={`${item.title}-${index}`}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-sm)",
+                padding: "12px",
+                background: isStageSelected ? "#fff" : "var(--bg-subtle)",
+              }}
+            >
+              <div className="flex-row gap-sm" style={{ marginBottom: "6px" }}>
+                <input
+                  type="checkbox"
+                  id={`stage-check-${proposal.id}-${index}`}
+                  checked={isStageSelected}
+                  onChange={() => toggleStage(index)}
+                  style={{ width: "16px", height: "16px" }}
+                />
+                <label
+                  htmlFor={`stage-check-${proposal.id}-${index}`}
+                  style={{ fontSize: "14px", fontWeight: 600, cursor: "pointer", margin: 0 }}
+                >
+                  阶段 {index + 1}：{item.title}
+                </label>
+              </div>
+
+              {item.why && (
+                <div style={{ fontSize: "12px", color: "var(--text-muted)", marginLeft: "24px", marginBottom: "4px" }}>
+                  <strong>设置依据：</strong>{item.why}
+                </div>
+              )}
+              <div style={{ fontSize: "12px", color: "var(--text-main)", marginLeft: "24px", marginBottom: "8px" }}>
+                <strong>阶段交付物：</strong>
+                {item.deliverable || <span style={{ color: "var(--text-muted)" }}>未指明</span>}
+              </div>
+
+              {(item.tasks ?? []).length > 0 && (
+                <div style={{ marginLeft: "24px", paddingTop: "6px", borderTop: "1px dashed var(--border)" }}>
+                  <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-muted)", marginBottom: "4px" }}>
+                    拆解任务项（可单独选择）：
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    {(item.tasks ?? []).map((task, taskIndex) => {
+                      const isTaskSelected = tickedTask(index, taskIndex);
+                      return (
+                        <div key={`${task.title}-${taskIndex}`} className="flex-row gap-sm">
+                          <input
+                            type="checkbox"
+                            id={`task-check-${proposal.id}-${index}-${taskIndex}`}
+                            checked={isTaskSelected}
+                            onChange={() => toggleTask(index, taskIndex)}
+                            style={{ width: "14px", height: "14px" }}
+                          />
+                          <label
+                            htmlFor={`task-check-${proposal.id}-${index}-${taskIndex}`}
+                            style={{ fontSize: "13px", fontWeight: 400, cursor: "pointer", margin: 0 }}
+                          >
+                            {task.title}
+                          </label>
+                          {task.due_date && (
+                            <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                              (建议到期日：{task.due_date})
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div
+        style={{
+          marginTop: "12px",
+          padding: "8px 12px",
+          background: "var(--primary-light)",
+          borderRadius: "var(--radius-sm)",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          fontSize: "12px",
+          color: "var(--primary)",
+        }}
+      >
+        <span>
+          <strong>当前选区：</strong>{tickedStages} / {stages.length} 个阶段，{tickedTaskCount} / {taskTotal} 件任务
+        </span>
+        <span style={{ color: "var(--text-muted)" }}>
+          同名已有阶段将就地复用并挂载新任务
+        </span>
+      </div>
+    </div>
   );
 }
