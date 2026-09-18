@@ -405,6 +405,104 @@ def submit_deliverable(
 
 # ---------- 落后量 ----------
 
+
+# 三类可改字段（决策 38）。交付物只属于阶段：它是「这个阶段交出了什么」，
+# 任务与周打卡上没有这个概念（T23 的判定只看阶段层的 deliverable）。
+EDITABLE_FIELDS: tuple[str, ...] = ("title", "deliverable", "due_date")
+
+
+def update_node_fields(
+    conn: sqlite3.Connection,
+    node_id: int,
+    *,
+    reason: str,
+    title: str | None = None,
+    deliverable: str | None = None,
+    due_date: str | None = None,
+    actor: str = "user",
+) -> dict[str, Any]:
+    """原地改一个**已经建好**的节点的字段（决策 38，2026-09-18 用户拍板）。
+
+    为什么是「原地改 + 一条流水」而不是台账「取代」：取代会让 id 变，报告与交付物
+    提交全指不到原来那条；而台账对 `plan_node` 本就明禁生命周期操作（决策 22——
+    节点的「不算数」由 `skipped` 表达，改字段不属于生命周期事件）。所以这里用
+    `ledger.log_event` 记一条 `change_type='update_fields'` 的流水（谁 / 何时 /
+    改前改后 / 理由），配一次原地 UPDATE——**id 与所有引用一个不动**。
+
+    规矩：只传要改的字段；**传空字符串表示清空**（`deliverable` / `due_date` 可以清，
+    `title` 不许清）；**理由必填**——台账回答不了「为什么改」的话，这条流水就是噪音；
+    一个字段都没真变就报错（不写噪音流水）。改标题同样过防重复闸。
+    """
+    cleaned_reason = str(reason or "").strip()
+    if not cleaned_reason:
+        raise PlanError("改节点字段必须写明理由——它进台账，回答「为什么改」")
+
+    node = get_node(conn, node_id)
+    if node is None:
+        raise PlanError(f"节点 id={node_id} 不存在")
+
+    wanted: dict[str, Any] = {}
+    if title is not None:
+        cleaned = str(title).strip()
+        if not cleaned:
+            raise PlanError("标题不能改成空的——想「不要它了」就跳过它，别留个没名字的节点")
+        wanted["title"] = cleaned
+    if deliverable is not None:
+        if node["level"] != "stage":
+            raise PlanError(
+                f"交付物只属于阶段，id={node_id} 是 {node['level']}；"
+                "任务与周打卡上的产出用报告说明"
+            )
+        wanted["deliverable"] = str(deliverable).strip() or None
+    if due_date is not None:
+        cleaned = str(due_date).strip()
+        if not cleaned:
+            wanted["due_date"] = None  # 清空：不带日期就不进落后量（决策 31）
+        else:
+            parsed = parse_date(cleaned)
+            if parsed is None:
+                raise PlanError(f"截止日期「{cleaned}」看不懂——写成 YYYY-MM-DD，或者传空字符串清掉它")
+            wanted["due_date"] = parsed.isoformat()
+    if not wanted:
+        raise PlanError("没有要改的字段：至少要给出 title / deliverable / due_date 里的一个")
+
+    # 只留真的变了的：一个字都没变就报错，免得台账被「改了等于没改」的流水灌满
+    changed = {
+        field: value for field, value in wanted.items() if node[field] != value
+    }
+    if not changed:
+        raise PlanError("这几个字段和现在一模一样，没什么可改的")
+
+    if "title" in changed:
+        # 改标题也要过同一道防重复闸：不然「改」就成了绕过它的后门
+        assert_no_open_duplicate(
+            conn, int(node["plan_id"]), str(node["level"]), changed["title"], node["parent_id"]
+        )
+
+    before = {field: node[field] for field in changed}
+    assignments = ", ".join(f"{field} = ?" for field in changed)
+    conn.execute(
+        f"UPDATE plan_node SET {assignments} WHERE id = ?",
+        (*changed.values(), node_id),
+    )
+    ledger.log_event(
+        conn,
+        "plan_node",
+        node_id,
+        "update_fields",
+        json.dumps(before, ensure_ascii=False),
+        json.dumps(changed, ensure_ascii=False),
+        cleaned_reason,
+        actor,
+    )
+    conn.commit()
+    return {
+        "node_id": node_id,
+        "changed": sorted(changed),
+        "before": before,
+        "after": changed,
+    }
+
 def parse_date(value: Any) -> date | None:
     """把 due_date / created_at 这类文本解析成日期；解析不了就当没有这个信息。"""
     text = str(value or "").strip()[:10]

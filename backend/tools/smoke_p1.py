@@ -1,4 +1,4 @@
-"""P1 闭环冒烟：一条命令走完「建计划 → 建阶段 → 建任务 → 打勾 → 交交付物 → 看落后量 → 看阶段完成」。
+"""P1 闭环冒烟：一条命令走完「建计划 → 建阶段 → 建任务 → 打勾 → 交交付物 → 看落后量 → 看阶段完成 → 改字段」。
 
 为什么要有它：手点 `/docs` 要五六次；复制 PowerShell 又会踩两个坑——
 `$` 被终端吃掉、中文按老编码发出去变乱码。这个脚本用标准库 `urllib` 直接发请求，
@@ -95,9 +95,11 @@ class Checker:
 
     def __init__(self) -> None:
         self.failures: list[str] = []
+        self.steps = 0
 
     def step(self, number: int, title: str, status: int, body: dict) -> None:
         summary = json.dumps(body, ensure_ascii=False)
+        self.steps += 1
         print(f"{number}) {title}\n   HTTP {status}  {summary[:160]}{'…' if len(summary) > 160 else ''}")
 
     def expect(self, label: str, actual: object, wanted: object) -> None:
@@ -197,13 +199,25 @@ def main() -> int:
         checker.expect("阶段完成判定仍在（finished=True）",
                        [item["finished"] for item in tree_after["stages"]], [True])
 
+        # T30 的写入口：原地改一个已经建好的节点（交付物、截止日、标题），id 不变
+        status, edited = request(base, "POST", f"/api/plan/nodes/{stage['id']}/fields", {
+            "deliverable": "一份能看的对照表", "reason": "冒烟：把交付物写具体",
+        })
+        checker.step(11, "改阶段交付物（T30：原地改 + 台账流水）", status, edited)
+        checker.expect("改字段回执列出改了哪些", edited["changed"], ["deliverable"])
+
+        status, refused = request(base, "POST", f"/api/plan/nodes/{stage['id']}/fields", {
+            "title": "阶段 · 冒烟", "reason": "   ",
+        })
+        checker.expect("改字段缺理由被拒（T30，理由只有空白 → 业务拒绝 400）", status, 400)
+
         print()
         if checker.failures:
             print(f"结论：{len(checker.failures)} 项不符合预期")
             for failure in checker.failures:
                 print(f"  - {failure}")
             return 1
-        print("结论：10 步全部符合预期，P1 闭环在这台机器上跑得通")
+        print(f"结论：{checker.steps} 步全部符合预期，P1 闭环在这台机器上跑得通")
         return 0
     finally:
         if server is not None:

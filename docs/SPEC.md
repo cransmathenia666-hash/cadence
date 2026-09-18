@@ -152,6 +152,7 @@
 | POST | `/api/plans/{id}/void` | 作废计划（T24 新增：台账 `void`＝**这件事根本不该做**，**理由必填**、**单向门**，从默认列表消失。只从进行中走——要作废一个暂停的，先 `/reopen` 再作废） |
 | POST | `/api/plans/{id}/pause` | 暂停计划（2026-09-18 T27 新增：`paused`＝暂时不做，**可逆的搁置**。理由可选、默认「暂时不做了」，可重复调用（幂等）；已收尾 / 已作废的回 400） |
 | POST | `/api/plans/{id}/reopen` | 把暂停 / 收尾的计划放回进行中（T27 新增：`paused` / `closed` → `active`，理由可选、默认「继续做」，进行中时幂等。**作废的不给重开**——单向门，要重新做就新建一个计划）。状态码口径与前三条计划路由一致：不存在 404、规则拒绝 400、正常 200，回执形状 `{plan_id, status, changed}` |
+| POST | `/api/plan/nodes/{id}/fields` | 改一个**已经建好**的节点（2026-09-18 T30 新增：标题 / 交付物 / 截止日；**原地改 + 台账一条 `update_fields` 流水**，**id 不变、报告与交付物引用不断**；理由必填、传空字符串表示清空、一个字段都没真变则 400。交付物只对阶段有效） |
 | POST | `/api/report` | 提交报告（状态 + 一句话 + 可选产物 / 资料评价。**2026-09-18 T29 起回执不再带 `proposal_id`**：阶段完成不再往下产「推进提案」，回执是 `{report_id, node_id, report_status, node_status_before, node_status}`） |
 | POST | `/api/requests` | 提交每轮输入（两种 `kind` 都实现：`evaluate` 判资料 / `search` 找方向；2026-09-17 T24 起 `search` 可带 `plan_id` = 这一轮针对哪个计划，不传即「新方向」。2026-09-18 T25 起响应多两个字段：`clarify`（追问槽位，**不落库**）与 `feedback_lines`（这次发进 prompt 的反馈流水）） |
 | GET | `/api/candidates` | 取候选清单（2026-09-16 实现：带状态与排序；不传 `request_id` 取最近一轮有候选的「找」） |

@@ -169,12 +169,13 @@
   - Files：`backend/app/plan.py`、`backend/app/proposals.py`、`backend/app/main.py`、`backend/tools/smoke_p1.py`、`docs/SPEC.md`（决策 28/29/30）、`frontend/app/judge/`、`frontend/app/blueprints/`、`frontend/app/proposals/page.tsx`、`frontend/components/judgment-view.tsx`、`frontend/lib/api.ts`
   - 实施记录（2026-09-18）：**先落规格再开工**——决策 28 收窄成三类（`material_judgment` 只记账 / `profile_change` 真写档案 / `plan_blueprint` 勾选建树），`stage_advance` 与 `plan_replan` 整类删除、落后的做法降级成计划页一句提醒；决策 29 改成「一件事一页」（`/candidates`、`/judge`、`/proposals`，蓝图单独一页 `/blueprints`）；决策 30 删掉「阶段完成即产推进提案」半句；另加**决策 38**（节点字段写入口，给 T30）。**存量处置**：真实库 5 条 pending 推进提案（#4–#8）走台账标 `rejected`、理由写明整类删除，pending 清零。**后端**：删两个生产者（`maybe_stage_advance_proposal` / `ensure_weekly_replan_proposal`）连同它的调用口、去重函数与只被它用的 `_next_stage`；三个动作与报告不再回 `proposal_id`（键留着恒为 null）；`plan_tree` 多带 `behind_reason` 与 `advice`（三个方向只是建议；判定本身留着给 P4 的周 job）；`decide` 去掉两个分支与 `option`（请求模型、路由、回执、前端一起去掉），**批准**老类型明确 400 而**驳回**仍可。**前端**：`/judge` 新页（四问输入 + 当次答案 + **只读历史**，历史走新接口 `GET /api/judgments` = `proposals.list_decided`）；`/blueprints` 新页（树 + 勾选，勾选收敛成规范形状、保留「当前勾选 N/M」）；`/proposals` 收紧成只装待裁定的两类；计划页显示落后提醒；`/report` 与 `/candidates` 的旧文案、各页导航跟着改。验证：`pytest -q` **301 passed**（删 14 条引用已删功能的用例，新增「阶段收尾不再产提案」「落后只出提醒」「老类型批准被拒但可驳回」）、`smoke_p1.py` **10 步全绿**（第 7 步期望改成「不再产提案」并顺带断言完成判定仍在）、lint/tsc exit=0。提交 `b41431e`（后端）、`86d120e`（前端）。**未覆盖**：浏览器走查归用户（两个新页第一次进要走一遍）。
 
-- [ ] **T30 节点字段写入口（改一个已经建好的节点）**
+- [x] **T30 节点字段写入口（改一个已经建好的节点）**
   - Acceptance：口径**已定**（2026-09-18 他选「第二条」）——**原地改字段 + 台账记一条流水**（谁、何时、改前改后、理由），**id 不变**；**不用「取代」**：取代会让 id 变、报告 / 交付物 / 引用全断，而且台账明禁对 `plan_node` 做生命周期操作（决策 22——节点的「不算数」由跳过表达，改字段不属于生命周期事件）。做出来要能改 `title` / `deliverable` / `due_date` 三个字段
   - 解锁：批准「重排」能真执行（挪截止日），计划页那块对话才能改东西而不只是往里加（今天有三处卡在这条：T26 的「同名阶段复用、交付物写不进去」、T14 的「重排只记方向」、T28 的「只说话与建议，不改计划结构」）
-  - 待确认：他此前说过计划页对话「只聊、不动计划」，这次只答了写入口的**留痕口径**——**开工前问一句「那块对话要不要真能改」**
+  - 待确认（**2026-09-18 已答**）：计划页那块对话**T30 之后接上「能改」**——他此前说的「聊是本体、改计划不是目的」是指当时不该顺手让对话写计划，不是永远不接
   - Verify：单测覆盖改字段留痕（改前改后进流水）、id 与引用不断（报告 / 交付物仍指得到）、缺理由报错、非节点对象拒绝；`pytest -q`（动了台账写入语义，加跑 `tools\smoke_p1.py`）
-  - Files：`backend/app/plan.py`、`backend/app/main.py`（一条路由）、`backend/tests/test_task_layer.py`、`docs/SPEC.md`（第 18 节加一条决策）
+  - Files：`backend/app/plan.py`、`backend/app/main.py`（一条路由）、`backend/tests/test_task_layer.py`、`backend/tools/smoke_p1.py`、`docs/SPEC.md`（决策 38 已随 T29 落盘 + 第 11 节）
+  - 实施记录（2026-09-18）：`plan.update_node_fields`——**原地改 + 一条台账流水**（`change_type='update_fields'`，before/after 是两个字段级的 JSON），配一次原地 `UPDATE`，**id 与所有引用一个不动**（这就是不选「取代」的原因：取代换 id，报告与交付物提交会全指不到；何况台账本就明禁对 `plan_node` 做生命周期操作）。规矩：只传要改的字段、**传空字符串表示清空**（交付物 / 截止日可清，标题不许清）、**理由必填**、一个字段都没真变则报错（不写噪音流水）；**改标题同样过防重复闸**（「改」不能成为绕过它的后门）；交付物只对阶段有效（任务与周打卡的产出用报告说明）；日期按 `YYYY-MM-DD` 校验。路由 `POST /api/plan/nodes/{id}/fields`（请求模型 `NodeFieldsIn`）。冒烟补第 11 步（改阶段交付物 + 缺理由被拒），并把结论改成按步数动态输出。验证：`pytest -q` **311 passed**（+10 条：id 不变与引用不断、流水留改前改后、挪截止日带动落后量、清空日期、缺理由 / 无改动 / 非法日期 / 任务给交付物被拒、改标题撞同名被拒、路由的 404/400 与回执）、`smoke_p1.py` **11 步全绿**。**未覆盖**：前端还没有「改字段」的入口按钮（这一轮按 T30 的范围只做后端）——T26 的「同名阶段复用、交付物写不进去」那条限制由此**在能力上解除**，但界面还不知道能用。
 
 ## P4 触达兜底
 

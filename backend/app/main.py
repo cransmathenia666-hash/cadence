@@ -281,6 +281,45 @@ def post_deliverable(
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+class NodeFieldsIn(BaseModel):
+    """改一个已经建好的节点的字段（决策 38：原地改 + 台账流水，id 不变）。
+
+    只传要改的字段；**传空字符串表示清空**（交付物 / 截止日可以清，标题不许清）。
+    """
+
+    title: str | None = Field(default=None, description="新的标题")
+    deliverable: str | None = Field(default=None, description="阶段要交的东西（只对阶段有效）")
+    due_date: str | None = Field(default=None, description="YYYY-MM-DD；空字符串 = 清掉日期（清了就不进落后量）")
+    reason: str = Field(min_length=1, description="为什么改——进台账，回答「为什么改」")
+
+
+@app.post("/api/plan/nodes/{node_id}/fields")
+def post_node_fields(
+    node_id: int, payload: NodeFieldsIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """改一个已经建好的节点（标题 / 交付物 / 截止日）。
+
+    这是 2026-09-18（T30）补上的那条写入口：在此之前只有「建节点」与「改状态」，
+    建好之后交付物写不进去、截止日挪不动——T26 的「同名阶段复用但交付物写不进去」
+    与 T14 的「重排提案只能记方向」都卡在这里。
+
+    **id 不变、引用不断**：走台账的一条 `update_fields` 流水（改前改后 + 理由），
+    不是「取代」。
+    """
+    _require_node(conn, node_id)
+    try:
+        return plan.update_node_fields(
+            conn,
+            node_id,
+            reason=payload.reason,
+            title=payload.title,
+            deliverable=payload.deliverable,
+            due_date=payload.due_date,
+        )
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.post("/api/report", status_code=201)
 def post_report(payload: ReportIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     """提交一条报告：状态四选一 + 一句话（必填），产物与资料评价可选。"""
