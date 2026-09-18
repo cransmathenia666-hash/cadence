@@ -883,7 +883,6 @@ export type ProposalDecision = {
     | "replan_recorded"
     | "profile_written"
     | "recorded_only";
-  option: string | null;
   /** 只在批准档案变更时有值：真写进档案的那一条。 */
   written: { id: number; category: string; content: string } | null;
   /** 只在批准蓝图时有值：这次真建了哪些节点，外加「没能写进去」那类实话。 */
@@ -899,12 +898,12 @@ export type ProposalDecision = {
  * 批准 / 驳回一条提案。
  *
  * 驳回**必须写理由**（缺理由后端回 400）；批准 `plan_replan` 必须从提案给的
- * 三个方向里选一个（`option`）。已裁定过回 409、不存在回 404。
+ * 已裁定过回 409、不存在回 404。（T29 起没有 `option`：需要选方向的那一类已删。）
  * 批准 `plan_blueprint` 时用 `selected` 给勾中的阶段 / 任务下标（见 `Selection`）。
  */
 export async function decideProposal(
   proposalId: number,
-  input: { approved: boolean; reason?: string; option?: string; selected?: string[] },
+  input: { approved: boolean; reason?: string; selected?: string[] },
 ): Promise<ProposalDecision> {
   return request<ProposalDecision>(`/api/proposals/${proposalId}/decide`, {
     method: "POST",
@@ -912,7 +911,6 @@ export async function decideProposal(
     body: JSON.stringify({
       approved: input.approved,
       reason: input.reason ?? null,
-      option: input.option ?? null,
       selected: input.selected ?? null,
     }),
   });

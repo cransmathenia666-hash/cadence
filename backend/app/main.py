@@ -653,14 +653,13 @@ def post_candidate_verdict(
 class ProposalDecideIn(BaseModel):
     """裁定一条提案。
 
-    `approved=False` 必须写理由（业务层判，缺理由回 400）。`option` 只在批准
-    `plan_replan` 时用：从提案给出的三个方向里选一个（`reduce_scope` / `postpone` /
-    `swap_deliverable`），选中的方向进台账——它回答「当时选了哪条出路」。
+    `approved=False` 必须写理由（业务层判，缺理由回 400）。
+
+    T29 起**没有 `option` 了**：唯一需要「选一个方向」的 `plan_replan` 已整类删除。
     """
 
     approved: bool = Field(description="true = 批准（可能带副作用），false = 驳回")
     reason: str | None = Field(default=None, description="驳回必填；批准时可选，都进台账")
-    option: str | None = Field(default=None, description="批准 plan_replan 时必填：选中的那个方向")
     selected: list[str] | None = Field(
         default=None,
         description=(
@@ -705,7 +704,6 @@ def post_proposal_decide(
             proposal_id,
             approved=payload.approved,
             reason=payload.reason,
-            option=payload.option,
             selected=payload.selected,
         )
     except proposals.ProposalNotFound as error:

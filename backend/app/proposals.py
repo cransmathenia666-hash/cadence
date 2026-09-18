@@ -117,7 +117,6 @@ def decide(
     *,
     approved: bool,
     reason: str | None = None,
-    option: str | None = None,
     selected: list[str] | None = None,
 ) -> dict[str, Any]:
     """裁定一条提案：批准（可选带方向 / 勾选）或驳回（必写理由）。
@@ -215,7 +214,6 @@ def decide(
         "kind": kind,
         "status": "accepted" if approved else "rejected",
         "effect": effect,
-        "option": None,  # T29：唯一要选方向的 kind（plan_replan）已删，这个键留着不动前端形状
         "built": built,
         "written": written,
     }
