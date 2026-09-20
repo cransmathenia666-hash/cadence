@@ -4,6 +4,8 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.13 变更（2026-09-20）**：新增并完成 P3.7（T34 候选的路径形状 / T35 阶段跳过 / T36 追问槽收口）——用户走查触发（「五个连续性的方案，不应该独立」、追问槽「有追问、没有输入框」）；方案见 `docs/候选路径与追问槽方案.md`，规格落 SPEC 决策 41 与 31/34/35/36 的修订。用户当日授权 `candidate` 加一列 `payload`；T36 走方案口径 A（加输入框）。
+
 **v0.11 变更（2026-09-18）**：新增并完成 T28（计划级对话——蓝图落地之后接着聊）——用户走查提的第 5 条；对应 SPEC 决策 37 与决策 6 的第二次修订。
 
 **v0.12 变更（2026-09-18）**：侧窗讨论后拍板两条待办——T29（提案瘦身与页面分家：判资料独立、蓝图待批独立、推进提案整类删）与 T30（节点字段写入口＝原地改 + 台账流水）；两条都要先动 SPEC 决策 28/29/30。
@@ -206,6 +208,28 @@
   - 实施记录（2026-09-20）：四种失败出口都是中文一句话，撞上限时明说「读过哪些、还没读哪些」（撞上限与一直不合格是两种，`agent_run.status` 分别记 `limit` / `failed`）；失败与中止都**不落提案**，你那句话仍留在对话里（再说一句就接着聊）。冒烟脚本 11 步全绿（它没走计划对话这条链，只有回归意义）。
   - **未做（按剥离策略）**：`profile_evidence` 表、`profile_change` 的新增/取代联合协议、来源与置信度与事实时间、档案页显示依据——全部属于被剥掉的记忆那一段，本阶段不做。
   - **走查归用户**：五步里剩下的四步（问「下一步先做什么」看它读了计划、追问「结合最近情况」看它按需读报告、要求改截止日确认前不变、用测试桩触发上限看页面说明缺口）。
+
+## P3.7 候选的路径形状与「不要」的出口（2026-09-20 定；方案见 `docs/候选路径与追问槽方案.md`）
+
+用户 2026-09-20 走查触发：他输入一个明确方向（「学 agent 开发怎么学」），「找」回了一条路上的五个先后步骤，却按五个互相竞争的方向摆出来——每条独立采纳/否决，而否决＝永久拉黑。他的原话：「五个连续性的方案，不应该独立」。同日他还指出追问槽「有追问、没有输入框」。三条一次收口，规格落 SPEC 决策 41（另修订 31/34/35/36 与第 11 节三条契约行）。**T36 的口径由他 2026-09-20 当场定夺：走方案里的口径 A（加输入框）**。
+
+- [x] **T34 候选的路径形状**
+  - Acceptance：① `providers/find.py` 的输出契约加必填 `shape`（`directions` / `path`）与 `steps`；提示词写清「只有当这几条明显是同一条路上的先后步骤时才用 path」。② `advisor` 校验新形状（形状缺失/取值不对、`path` 候选≠1 条或步骤不在 2–8、步骤缺 title 或 why、`directions` 却给 steps，一律判不合格带原因重试一次）。③ `path` 落**一行**伞候选，步骤进 `candidate.payload`（**新列**，用户当日授权；老库由 `db.init` 加列迁移补齐）。④ 采纳分支：`path` 采纳＝建伞阶段 + 回执带 `steps`；`blueprint` 的规划对话上下文加「步骤草案」段、`GET /api/plan-chat` 也带 `steps`。⑤ 契约：`GET /api/candidates` 对每条回 `shape` 与 `steps`（从 payload 解出、不外发原始 JSON）；`verdict` 回执带 `shape` 与 `steps`。⑥ 否决分支不变（否决伞候选＝永久禁区，**步骤不进禁区**）；决策 34 的过期按伞候选走。⑦ 清单页一张卡渲染 + 形状标签 + 只读步骤列表
+  - Verify：单测盯「path 只落一行伞候选且 payload 带 steps」「步骤条数越界 / 缺 why / path 却给多条候选 / directions 却给 steps 都判不合格」「否决后步骤名不进禁区」「采纳回执带 steps 且建出伞阶段」「老候选（无 payload）按 directions 渲染」「过期按伞候选走」「步骤草案进规划对话上下文」；`pytest -q`、`tools\smoke_p1.py`、前端 lint 与 tsc exit=0。真实模型效果与界面走查归用户
+  - Files：`backend/app/providers/find.py`、`backend/app/advisor.py`、`backend/app/blueprint.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/app/db.py`、`backend/tests/test_candidates.py`、`backend/tests/test_blueprint.py`、`backend/tests/test_plans.py`、`frontend/lib/api.ts`、`frontend/app/candidates/page.tsx`、`docs/SPEC.md`（决策 34/36 补充 + 第 11 节三条 + 新增决策 41）
+  - 实施记录（2026-09-20）：`FoundList` 加必填 `shape` 与 `steps`（`PathStep`：title / deliverable / why，title 与 why 走 strip 校验，空白不算给了）；`_shape_problem` 管形状与条数是否对得上；`_shape_and_steps` / `candidate_steps` 从 payload 解出形状与草案（解不开或老候选一律 `directions` + 空步骤）。落库只写一行伞候选，payload 只在 `path` 时写；`list_candidates` 把原始 JSON 换成解好的 `shape` / `steps` 再往外发。前端一张卡（形状标签 + 只读步骤列表 + 「采纳整条路 / 否决整条路」），对话区顶部列出草案当底稿。**真库已 `db.init` 补列**（`candidate.payload`），15 条老候选 payload 全为 NULL，按 directions 渲染
+
+- [x] **T35 阶段跳过**
+  - Acceptance：① `plan.py` 放开跳过层级（阶段也认，理由必填），完成判定与落后量按「跳过视同完成」口径（其下任务原样留着）；② 路由与请求模型照任务跳过形状（同一条 `/skip`）；③ 计划页阶段行加「跳过这一步」入口（与「改字段」并排，跳过的阶段给一句说明）；④ `api.ts` 加类型与函数
+  - Verify：单测盯「阶段跳过留痕、缺理由被拒」「跳过视同完成（`stage_finished` 为真）」「落后量不算它、当前阶段往后走」「周打卡不给跳」；`pytest -q`、lint/tsc exit=0。界面走查归用户
+  - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/test_task_layer.py`、`frontend/lib/api.ts`、`frontend/components/plan-tree.tsx`、`frontend/app/page.tsx`、`docs/SPEC.md`（决策 31 + 新增 41）
+  - 实施记录（2026-09-20）：新增 `plan.skip_node`（阶段与任务共用一条路，`SKIPPABLE_LEVELS` 里没有周打卡），`skip_task` 保留原口径（只认任务，转调 `skip_node`），`/skip` 路由改调 `skip_node`，回执多一个 `level` 字段。前端把 `onTask` 改名 `onNode`（阶段与任务共用同一个回调），阶段行加「跳过这一步」按钮与跳过后的说明行。跳过不需要新的落后量/完成判定改动——`node_lag_days` 对 `skipped` 本就返回 None，`stage_finished` 本就把 `skipped` 当终态
+
+- [x] **T36 追问槽收口**
+  - Acceptance：① **补真入口**（口径 A）：追问条下加输入框 + 「带着这个回答再问一轮」，提交时把「原问题 + 你的回答」拼成下一轮输入（追问不拼原问题，下一轮模型就丢了前提）；② **收紧问的范围**：提示词与校验都钉死——追问只问档案里缺的那一类事实、一句话能答（长度上限 + 不许换行 + 不许一次问好几件），问「这条路怎么走」判不合格；③ **问过的不再问**：已答的追问（问题 + 回答一句）进该轮的反馈流水行，后续轮次看得到，模型不得重复问同一事实；④ 文案把「追问槽 / 规划对话」各管一段说清
+  - Verify：单测盯「规划类追问判不合格并重试」「太长 / 多问号 / 换行的追问判不合格」「关于事实的追问照旧合格」「回答拼成下一轮输入」「已答的追问进反馈流水且 prompt 让模型别再问」「没有待答追问时不吞掉那句话」；`pytest -q`、lint/tsc exit=0
+  - Files：`backend/app/advisor.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/app/db.py`、`backend/tests/test_candidates.py`、`frontend/lib/api.ts`、`frontend/app/candidates/page.tsx`、`docs/SPEC.md`（决策 35 两条修订 + 新增 41）
+  - 实施记录（2026-09-20）：**追问改为落库**（`learning_request.clarify`，可空 JSON `{question, missing, answer}`）——T25 定的「不落库」挡着「问过的别再问」，因为反馈流水是从库里拼的；它不另立表，追问本就是「这一轮说过什么」的一部分。回答走 `POST /api/requests` 的可选新字段 `clarify_answer`：后端取同一计划归属下最近一轮待答的追问，把它标成已答，并把「原问题 + 我的回答」拼成这一轮的输入；**没有待答追问时**（页面刷新过、或已经答过一遍）那句话作为「补充」缀在 raw_text 后面，不吞掉。追问的判据加了三条：长度上限 60 字、不许换行、问号最多一个，「这条路怎么走」用明确说法表（先学哪 / 什么顺序 / 分几步 / 怎么排 / 取舍…）拦下——只收明确的规划说法，不收「先」「节奏」这类单独的词，免得误伤「你平时的作息节奏」。**真库已 `db.init` 补列**（`learning_request.clarify`）
 
 ## P4 触达兜底
 
