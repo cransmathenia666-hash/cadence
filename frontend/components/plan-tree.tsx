@@ -325,17 +325,20 @@ function DeliverableBlock({
 function StageItem({
   stage,
   busy,
-  onTask,
+  onNode,
   onDeliverable,
   onFields,
 }: {
   stage: Stage;
   busy: boolean;
-  onTask: (taskId: number, action: "check" | "skip", reason?: string) => void;
+  onNode: (nodeId: number, action: "check" | "skip", reason?: string) => void;
   onDeliverable: (stageId: number, url: string, note: string) => void;
   onFields: (nodeId: number, input: NodeFieldsInput) => void;
 }) {
   const { progress } = stage;
+  const [skipping, setSkipping] = useState(false);
+  const [skipReason, setSkipReason] = useState("");
+  const settled = stage.status === "done" || stage.status === "skipped";
 
   return (
     <div className={`stage-card ${stage.finished ? "stage-done" : ""}`}>
@@ -358,8 +361,56 @@ function StageItem({
           </div>
         </div>
 
-        <NodeFieldsEditor node={stage} busy={busy} withDeliverable onSave={onFields} />
+        <div className="flex-row gap-sm">
+          {/* 阶段跳过（T35）：已经建出来的这一步不做了——理由进台账，答「当时为什么没做」。
+              它旁边的「改字段」是另一件事（还想做，只是改说法）；这里是不要了。 */}
+          {!settled &&
+            (skipping ? (
+              <div className="flex-row gap-sm">
+                <input
+                  aria-label={`跳过阶段「${stage.title}」的理由`}
+                  value={skipReason}
+                  onChange={(event) => setSkipReason(event.target.value)}
+                  placeholder="跳过理由（必填）"
+                  style={{ width: "150px", fontSize: "12px", padding: "2px 6px" }}
+                />
+                <button
+                  type="button"
+                  className="danger sm"
+                  onClick={() => {
+                    setSkipping(false);
+                    onNode(stage.id, "skip", skipReason);
+                  }}
+                  disabled={busy || skipReason.trim() === ""}
+                >
+                  确认跳过
+                </button>
+                <button type="button" className="sm" onClick={() => setSkipping(false)} disabled={busy}>
+                  取消
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="sm"
+                onClick={() => {
+                  setSkipReason("");
+                  setSkipping(true);
+                }}
+                disabled={busy}
+              >
+                跳过这一步
+              </button>
+            ))}
+          <NodeFieldsEditor node={stage} busy={busy} withDeliverable onSave={onFields} />
+        </div>
       </div>
+
+      {stage.status === "skipped" && (
+        <div style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "8px" }}>
+          这一步已跳过（不算落后，也不再挡当前阶段推进）；理由记在台账里。下面的任务原样留着。
+        </div>
+      )}
 
       <div className="stage-content">
         <DeliverableBlock stage={stage} busy={busy} onAct={onDeliverable} />
@@ -373,7 +424,7 @@ function StageItem({
           ) : (
             <div>
               {stage.tasks.map((task) => (
-                <TaskItem key={task.id} task={task} busy={busy} onAct={onTask} onFields={onFields} />
+                <TaskItem key={task.id} task={task} busy={busy} onAct={onNode} onFields={onFields} />
               ))}
             </div>
           )}
@@ -406,14 +457,18 @@ function StageItem({
 export function PlanTreeView({
   tree,
   busy = false,
-  onTask = () => {},
+  onNode = () => {},
   onDeliverable = () => {},
   onFields = () => {},
   error = null,
 }: {
   tree: PlanTree;
   busy?: boolean;
-  onTask?: (taskId: number, action: "check" | "skip", reason?: string) => void;
+  /**
+   * 节点上的执行动作（打勾 / 跳过）。**阶段与任务共用这一个回调**——后端也是同一条路由，
+   * 差别只在跳过的节点是阶段还是任务（T35）。
+   */
+  onNode?: (nodeId: number, action: "check" | "skip", reason?: string) => void;
   onDeliverable?: (stageId: number, url: string, note: string) => void;
   onFields?: (nodeId: number, input: NodeFieldsInput) => void;
   error?: string | null;
@@ -484,7 +539,7 @@ export function PlanTreeView({
                 key={stage.id}
                 stage={stage}
                 busy={busy}
-                onTask={onTask}
+                onNode={onNode}
                 onDeliverable={onDeliverable}
                 onFields={onFields}
               />

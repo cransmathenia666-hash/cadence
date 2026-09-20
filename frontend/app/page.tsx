@@ -12,7 +12,7 @@ import {
   listPlans,
   pausePlan,
   reopenPlan,
-  skipTask,
+  skipNode,
   submitDeliverable,
   updateNodeFields,
   voidPlan,
@@ -89,7 +89,8 @@ export default function Home() {
         <div>
           <h1>当前计划</h1>
           <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
-            方向跟踪与三级结构任务落实。节点字段原地可改，已达标阶段可直接交交付物。
+            方向跟踪与三级结构任务落实。节点字段原地可改，已达标阶段可直接交交付物，
+            不要哪一步就打勾跳过它——跳过只留一句理由，不进永久禁区。
           </p>
         </div>
         {acting && (
@@ -340,8 +341,8 @@ export default function Home() {
           tree={tree}
           busy={acting}
           error={actionError}
-          onTask={(taskId, action, reason) =>
-            run(() => (action === "check" ? checkTask(taskId) : skipTask(taskId, reason ?? "")))
+          onNode={(nodeId, action, reason) =>
+            run(() => (action === "check" ? checkTask(nodeId) : skipNode(nodeId, reason ?? "")))
           }
           onDeliverable={(stageId, url, note) => run(() => submitDeliverable(stageId, url, note))}
           onFields={(nodeId, input) => run(() => updateNodeFields(nodeId, input))}

@@ -5,6 +5,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import {
   ApiError,
+  createPlan,
   findCandidates,
   generateBlueprint,
   getPlanChat,
@@ -16,6 +17,7 @@ import {
   type CandidateList,
   type ChatMessage,
   type FindResult,
+  type PathStep,
   type PlanChatView,
   type PlanSummary,
   type ProfileView,
@@ -46,6 +48,10 @@ type Row = {
   rejectReason: string | null;
   basis: number[] | null;
   planId: number | null;
+  /** 这一轮给的是一条路（`path`）还是几个方向（`directions`）——T34。 */
+  shape: string;
+  /** 路径形状下的分步草案；方向形状下是空数组。 */
+  steps: PathStep[];
 };
 
 function rowsFromFind(found: FindResult): Row[] {
@@ -60,6 +66,8 @@ function rowsFromFind(found: FindResult): Row[] {
     rejectReason: null,
     basis: item.profile_item_ids,
     planId: found.plan_id,
+    shape: found.shape,
+    steps: found.steps,
   }));
 }
 
@@ -75,6 +83,8 @@ function rowsFromStored(stored: CandidateList): Row[] {
     rejectReason: item.reject_reason,
     basis: null,
     planId: item.plan_id,
+    shape: item.shape,
+    steps: item.steps,
   }));
 }
 
@@ -244,6 +254,33 @@ function ChatBox({
       )}
 
       <div className="chat-container">
+        {view !== null && view.steps.length > 0 && (
+          <div
+            style={{
+              background: "var(--bg-subtle)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-sm)",
+              padding: "10px 12px",
+              marginBottom: "10px",
+              fontSize: "12px",
+            }}
+          >
+            <strong>这一步的底稿：它当时给的先后步骤</strong>
+            <span style={{ color: "var(--text-muted)" }}>
+              （草案，不是成品——要在哪儿加、合并、砍掉，直接跟它说）
+            </span>
+            <ol style={{ paddingLeft: "20px", margin: "6px 0 0" }}>
+              {view.steps.map((step, index) => (
+                <li key={index} style={{ marginBottom: "2px" }}>
+                  {step.title}
+                  {step.deliverable && (
+                    <span style={{ color: "var(--text-muted)" }}>｜要交：{step.deliverable}</span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
         {view !== null && view.messages.length === 0 && (
           <div style={{ textAlign: "center", color: "var(--text-muted)", padding: "16px 0" }}>
             先聊清楚你的时间投入、首选切入点与验收目标，聊透后再出蓝图。
@@ -306,6 +343,9 @@ export default function CandidatesPage() {
   const [fresh, setFresh] = useState<FindResult | null>(null);
   const [stored, setStored] = useState<CandidateList | null>(null);
   const [askError, setAskError] = useState<string | null>(null);
+  // T36：回答追问的那句话。提交时后端把它与**原问题**拼成下一轮输入（不拼上原问题，
+  // 下一轮模型就丢了前提），并把这条追问标成「已答」——后续轮次不再重复问同一件事。
+  const [clarifyAnswer, setClarifyAnswer] = useState("");
 
   const [verdicting, setVerdicting] = useState(false);
   const [verdictError, setVerdictError] = useState<string | null>(null);
@@ -315,7 +355,16 @@ export default function CandidatesPage() {
 
   const [adoptingId, setAdoptingId] = useState<number | null>(null);
   const [adoptPlanChoice, setAdoptPlanChoice] = useState("");
+  // 「新方向」那类候选没有自带归属，采纳时要指明落点：选一个现有计划，或者干脆就地新建一个
+  // （2026-09-20：原先只给「选现有的」，逼人先跳去新建页再回来，而这是最常见的动作）。
+  const [adoptMode, setAdoptMode] = useState<"existing" | "new">("existing");
+  const [newPlanGoal, setNewPlanGoal] = useState("");
+  // 刚建出来的那个计划号：采纳那一步万一失败，用它告诉人「计划没白建，再点一次采纳就行」
+  const [freshPlanId, setFreshPlanId] = useState<number | null>(null);
   const [landingPlans, setLandingPlans] = useState<Record<number, number>>({});
+  // 这一批「找」出来的候选刚被裁定的结果：`fresh` 那份清单是当刻的快照（状态恒为 proposed），
+  // 裁定完不刷新它就会一直显示「待裁定」、按钮也还在——看着像没生效。这里就地覆盖状态。
+  const [decidedNow, setDecidedNow] = useState<Record<number, string>>({});
   const [chattingId, setChattingId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -332,18 +381,57 @@ export default function CandidatesPage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await ask(rawText, null);
+  }
+
+  /**
+   * 跑一轮「找」。`clarifyAnswer` 传了就是「带着这个回答再问一轮」——
+   * 后端会把它与上一轮的原问题拼成这一轮的输入，并让那一轮不再重复问同一件事。
+   */
+  async function ask(text: string, clarifyAnswer: string | null) {
     setAsking(true);
     setAskError(null);
     setFresh(null);
     try {
-      const found = await findCandidates(rawText, planChoice === "" ? undefined : Number(planChoice));
+      const found = await findCandidates(
+        text,
+        planChoice === "" ? undefined : Number(planChoice),
+        clarifyAnswer,
+      );
       setFresh(found);
       setStored(null);
+      setClarifyAnswer("");
     } catch (cause) {
       setAskError(cause instanceof ApiError ? cause.message : "请求候选清单失败，原因不明");
     } finally {
       setAsking(false);
     }
+  }
+
+  /** 就地新建一个计划，并立刻把这条候选采纳进去（两步：先建空计划 → 再走原来的采纳）。 */
+  async function onAdoptIntoNewPlan(candidateId: number, title: string) {
+    const goal = newPlanGoal.trim() || title;
+    setVerdicting(true);
+    setVerdictError(null);
+    setFreshPlanId(null);
+    let createdId: number | null = null;
+    try {
+      const created = await createPlan(goal);
+      createdId = created.id;
+      setFreshPlanId(created.id);
+      setPlans(await listPlans()); // 下拉里立刻能选到它
+      // 落点切回「选现有计划」并选中刚建的这个：万一接下来那步失败，你只需再点一次确认，
+      // 不会又去新建一遍
+      setAdoptMode("existing");
+      setAdoptPlanChoice(String(created.id));
+      setNewPlanGoal("");
+    } catch (cause) {
+      setVerdictError(messageOf(cause, "新建计划失败，原因不明"));
+      setVerdicting(false);
+      return;
+    }
+    // 走到这里计划已经建好了：这一步就算失败也说清「计划没白建」，别让人以为白点了一下
+    await onVerdict(candidateId, true, undefined, createdId);
   }
 
   async function onVerdict(candidateId: number, accepted: boolean, reason?: string, explicitPlanId?: number) {
@@ -365,6 +453,10 @@ export default function CandidatesPage() {
       if (done.plan_id !== null && done.plan_id !== undefined) {
         setLandingPlans((previous) => ({ ...previous, [candidateId]: Number(done.plan_id) }));
       }
+      setDecidedNow((previous) => ({
+        ...previous,
+        [candidateId]: accepted ? "accepted" : "rejected",
+      }));
       setRejectingId(null);
       setAdoptingId(null);
       setStored(await listCandidates());
@@ -375,9 +467,18 @@ export default function CandidatesPage() {
     }
   }
 
-  const rows: Row[] | null =
+  const listed: Row[] | null =
     fresh !== null ? rowsFromFind(fresh) : stored !== null ? rowsFromStored(stored) : null;
+  const rows: Row[] | null =
+    listed === null
+      ? null
+      : listed.map((row) =>
+          decidedNow[row.id] === undefined ? row : { ...row, status: decidedNow[row.id] },
+        );
   const pendingCount = (rows ?? []).filter((row) => row.status === "proposed").length;
+  // 一轮里形状是一致的（后端只产出一种）：`path` 时整份清单就是**一张卡**。
+  // 从 rows 上取而不是只看 fresh——已落库的那一轮（刷新页面后）也要按同一口径显示。
+  const isPath = rows !== null && rows.length > 0 && rows[0].shape === "path";
 
   return (
     <div>
@@ -455,6 +556,12 @@ export default function CandidatesPage() {
         <div className="alert alert-danger" style={{ marginBottom: "16px" }}>
           <strong>裁定失败：</strong>
           {verdictError}
+          {freshPlanId !== null && (
+            <div style={{ marginTop: "4px" }}>
+              新计划已经建好了（计划 #{freshPlanId}），落点也已帮你选中它——
+              再点一次「确认归入该计划」就行，不用重填、不会重复建。
+            </div>
+          )}
         </div>
       )}
 
@@ -465,21 +572,55 @@ export default function CandidatesPage() {
             <span>{fresh.clarify.question}</span>
           </div>
           <small style={{ display: "block", marginTop: "4px" }}>
-            补充此信息后再问一轮，推荐将更契合你的实际情况。
+            这是<strong>关于你的一件事</strong>（档案里缺的那类），一句话就能答。
+            答完再问一轮，排序会贴得更准；问过的事它不会再问第二遍。
           </small>
+          <form
+            onSubmit={(event: FormEvent<HTMLFormElement>) => {
+              event.preventDefault();
+              void ask(rawText, clarifyAnswer);
+            }}
+            className="flex-row gap-sm"
+            style={{ marginTop: "8px" }}
+          >
+            <input
+              aria-label="对追问的回答"
+              value={clarifyAnswer}
+              onChange={(event) => setClarifyAnswer(event.target.value)}
+              placeholder="一句话回答，例如：每周大概 5 小时"
+              style={{ flex: 1 }}
+              disabled={asking}
+            />
+            <button
+              type="submit"
+              className="primary sm"
+              disabled={asking || clarifyAnswer.trim() === ""}
+            >
+              {asking ? "再问一轮中…" : "带着这个回答再问一轮"}
+            </button>
+          </form>
         </div>
       )}
 
       {rows !== null && rows.length > 0 && (
         <div style={{ marginTop: "20px" }}>
           <div className="flex-between" style={{ marginBottom: "12px" }}>
-            <h2>推荐候选清单（{rows.length} 条，待裁定 {pendingCount} 条）</h2>
-            <small>采纳将新建阶段，否决将永久拉黑</small>
+            <h2>
+              {isPath
+                ? `这一轮它给的是一条路（1 张卡，含 ${rows[0]?.steps.length ?? 0} 个先后步骤）`
+                : `推荐候选清单（${rows.length} 条，待裁定 ${pendingCount} 条）`}
+            </h2>
+            <small>
+              {isPath
+                ? "整条采纳或整条否决；步骤的去留在出蓝图时定"
+                : "采纳将新建阶段，否决将永久拉黑"}
+            </small>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             {rows.map((row) => {
               const isDecided = row.status !== "proposed";
+              const isRowPath = row.shape === "path";
               return (
                 <div key={row.id} className="card" style={{ margin: 0, padding: "16px 20px" }}>
                   <div className="flex-between" style={{ marginBottom: "6px" }}>
@@ -489,6 +630,10 @@ export default function CandidatesPage() {
                       {row.isRecommended && (
                         <span className="badge badge-done">建议优先从这开始</span>
                       )}
+                      {/* 形状标签（T34）：它选错形状（把一条路上的几步摆成几个方向）你一眼能看见 */}
+                      <span className="badge badge-not_started">
+                        {isRowPath ? "这一轮它给的是一条路" : "这一轮它给的是几个方向"}
+                      </span>
                     </div>
                     <span className="badge badge-not_started">
                       {STATUS_LABELS[row.status] ?? row.status}
@@ -505,6 +650,44 @@ export default function CandidatesPage() {
                     {row.rejectReason && ` · 否决理由：${row.rejectReason}`}
                   </div>
 
+                  {/* 路径形状：步骤是**草案**，只读——它们不是候选，没有单独的采纳/否决按钮。
+                      要收「这一步先不做」有另外两个出口（蓝图不勾 / 计划里跳过），都不进禁区。 */}
+                  {isRowPath && row.steps.length > 0 && (
+                    <div
+                      style={{
+                        background: "var(--bg-subtle)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-sm)",
+                        padding: "10px 14px",
+                        marginBottom: "12px",
+                      }}
+                    >
+                      <div style={{ fontSize: "12px", fontWeight: 600, marginBottom: "6px" }}>
+                        这条路上的先后步骤（草案，不单独裁定）：
+                      </div>
+                      <ol style={{ paddingLeft: "20px", margin: 0, fontSize: "13px" }}>
+                        {row.steps.map((step, index) => (
+                          <li key={index} style={{ marginBottom: "6px" }}>
+                            <strong>{step.title}</strong>
+                            {step.deliverable && (
+                              <span style={{ color: "var(--text-muted)" }}>｜要交：{step.deliverable}</span>
+                            )}
+                            {step.why && (
+                              <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                                {step.why}
+                              </div>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                      <small style={{ color: "var(--text-muted)" }}>
+                        采纳就是「这条路我走」。哪一步这轮不建，在出蓝图时不勾就行；
+                        建出来之后不想要，在计划页「跳过这一步」——两步都不进永久禁区，
+                        下一版蓝图里还捡得回来。
+                      </small>
+                    </div>
+                  )}
+
                   {isDecided ? (
                     <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
                       {notes[row.id] ?? "该候选已有最终结论。"}
@@ -514,12 +697,25 @@ export default function CandidatesPage() {
                       <button
                         type="button"
                         className="primary sm"
-                        onClick={() =>
-                          row.planId === null ? setAdoptingId(row.id) : onVerdict(row.id, true)
-                        }
+                        onClick={() => {
+                          if (row.planId !== null) {
+                            void onVerdict(row.id, true);
+                            return;
+                          }
+                          // 打开落点选择：默认还是「选现有计划」，新建那个框先拿候选标题垫上
+                          setAdoptMode("existing");
+                          setAdoptPlanChoice("");
+                          setNewPlanGoal(row.title);
+                          setFreshPlanId(null);
+                          setAdoptingId(row.id);
+                        }}
                         disabled={verdicting}
                       >
-                        {row.planId === null ? "采纳（选择归属计划）" : "采纳（落入计划建阶段）"}
+                        {row.planId === null
+                          ? "采纳（选择归属计划）"
+                          : isRowPath
+                            ? "采纳整条路（建伞阶段）"
+                            : "采纳（落入计划建阶段）"}
                       </button>
 
                       {rejectingId === row.id ? (
@@ -527,7 +723,9 @@ export default function CandidatesPage() {
                           <input
                             value={rejectReason}
                             onChange={(event) => setRejectReason(event.target.value)}
-                            placeholder="否决理由（必填，进入永久禁区）"
+                            placeholder={
+                              isRowPath ? "否决整条路的理由（必填，进永久禁区）" : "否决理由（必填，进入永久禁区）"
+                            }
                             style={{ width: "220px", fontSize: "12px" }}
                           />
                           <button
@@ -557,7 +755,7 @@ export default function CandidatesPage() {
                           }}
                           disabled={verdicting}
                         >
-                          否决
+                          {isRowPath ? "否决整条路" : "否决"}
                         </button>
                       )}
                     </div>
@@ -568,34 +766,84 @@ export default function CandidatesPage() {
                       <label style={{ fontSize: "12px", fontWeight: 600 }}>
                         请指定该候选采纳后要落到哪个计划：
                       </label>
-                      <div className="flex-row gap-sm">
-                        <select
-                          value={adoptPlanChoice}
-                          onChange={(event) => setAdoptPlanChoice(event.target.value)}
-                        >
-                          <option value="">选择现有计划…</option>
-                          {plans.map((p) => (
-                            <option key={p.id} value={p.id}>
-                              计划 #{p.id}：{p.goal}
-                            </option>
-                          ))}
-                        </select>
+                      <div className="flex-row gap-sm" style={{ margin: "6px 0" }}>
                         <button
                           type="button"
-                          className="primary sm"
-                          onClick={() => onVerdict(row.id, true, undefined, Number(adoptPlanChoice))}
-                          disabled={verdicting || adoptPlanChoice === ""}
+                          className={adoptMode === "existing" ? "primary sm" : "sm"}
+                          onClick={() => setAdoptMode("existing")}
                         >
-                          确认归入该计划
+                          选一个现有计划
                         </button>
                         <button
                           type="button"
-                          className="sm"
-                          onClick={() => setAdoptingId(null)}
+                          className={adoptMode === "new" ? "primary sm" : "sm"}
+                          onClick={() => setAdoptMode("new")}
                         >
-                          取消
+                          新建一个计划
                         </button>
                       </div>
+
+                      {adoptMode === "existing" ? (
+                        <div className="flex-row gap-sm">
+                          <select
+                            value={adoptPlanChoice}
+                            onChange={(event) => setAdoptPlanChoice(event.target.value)}
+                          >
+                            <option value="">选择现有计划…</option>
+                            {plans.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                计划 #{p.id}：{p.goal}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="primary sm"
+                            onClick={() => onVerdict(row.id, true, undefined, Number(adoptPlanChoice))}
+                            disabled={verdicting || adoptPlanChoice === ""}
+                          >
+                            确认归入该计划
+                          </button>
+                          <button
+                            type="button"
+                            className="sm"
+                            onClick={() => setAdoptingId(null)}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex-row gap-sm">
+                            <input
+                              value={newPlanGoal}
+                              onChange={(event) => setNewPlanGoal(event.target.value)}
+                              placeholder="新计划的目标（不填就用这条候选的标题）"
+                              style={{ flex: 1 }}
+                              disabled={verdicting}
+                            />
+                            <button
+                              type="button"
+                              className="primary sm"
+                              onClick={() => onAdoptIntoNewPlan(row.id, row.title)}
+                              disabled={verdicting}
+                            >
+                              {verdicting ? "正在建…" : "新建并采纳"}
+                            </button>
+                            <button
+                              type="button"
+                              className="sm"
+                              onClick={() => setAdoptingId(null)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                          <small style={{ display: "block", marginTop: "4px", color: "var(--text-muted)" }}>
+                            会先建一个空计划，再把这条候选按老规矩落成它下面的第一个阶段
+                            ——两件事连着做完，不用跳去新建页。
+                          </small>
+                        </>
+                      )}
                     </div>
                   )}
 

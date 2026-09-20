@@ -608,11 +608,39 @@ export type FoundCandidate = {
   profile_item_ids: number[];
 };
 
+/**
+ * 一条路上的一个先后步骤（T34：SPEC 决策 41）。
+ *
+ * 形状取蓝图阶段的子集（去掉 `tasks`）——「这一步下面拆几件活」是规划对话与蓝图勾选
+ * 时的事，「找」只说到「有这一步、它交什么」这一层。
+ *
+ * **它不是候选**：不单独裁定、不进禁区。要收「这一步先不做」，去蓝图勾选（不建）
+ * 或计划里跳过（建了之后收回）。
+ */
+export type PathStep = {
+  title: string;
+  /** 这一步交出什么（可空）。 */
+  deliverable: string;
+  /** 为什么它必须排在这个位置。 */
+  why: string;
+};
+
+/**
+ * 这一轮「找」给的**形状**（T34）：
+ * - `directions`：3–5 条**互相竞争**的方向，逐条采纳 / 否决（否决＝永久禁区）；
+ * - `path`：**一条路**——1 条伞候选 + 2–8 个先后步骤，整条裁定一次。
+ */
+export type CandidateShape = "directions" | "path";
+
 export type FindResult = {
   request_id: number;
   kind: "search";
   /** 这一轮针对哪个计划；null = 「新方向（不属于任何计划）」（SPEC 决策 33）。 */
   plan_id: number | null;
+  /** 这一轮给的是一条路还是几个方向（T34）。 */
+  shape: CandidateShape;
+  /** 步骤草案：只有 `shape === "path"` 时非空。 */
+  steps: PathStep[];
   /** 与 `candidates` 一一对应、同顺序：裁决时要用它们。 */
   candidate_ids: number[];
   /** 顺序即优先级（后端已按 rank 排好，前端不再自己排）。 */
@@ -622,7 +650,8 @@ export type FindResult = {
   start_reason: string;
   /**
    * 追问槽位（SPEC 决策 35 ②）：模型觉得档案里缺了某类信息时先问的一句。
-   * **不落库**——只在这次响应里出现，你回答的那句话就是下一轮的输入。
+   * 它是**关于你的事实**（一句话能答）——「这条路怎么走」是采纳之后规划对话的事。
+   * 回答走 `findCandidates` 的第三个参数，后端会把它与这句原问题拼成下一轮输入。
    */
   clarify: { question: string; missing: string } | null;
   /** 候选来源自述。`networked: false` = 甲档（不联网，只给路线建议）。 */
@@ -636,16 +665,29 @@ export type FindResult = {
 };
 
 /**
- * 提交「我不知道该学什么」，拿回 3–5 条带排序的候选。
+ * 提交「我不知道该学什么」，拿回候选（`directions` 时 3–5 条，`path` 时 1 条伞候选 + 步骤）。
  *
  * 走的是同一个 `POST /api/requests`，只是 `kind` 不同。落成的是 `proposed` 候选，
  * 等你在界面上采纳 / 否决——**否决过的标题会成为下次的禁区**。
+ *
+ * `clarifyAnswer` 是回答上一轮追问的那句话（T36）：后端把它与**原问题**拼成这一轮的输入
+ * （不拼上原问题，下一轮模型就丢了前提），并把那条追问标成「已答」进反馈流水，
+ * 后续轮次不再重复问同一件事。
  */
-export async function findCandidates(rawText: string, planId?: number | null): Promise<FindResult> {
+export async function findCandidates(
+  rawText: string,
+  planId?: number | null,
+  clarifyAnswer?: string | null,
+): Promise<FindResult> {
   return request<FindResult>("/api/requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind: "search", raw_text: rawText, plan_id: planId ?? null }),
+    body: JSON.stringify({
+      kind: "search",
+      raw_text: rawText,
+      plan_id: planId ?? null,
+      clarify_answer: clarifyAnswer ?? null,
+    }),
   });
 }
 
@@ -662,6 +704,9 @@ export type CandidateRow = {
   reject_reason: string | null;
   /** 这一轮针对的计划；null = 「新方向」。采纳时落点看它（没有就得显式选）。 */
   plan_id: number | null;
+  /** 形状与步骤草案（T34）。2026-09-20 之前落的老候选是 `directions` + 空步骤。 */
+  shape: CandidateShape;
+  steps: PathStep[];
 };
 
 export type CandidateList = {
@@ -690,6 +735,10 @@ export type VerdictResult = {
   plan_id: number | null;
   /** 自动建出的阶段节点 id。否决时为 null。 */
   node_id: number | null;
+  /** 这条候选的形状（T34）。 */
+  shape: CandidateShape;
+  /** 采纳一条**路径**候选时带回来的步骤草案；否决时是空数组。 */
+  steps: PathStep[];
 };
 
 /**
@@ -699,6 +748,7 @@ export type VerdictResult = {
  * 这是「你否决过的候选不再出现」的入口。
  * 采纳（2026-09-17 起）会在最新 active 计划里自动建一个同名阶段；落不了阶段
  * （没有 active 计划、有同名未收尾阶段）回 409，候选保持 proposed 可重试。
+ * 采纳一条路径候选（T34）时回执带 `steps` —— 那是这条路的分步草案，进规划对话当底稿。
  */
 export async function verdictCandidate(
   candidateId: number,
@@ -729,8 +779,15 @@ export async function checkTask(nodeId: number): Promise<TaskActionResult> {
   return request<TaskActionResult>(`/api/plan/nodes/${nodeId}/check`, { method: "POST" });
 }
 
-/** 跳过任务：跳过算完成的一种，但**必须写一句理由**（缺理由回 400）。 */
-export async function skipTask(nodeId: number, reason: string): Promise<TaskActionResult> {
+/**
+ * 跳过：跳过算完成的一种，但**必须写一句理由**（缺理由回 400）。
+ *
+ * **阶段与任务都能跳**（T35：SPEC 决策 41）——「不要了」在三层各有出口：方向层否决＝
+ * 永久拉黑（太重）、蓝图不勾＝本版不建、这里＝**已经建出来的这一步不做了**（留一句理由，
+ * 答「当时为什么没做」）。周打卡不给跳（它是节奏节点，报告里本来就有「跳过」这个状态）。
+ * 阶段跳过时其下的任务原样留着（它们是痕迹），落后量不再算它，阶段完成判定直接满足。
+ */
+export async function skipNode(nodeId: number, reason: string): Promise<TaskActionResult> {
   return request<TaskActionResult>(`/api/plan/nodes/${nodeId}/skip`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -991,6 +1048,11 @@ export type PlanChatView = {
   max_turns: number;
   /** 聊过至少一轮才能出方案（决策 36：不是一次性静默生成）。 */
   can_generate: boolean;
+  /**
+   * 这条候选自带的**步骤草案**（T34，只有路径候选有）：对话区顶部把它列出来，
+   * 让你看得见它在照哪份底稿聊。刷新页面也还在（后端从候选 payload 解，不靠当刻响应）。
+   */
+  steps: PathStep[];
   /** 这个计划当前待裁定的蓝图（同一计划同时只有一份）。 */
   blueprint: { id: number; created_at: string } | null;
 };
