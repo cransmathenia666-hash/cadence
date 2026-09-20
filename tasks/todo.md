@@ -186,6 +186,26 @@
   - Verify：单测盯五件事——一次最多一条建议、字段不合法判不合格、节点不存在（或不属于本计划）要拒、批准后节点真改了且**编号不变**、忽略什么都没写；`pytest -q` + `tools\smoke_p1.py`（动了契约与台账写入语义）；前端 lint 与 tsc exit=0。真实模型效果与界面走查归用户
   - Files：`backend/app/plan_change.py`（新）、`backend/app/dialogue.py`、`backend/app/proposals.py`、`backend/app/main.py`、`backend/tests/test_dialogue.py`、`backend/tests/test_proposals.py`、`frontend/components/plan-dialogue.tsx`、`frontend/app/proposals/page.tsx`、`frontend/lib/api.ts`、`docs/SPEC.md`（决策 6 第三次修订 + 37 修订 + 新增 39 + 第 11 节）
   - 实施记录（2026-09-19）：后端完工（`plan_change.py`，328 passed / 冒烟 11 步全绿）；前端完工（`plan-dialogue.tsx` 确认条与就地刷新、`/proposals` 第四类 `plan_change` 渲染与裁定回执、`lib/api.ts` 类型契约同步）；lint 与 tsc 校验通过。全部交付。
+  - **走查后放宽「一次一件」（2026-09-19 用户真实模型走查后拍板）**：他在真模型上跑了一遍，原话是「一次只能增加一个阶段或者是任务……要增加一个阶段，阶段里面是包含着多个任务的，这极其的不自然」。查到真库里的现场：他让模型给「开发日志上线」配任务，模型按当时提示词里的「一轮最多一条 + 一次只加一件」**顶了三轮嘴**（原话「一轮就一条，这是规矩，不是我不给」），他连点五次确认才排出一个阶段（提案 #11–#15），中途还因为防重名只认字面而落了两组近似重复的任务（「选定一个平台开号，发出第一条」≈「开号并发出第一条」；「录一条两账号互不可见的屏」≈「录制两账号互不可见的演示视频」）。**改法**：`add_task` / `add_stage` 收 `tasks`（1–5 件，`plan_change.MAX_TASKS`），加阶段时**连着它下面的任务一起建**——形状照蓝图那条路（`blueprint.apply_build` 本来就是阶段带任务）；提示词里那句「一次只加一件」删掉，改成「他要是说『排一下』就把该排的一次排完」；旧形状 `task` 仍然收。**上限仍在**：一条建议最多 5 件、批内重名拦、与已有任务撞名仍拒。回执从 `added` 单条改成 `added.nodes`（按建的顺序列出）。验证：`pytest -q` **332 passed**（+4 条：批量任务、阶段带任务、超 5 件判不合格、批内重名判不合格）、lint/tsc exit=0。**未做**：真库那两组重复任务没动（要收尾得像产品规矩那样用「跳过 + 理由」，等用户点头）。
+
+## P3.6 Agent 核心（2026-09-20 定；方案见 `docs/agent落地.md`，**按用户同日定的「剥离记忆系统」那一版执行**）
+
+原始方案分三段（循环 / 工具 / 上下文管理 + 长期记忆 + 界面收口）；用户 2026-09-20 追加的执行策略把**记忆那一整段剥掉**：不新增 `profile_evidence`、不扩 `profile_change`、不碰档案页与现有提炼流程——现有长期档案只作为 Agent 的一个**只读**信息来源。剩下的三块（循环、工具、上下文管理）与失败收口落成下面两条。
+
+- [x] **T32 Agent 会主动读取（受控工具循环 + 四个只读工具 + `agent_run`）**
+  - Acceptance：① 新增 `backend/app/agent_runtime.py`（统一循环）与 `backend/app/agent_tools.py`（四个只读工具：`read_current_plan` / `read_recent_reports` / `read_profile` / `read_plan_origin`）；② 模型每轮只输出两种结果之一——要读资料（`{"tool_calls": [...]}`，一次可批量要好几样）或直接回话（现有信封 `{"reply", "suggestion"}`）；③ **上限真实生效**：每轮最多 3 次模型调用（工具轮与「输出不合格重说一次」**共用**）、最多 6 次只读工具调用，工具结果另有总字符上限（超出从最旧那一轮往下丢）；④ **上下文不再每轮预装**全部业务事实——工具目录里只有「能读什么」；⑤ **计划编号由系统注入**，参数里出现 `plan_id` 一律拒（读不到别的计划）；⑥ 新增 `agent_run` 表，每轮落一行（成功 / 撞上限 / 失败三种），记模型调用次数、工具调用次数、每次工具的名称与参数摘要与成败与耗时、停止原因；⑦ `POST /api/plan-dialogue` **只新增** `run` / `tools_used` / `stop_reason` 三个可选字段（老字段一个没删没改），`GET` 的每条消息另带 `run`；⑧ 计划页在那条消息下列出可折叠的「本轮依据」（工具名 + 结果摘要 + 为什么停下）
+  - Verify：单测盯「先读计划再回答」「一轮批量读两样」「非法工具与跨计划参数被拒且不判死这一轮」「撞上限时如实说读了什么还缺什么且一条提案不落」「失败也留运行账」；`pytest -q`；前端 lint 与 tsc exit=0。真实模型效果与界面走查归用户
+  - Files：`backend/app/agent_runtime.py`（新）、`backend/app/agent_tools.py`（新）、`backend/app/dialogue.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/tests/test_agent.py`（新）、`backend/tests/test_dialogue.py`、`frontend/lib/api.ts`、`frontend/components/plan-dialogue.tsx`、`docs/SPEC.md`（第 10 节新增第 6 条 + 第 11 节两条契约行 + 决策 6 第四次修订 / 37 修订 / **新增决策 40**）
+  - 实施记录（2026-09-20）：**循环**按「信封里有没有一个非空的 `tool_calls` 数组」分流——有就是读资料（那一轮里别的东西一概不看，读完它自然会再说一次），没有就交给原有的信封验收器判形状；工具层的错（名字不认识、参数非法）**不中断这一轮**，原文回给模型让它自己换一个，反复问不存在的东西最终撞上限、那一刻才中止。**工具**目录由注册表生成（目录与执行不会走偏），四个工具各有自己的字符上限，读空时说「一条都没有 / 还没有报告」而不是留白。**运行账**成功挂在助手那条回话上、失败挂在你那一句上——所以「它为什么没答上来」查得到；上游挂了（超时、没配 provider）也留一行失败账再往上抛。**删掉**了被新运行时取代的旧上下文拼接（`dialogue.context_text` / `_lineage` / `_blueprints` / `_recent_reports`，前三个搬进 `agent_tools` 成为工具，不保留两套执行路径）。前端加 `Evidence` 折叠块（原生 `<details>`，无新依赖），刷新页面依据还在。
+  - 验证：`pytest -q` **354 passed**（T31 结束时 332；`test_dialogue.py` 的既有用例改到新循环上、新增 `test_agent.py` 19 条）、lint/tsc exit=0。
+
+- [x] **T33 失败收口与文档收口**
+  - Acceptance：工具不存在、参数非法、模型结构错误、达到调用上限都返回统一中文错误；失败运行**不落计划提案、不改档案**；确认 / 忽略仍走原有台账；SPEC、任务状态与交接文档同步；旧上下文拼接代码删除，不保留两套执行路径
+  - Verify：`pytest -q` + `tools\smoke_p1.py`（动了接口契约）；lint 与 tsc exit=0
+  - Files：`docs/SPEC.md`、`tasks/todo.md`、`HANDOFF.md`
+  - 实施记录（2026-09-20）：四种失败出口都是中文一句话，撞上限时明说「读过哪些、还没读哪些」（撞上限与一直不合格是两种，`agent_run.status` 分别记 `limit` / `failed`）；失败与中止都**不落提案**，你那句话仍留在对话里（再说一句就接着聊）。冒烟脚本 11 步全绿（它没走计划对话这条链，只有回归意义）。
+  - **未做（按剥离策略）**：`profile_evidence` 表、`profile_change` 的新增/取代联合协议、来源与置信度与事实时间、档案页显示依据——全部属于被剥掉的记忆那一段，本阶段不做。
+  - **走查归用户**：五步里剩下的四步（问「下一步先做什么」看它读了计划、追问「结合最近情况」看它按需读报告、要求改截止日确认前不变、用测试桩触发上限看页面说明缺口）。
 
 ## P4 触达兜底
 

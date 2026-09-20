@@ -893,7 +893,8 @@ export type ProposalDecision = {
    * `blueprint_built` = 按勾选把树建进了计划（`built` 里列出建了哪些）；
    * `profile_written` = 真把一条写进了长期档案（`written` 里是哪一条）；
    * `node_updated` = **原地改**了一个已有节点的字段（`updated` 里是改前改后，**id 不变**）；
-   * `node_added` = 往计划里加了一件任务 / 一个阶段（`added` 里是新建的那条）；
+   * `node_added` = 往计划里加了节点（`added.nodes` 里按建的顺序列出每一条——加阶段时
+   * 第一条是阶段、后面跟着它下面的任务；一批任务也走它）；
    * `recorded_only` = 纯记账（驳回也是它）。
    */
   effect:
@@ -911,8 +912,10 @@ export type ProposalDecision = {
     tasks: { id: number; title: string; stage_id: number }[];
     notes: string[];
   } | null;
-  /** 只在批准「加一件任务 / 一个阶段」时有值：新建的那个节点。 */
-  added: { id: number; level: string; title: string; parent_id: number | null } | null;
+  /** 只在批准「加节点」时有值：新建的那些节点，按建的顺序（阶段在前、它的任务跟着）。 */
+  added: {
+    nodes: { id: number; level: string; title: string; parent_id: number | null }[];
+  } | null;
   /** 只在批准「改一个已有节点」时有值：改了哪几项、改前改后（id 在一个没动）。 */
   updated: {
     node_id: number;
@@ -1062,6 +1065,9 @@ export type Selection = string[];
 //
 // 与上面那段 plan-chat（绑候选、6 轮、出蓝图）分工不同：这一段跟着**计划**走，
 // 不限轮数（成本闸是历史字符上限），聊的是执行期的事。助手那一侧存的是人话，不是 JSON。
+//
+// **2026-09-20 起资料由它自己读**（决策 40）：后端跑受控工具循环，模型先说要读什么、
+// 系统去取，读来的才算它这一轮的依据——所以每条消息下面带 `run`（读了哪几样、为什么停下）。
 
 /**
  * 它某一轮提的一条建议，以及那条待裁定提案（T31：SPEC 决策 39）。
@@ -1079,6 +1085,37 @@ export type DialogueSuggestion = {
   status: string;
 };
 
+/** 一次只读工具调用：读了哪一样、成没成、读到了什么（决策 40）。 */
+export type AgentToolUse = {
+  /** 工具名：`read_current_plan` / `read_recent_reports` / `read_profile` / `read_plan_origin`。 */
+  name: string;
+  /** 参数摘要（多半是空——这几个工具基本不接参数），排错时看。 */
+  args: string;
+  /** 读成了没有：名字不认识、参数不合法时为 `false`。 */
+  ok: boolean;
+  /** 后端拼好的一句人话摘要，界面直接显示——不让前端拿原始字段拼中文。 */
+  summary: string;
+  duration_ms: number;
+};
+
+/**
+ * 一轮 Agent 运行的账（`agent_run` 表那一行）：调了几次模型、读了哪几样、为什么停下。
+ *
+ * 它是**运行审计**，不是记忆：下一轮不会读它，只是让你（和排错的人）看得见这一步做了什么。
+ */
+export type AgentRun = {
+  /** `ok` 正常答完 / `limit` 撞了调用上限 / `failed` 一直没给出合格输出。 */
+  status: string;
+  /** 中文一句话：为什么停下（正常答完时也在，写着调了几次、读了几次）。 */
+  stop_reason: string;
+  model_calls: number;
+  tool_calls: number;
+  /** 这一轮读成的工具名，按读的顺序去重。 */
+  tool_names: string[];
+  /** 每一次工具调用的明细（含被拒的）。 */
+  tools: AgentToolUse[];
+};
+
 /** 对话里的一条消息。 */
 export type DialogueMessage = {
   role: string;
@@ -1086,6 +1123,8 @@ export type DialogueMessage = {
   created_at: string;
   /** 助手这一轮提的建议（没有就是 `null`）。 */
   suggestion: DialogueSuggestion | null;
+  /** 这一轮的运行账（决策 40）；失败的那一轮挂在**你**那条消息上，其余在 `null`。 */
+  run: AgentRun | null;
 };
 
 export type PlanDialogueView = {
@@ -1113,13 +1152,20 @@ export type DialogueTurn = {
   proposal_id: number | null;
   turns_used: number;
   calls: number;
+  /** 这一轮的运行账（决策 40）。 */
+  run: AgentRun;
+  /** 这一轮读了哪几样（`run.tool_names` 的同义字段，取用方便）。 */
+  tools_used: string[];
+  /** 为什么停下（`run.stop_reason` 的同义字段）。 */
+  stop_reason: string;
 };
 
 /**
  * 聊一句：人话 + 最多一条可执行建议。
  *
- * 输出形状不合格时后端带原因重试一次（最坏 2 次调用）；两次都不合格就报错，
- * 你这句话仍留在对话里。
+ * 后端跑的是**受控工具循环**（决策 40）：它自己决定读哪几样资料（最多 6 次），最多 3 次
+ * 模型调用（工具轮与「输出不合格重说一次」共用这个额度）；撞上限或一直不合格就报错，
+ * 并说清读了什么、还缺什么，你这句话仍留在对话里。
  */
 export async function sayPlanDialogue(planId: number, message: string): Promise<DialogueTurn> {
   return request<DialogueTurn>("/api/plan-dialogue", {
@@ -1188,9 +1234,26 @@ export type PlanChangePayload = {
   before?: Record<string, string | null>;
   stage_id?: number;
   stage_title?: string;
+  /** 老形状：单件任务（T31 第一版落的提案可能还是它——界面按 `tasks` 优先读）。 */
   task?: { title: string; due_date?: string | null };
+  /** 一次要加的一批任务（最多 5 件）：加阶段时是它下面要建的任务，加任务时是这一批。 */
+  tasks?: { title: string; due_date?: string | null }[];
   stage?: { title: string; deliverable: string; why?: string };
 };
+
+/**
+ * 一条计划改动里要加的任务：`tasks` 优先，老形状 `task` 兜底——两边都认。
+ *
+ * 为什么在前端也做这一层：库里可能还躺着按第一版形状（`task`）落的待裁定提案，
+ * 它们还没被裁定，界面得照样画得出来。
+ */
+export function planChangeTasks(payload: PlanChangePayload): {
+  title: string;
+  due_date?: string | null;
+}[] {
+  if (payload.tasks !== undefined && payload.tasks.length > 0) return payload.tasks;
+  return payload.task !== undefined ? [payload.task] : [];
+}
 
 // ---------- 判资料（T29：`/judge` 页） ----------
 

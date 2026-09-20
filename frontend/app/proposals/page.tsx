@@ -8,6 +8,7 @@ import {
   ApiError,
   decideProposal,
   listProposals,
+  planChangeTasks,
   type MaterialJudgmentPayload,
   type PlanChangePayload,
   type ProfileChangePayload,
@@ -73,7 +74,9 @@ export default function ProposalsPage() {
                 ? `已批准并原地修改：#${done.updated.node_id} 的 ${done.updated.changed.join("、")} 改为了 ` +
                   `${done.updated.changed.map((k) => done.updated?.after[k] ?? "（清空）").join("、")}（编号保持不变，台账已留痕）。`
                 : done.effect === "node_added" && done.added !== null
-                  ? `已批准并新增节点：已将${done.added.level === "stage" ? "阶段" : "任务"} #${done.added.id}「${done.added.title}」加入计划。`
+                  ? `已批准并新建：${done.added.nodes
+                      .map((node) => `${node.level === "stage" ? "阶段" : "任务"} #${node.id}「${node.title}」`)
+                      .join("、")} 已进计划。`
                   : "已批准，只记账：这项不会改计划或档案。"
           : "已驳回，理由已记入台账。",
         ...previous,
@@ -301,6 +304,7 @@ function ProposalBody({
 
   if (proposal.kind === "plan_change") {
     const payload = proposal.payload as unknown as PlanChangePayload;
+    const tasks = planChangeTasks(payload);
     return (
       <div
         style={{
@@ -339,13 +343,20 @@ function ProposalBody({
           </div>
         )}
 
-        {payload.action === "add_task" && payload.task && (
+        {payload.action === "add_task" && (
           <div style={{ fontSize: "13px", marginBottom: "6px", color: "var(--text-main)" }}>
             所属阶段：<strong>{payload.stage_title ?? `阶段 #${payload.stage_id}`}</strong>
-            <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
-              新任务：<strong>{payload.task.title}</strong>
-              {payload.task.due_date && ` · 截止日：${payload.task.due_date}`}
+            <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "4px" }}>
+              要加的任务（{tasks.length} 件）：
             </div>
+            <ul style={{ paddingLeft: "18px", margin: "2px 0", fontSize: "12px" }}>
+              {tasks.map((task, index) => (
+                <li key={`${task.title}-${index}`}>
+                  <strong>{task.title}</strong>
+                  {task.due_date && ` · 截止日：${task.due_date}`}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -356,6 +367,21 @@ function ProposalBody({
               <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
                 交付物：{payload.stage.deliverable}
               </div>
+            )}
+            {tasks.length > 0 && (
+              <>
+                <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "6px" }}>
+                  一并建的任务（{tasks.length} 件）：
+                </div>
+                <ul style={{ paddingLeft: "18px", margin: "2px 0", fontSize: "12px" }}>
+                  {tasks.map((task, index) => (
+                    <li key={`${task.title}-${index}`}>
+                      <strong>{task.title}</strong>
+                      {task.due_date && ` · 截止日：${task.due_date}`}
+                    </li>
+                  ))}
+                </ul>
+              </>
             )}
           </div>
         )}

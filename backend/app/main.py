@@ -736,8 +736,9 @@ def post_proposal_decide(
     批准不必都改东西：`effect` 字段说明这一次到底动了什么——`blueprint_built` 是
     **按勾选把树建进计划**（阶段 / 任务，`built` 里列出建了哪些），`profile_written` 是
     真往长期档案里写了一条（`written` 是哪一条），`node_updated` 是**原地改了一个已有节点
-    的字段**（`updated` 里是改前改后，id 不变），`node_added` 是往计划里加了一件任务 /
-    一个阶段（`added` 里是新建的那条），`recorded_only` 就是纯记账。驳回只留痕，不改任何
+    的字段**（`updated` 里是改前改后，id 不变），`node_added` 是往计划里加了节点——一个阶段
+    带它下面的任务、或者一批任务（`added.nodes` 里按建的顺序列出每一条），`recorded_only`
+    就是纯记账。驳回只留痕，不改任何
     业务数据——计划对话里那条「忽略」就走这里，理由固定「聊天里先不动」。
     """
     try:
@@ -860,6 +861,10 @@ def post_plan_blueprint(
 # 建议落成 `kind=plan_change` 的待裁定提案——改计划仍要经你当场裁定（在计划页点
 # 「确认」），这一段对话自己一个字段也写不动。
 #
+# **2026-09-20 起走受控工具循环**（SPEC 决策 40）：业务事实不再每轮预装，改成它自己读
+# （`agent_runtime.py` + `agent_tools.py`，四个只读工具）；每轮最多 3 次模型调用、
+# 6 次只读工具调用，每一轮往 `agent_run` 留一行运行账（读了什么、为什么停下）。
+#
 # 状态码口径同其它链路：计划不存在 404、还没聊过就提炼 409、模型输出不合格 400。
 
 
@@ -880,7 +885,9 @@ class DialogueExtractIn(BaseModel):
 def get_plan_dialogue(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     """看这段对话：历史消息 + 聊了几句 + 能不能提炼档案提案。
 
-    T31 起每条助手消息另带 `suggestion`（它那一轮提的建议与那条提案），界面据此渲染确认条。
+    每条助手消息另带两个可选字段：`suggestion`（T31：它那一轮提的建议与那条提案，界面据此
+    渲染确认条）与 `run`（决策 40：那一轮的运行账——读了哪几样、调了几次模型、为什么停下，
+    界面据此渲染「本轮依据」）。刷新页面这些也还在。
     """
     try:
         return dialogue.view(conn, plan_id)
@@ -894,8 +901,11 @@ def get_plan_dialogue(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)
 def post_plan_dialogue(payload: DialogueIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     """聊一句：人话 + 最多一条可执行建议（决策 39）。
 
-    输出是信封（`{"reply": ..., "suggestion": ...}`），形状不合格带原因重试 1 次
-    （每轮最坏 2 次调用）；建议合格就落一条 `plan_change` 待裁定提案，**确认 / 忽略在计划页**。
+    这一轮跑的是**受控工具循环**（决策 40）：它自己决定读哪几样资料（最多 6 次），
+    最多 3 次模型调用（工具轮与「输出不合格重说一次」共用），撞上限或一直不合格就
+    400 报错并如实说清读了什么、还缺什么——**一条提案都不落**，你这句话仍留在对话里。
+    合格就落一条 `plan_change` 待裁定提案，**确认 / 忽略在计划页**。回执里
+    `run` / `tools_used` / `stop_reason` 是这次新加的（老字段一个没动）；
     助手那侧存进库里的仍是**人话**。
     """
     try:

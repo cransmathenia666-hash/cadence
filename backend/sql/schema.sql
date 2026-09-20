@@ -214,3 +214,25 @@ CREATE TABLE IF NOT EXISTS plan_dialogue (
   created_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_dialogue_thread ON plan_dialogue (plan_id, id);
+
+-- ========== Agent 运行记录（2026-09-20：受控工具循环的解释账） ==========
+
+-- 用户每说一句、Agent 跑一轮，落一行。**只记「这一轮它做了什么」**：调了几次模型、
+-- 读了哪几样资料、为什么停下——不重复保存计划与档案正文（那些是真表，要看看原表）。
+-- 模型成本仍归 `llm_call` 管，这张表管的是「解释」（SPEC 决策 40）。
+--
+-- 它**不是记忆**：Agent 下一轮不会读它，它只是给人排错与对账用的运行审计。
+-- dialogue_id 指向 `plan_dialogue` 的那一行：答出来了就挂在那条助手回话上（界面据此
+-- 在消息下面显示「本轮依据」），失败时挂在你的那一句上（那一轮没有助手回话）。
+CREATE TABLE IF NOT EXISTS agent_run (
+  id          INTEGER PRIMARY KEY,
+  plan_id     INTEGER NOT NULL,
+  dialogue_id INTEGER,           -- 挂在哪条对话消息上；关联靠应用层，不加外键
+  status      TEXT    NOT NULL,  -- ok 答完 / limit 达到上限 / failed 没给出合格输出
+  stop_reason TEXT    NOT NULL,  -- 中文一句话：为什么停下（界面直接显示）
+  model_calls INTEGER NOT NULL DEFAULT 0,
+  tool_calls  INTEGER NOT NULL DEFAULT 0,
+  tools       TEXT,              -- JSON 数组：[{name, args, ok, summary, duration_ms}]
+  created_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_run_dialogue ON agent_run (dialogue_id, id);

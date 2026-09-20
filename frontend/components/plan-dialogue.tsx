@@ -8,12 +8,25 @@ import {
   extractProfileProposals,
   getPlanDialogue,
   sayPlanDialogue,
+  type AgentRun,
   type DialogueSuggestion,
   type PlanDialogueView,
 } from "@/lib/api";
 
 /** 「忽略」时固定送的理由：它进台账，回答「这条建议当时为什么没动」。 */
 const IGNORE_REASON = "聊天里先不动";
+
+/** 工具名 → 人话（后端只给机器名，界面上这一层翻一下）。 */
+const TOOL_LABELS: Record<string, string> = {
+  read_current_plan: "当前计划",
+  read_recent_reports: "最近报告",
+  read_profile: "长期档案",
+  read_plan_origin: "计划来历",
+};
+
+function toolLabel(name: string): string {
+  return TOOL_LABELS[name] ?? name;
+}
 
 /**
  * 计划落地之后那块「接着聊」的窗口（T28）；T31 起它能**提一条可执行建议**。
@@ -23,6 +36,11 @@ const IGNORE_REASON = "聊天里先不动";
  * 它就摆在那条消息下面：点「确认」才真改（改的原地改、id 不变；加的走建节点），
  * 点「忽略」就当没提过（台账记一句「聊天里先不动」）。两者都是当场裁定那条提案，
  * 所以建议不会在「待裁定」页堆积。
+ *
+ * **2026-09-20 起资料由它自己读**（决策 40）：后端不再每轮把整棵计划树、全部档案一起
+ * 塞给模型，改成它先说要读哪几样、系统去取。所以每条消息下面多了一块可折叠的
+ * 「本轮依据」——读了哪些、读到什么、为什么停下（`agent_run` 那张表里的话），
+ * 刷新页面也还在。
  */
 export function PlanDialogue({
   planId,
@@ -58,11 +76,15 @@ export function PlanDialogue({
       const done = await sayPlanDialogue(planId, message);
       setMessage("");
       await refresh();
+      const read =
+        done.tools_used.length === 0
+          ? "这一轮它没读资料"
+          : `这一轮它读了${done.tools_used.map(toolLabel).join("、")}`;
       setNotice(
         done.suggestion === null
-          ? `第 ${done.turns_used} 句已回（调用了 ${done.calls} 次模型）。`
-          : `第 ${done.turns_used} 句已回（调用了 ${done.calls} 次模型），它还提了一条建议——` +
-              "就在下面那条消息里，点「确认」才会真改。",
+          ? `第 ${done.turns_used} 句已回（调模型 ${done.calls} 次；${read}）。`
+          : `第 ${done.turns_used} 句已回（调模型 ${done.calls} 次；${read}），` +
+              "它还提了一条建议——就在下面那条消息里，点「确认」才会真改。",
       );
     } catch (cause) {
       setError(messageOf(cause, "这一句未能成功发送"));
@@ -114,7 +136,17 @@ export function PlanDialogue({
             "——编号没变，台账留了一条流水。",
         );
       } else if (done.effect === "node_added" && done.added !== null) {
-        setNotice(`加好了：#${done.added.id}「${done.added.title}」已经进计划表。`);
+        const nodes = done.added.nodes;
+        setNotice(
+          nodes.length === 1
+            ? `加好了：#${nodes[0].id}「${nodes[0].title}」已经进计划表。`
+            : `加好了：${nodes
+                .map(
+                  (node) =>
+                    `${node.level === "stage" ? "阶段" : "任务"} #${node.id}「${node.title}」`,
+                )
+                .join("、")}——一共 ${nodes.length} 条，都进计划表了。`,
+        );
       } else {
         setNotice("已确认。");
       }
@@ -156,6 +188,7 @@ export function PlanDialogue({
             <div key={index} className={`chat-bubble ${isUser ? "user" : "assistant"}`}>
               <span className="bubble-role">{isUser ? "你" : "AI 决策助手"}</span>
               <div style={{ whiteSpace: "pre-wrap" }}>{item.content}</div>
+              {item.run !== null && <Evidence run={item.run} />}
               {item.suggestion !== null && (
                 <SuggestionBar
                   suggestion={item.suggestion}
@@ -215,6 +248,41 @@ export function PlanDialogue({
 
 function messageOf(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback;
+}
+
+/**
+ * 这一轮它读了什么（决策 40）：一行摘要 + 可展开的明细。
+ *
+ * 为什么要显示：它现在不再「什么都预先知道」，所以「它凭什么这么说」成了必须能查的事——
+ * 展开就看到读了哪几样、每样读到了什么、为什么停下。折叠着不占地方，排错时才展开。
+ * 数据来自后端（`agent_run`），刷新页面不会丢。
+ */
+function Evidence({ run }: { run: AgentRun }) {
+  // 一次没读成（比如撞了上限）也要显示——那时「为什么没答上来」比读了什么更要紧
+  if (run.tools.length === 0 && run.status === "ok") return null;
+  const read = run.tool_names.map(toolLabel);
+  return (
+    <details style={{ marginTop: "8px", fontSize: "12px", color: "var(--text-muted)" }}>
+      <summary style={{ cursor: "pointer" }}>
+        本轮依据：
+        {read.length === 0 ? "什么也没读到" : `读了${read.join("、")}`}
+        {`（${run.tool_calls} 次）`}
+        {run.status !== "ok" && "｜⚠ 这一轮没答完"}
+      </summary>
+      <ul style={{ margin: "6px 0 0", paddingLeft: "18px" }}>
+        {run.tools.map((tool, index) => (
+          <li key={index}>
+            {tool.ok ? toolLabel(tool.name) : `（${tool.name} 没读成）`}
+            {tool.args ? `　参数 ${tool.args}` : ""}：{tool.summary}
+            {tool.duration_ms > 0 && `（${tool.duration_ms} 毫秒）`}
+          </li>
+        ))}
+      </ul>
+      <div style={{ marginTop: "4px" }}>
+        调模型 {run.model_calls} 次 · 读资料 {run.tool_calls} 次 · {run.stop_reason}
+      </div>
+    </details>
+  );
 }
 
 /**

@@ -10,6 +10,12 @@
   流水），加的走 `plan.add_node`（**同一道防重名闸**）；
 - **忽略＝当场驳回**，理由由界面固定送「聊天里先不动」——每条建议都有归宿。
 
+**「加」的那两类一次可以加一小批**（2026-09-19 用户走查后放宽）：真实使用里「建一个阶段」
+几乎总是连着它下面的几件任务，一次只让加一件会把人逼成连点五次确认，还会让模型拿「规矩」
+回嘴。所以一条建议里可以给 `tasks`（最多 `MAX_TASKS` 件）：加阶段＝连着它下面的任务一起建，
+加任务＝往已有的那个阶段下一次补几件。**上限仍在**：一轮一条建议、一条建议最多几件任务，
+防的是「一次改半个计划」这种没法复核的大动作。
+
 **三类动作，没有第四类**。删节点永远不做：计划里表达「这块不做了」的方式是打勾 /
 跳过 / 收尾，删掉会把报告与交付物的痕迹一起断掉。打勾、跳过、交交付物也不归它管——
 那些是执行动作，人自己点。
@@ -39,6 +45,11 @@ UPDATE_NODE = "update_node"
 ADD_TASK = "add_task"
 ADD_STAGE = "add_stage"
 ACTIONS = (UPDATE_NODE, ADD_TASK, ADD_STAGE)
+
+# 一条建议里最多带几件任务（2026-09-19 放宽「一次一件」时定的上限）。
+# 为什么是这个数：一个阶段拆下来通常是三到五件，再多就该先聊清楚而不是一口气排完；
+# 而且确认条与待裁定页要一眼看得完，超过就得滚动，复核成本立刻上去。
+MAX_TASKS = 5
 
 # 能改的字段与它们的人话名字（与 T30 的三个字段、决策 38 一致）。
 FIELD_LABELS: dict[str, str] = {
@@ -73,11 +84,25 @@ class Suggestion(BaseModel):
     node_id: int | None = None
     # update_node：字段名 → 新值
     fields: dict[str, Any] = Field(default_factory=dict)
-    # add_task：{title, due_date}
+    # add_task：{title, due_date}——**老形状，仍然收**（库里可能还有按它落的待裁定提案）
     task: dict[str, Any] = Field(default_factory=dict)
+    # add_task / add_stage：一次要加的一批任务 [{title, due_date}]，最多 MAX_TASKS 件
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
     # add_stage：{title, deliverable, why}
     stage: dict[str, Any] = Field(default_factory=dict)
     why: str = Field(min_length=1)
+
+
+def _wanted_tasks(suggestion: Suggestion) -> tuple[list[dict[str, Any]], str | None]:
+    """把这一条建议里的任务收成一个列表：`tasks` 优先，老形状 `task` 兜底。
+
+    为什么两种都收：`task` 是 T31 第一版的形状，库里可能还有按它落的待裁定提案
+    （批准时才会走 `resolve`），换个字段名就让那些提案批不了，不值当。
+    """
+    raw = [item for item in (suggestion.tasks or []) if isinstance(item, dict)]
+    if not raw and suggestion.task:
+        raw = [suggestion.task]
+    return raw, None
 
 
 # ---------- 验收：一条建议能不能变成提案 ----------
@@ -186,6 +211,63 @@ def _check_update(
     return payload, None
 
 
+def _clean_tasks(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    raw: list[dict[str, Any]],
+    *,
+    parent_id: int | None,
+    where: str,
+    allow_empty: bool = False,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """把一批任务洗成规范形状（每件 `{title, due_date}`），不合格就整体不合格。
+
+    `parent_id` 给了就顺带查「那个阶段下有没有同名的开着」；`None`（往新阶段里放）
+    只查这一批内部有没有自己撞自己——新阶段还没建，没有历史节点可撞。
+
+    `allow_empty` 只有加阶段时为真：先建一个还没拆任务的阶段是正当的（他就是想先占个位置），
+    而加任务那一类**任务就是它本身**，空的就是没提。
+    """
+    if not raw:
+        if allow_empty:
+            return [], None
+        return None, f"{where}要给出要加的任务（tasks 里至少写一件）"
+    if len(raw) > MAX_TASKS:
+        return None, (
+            f"{where}一次最多加 {MAX_TASKS} 件任务，这条给了 {len(raw)} 件——"
+            "把最要紧的几件先排上，剩下的下一轮再说"
+        )
+
+    cleaned: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for item in raw:
+        title = str((item or {}).get("title") or "").strip()
+        if not title:
+            return None, f"{where}里有一件没写 title（这件任务叫什么）"
+        # 同一批里自己撞自己：只比去空白 + 小写（与 plan 那道闸同一个口径）
+        key = title.lower()
+        if key in seen:
+            return None, (
+                f"{where}里有两件任务重名（「{seen[key]}」与「{title}」）——"
+                "留下一件，或者把其中一件改个说得清区别的名字"
+            )
+        seen[key] = title
+        due, problem = _due_of((item or {}).get("due_date"))
+        if problem is not None:
+            return None, f"新任务「{title}」的{problem}"
+        if parent_id is not None:
+            duplicate = plan.find_open_duplicate(
+                conn, int(plan_id), "task", title, parent_id=int(parent_id)
+            )
+            if duplicate is not None:
+                return None, (
+                    f"这个阶段下已经开着同名任务「{title}」（#{duplicate['id']}）——"
+                    "换个名字，或者先在计划表里把那条处理掉"
+                )
+        cleaned.append({"title": title, "due_date": due})
+    return cleaned, None
+
+
 def _check_add_task(
     conn: sqlite3.Connection, plan_id: int, suggestion: Suggestion, why: str
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -198,28 +280,19 @@ def _check_add_task(
             "要加任务就点名它所属的那个阶段"
         )
 
-    title = str(suggestion.task.get("title") or "").strip()
-    if not title:
-        return None, "add_task 的 task 里要有 title（这条任务叫什么）"
-    due, problem = _due_of(suggestion.task.get("due_date"))
-    if problem is not None:
-        return None, f"新任务「{title}」的{problem}"
-
-    duplicate = plan.find_open_duplicate(
-        conn, int(plan_id), "task", title, parent_id=int(stage["id"])
+    raw, _ = _wanted_tasks(suggestion)
+    tasks, problem = _clean_tasks(
+        conn, plan_id, raw, parent_id=int(stage["id"]), where="add_task"
     )
-    if duplicate is not None:
-        return None, (
-            f"阶段「{stage['title']}」下已经开着同名任务「{title}」（#{duplicate['id']}）——"
-            "换个名字，或者先在计划表里把那条处理掉"
-        )
+    if problem is not None:
+        return None, problem
 
     payload = {
         "plan_id": int(plan_id),
         "action": ADD_TASK,
         "stage_id": int(stage["id"]),
         "stage_title": str(stage["title"]),
-        "task": {"title": title, "due_date": due},
+        "tasks": tasks,
         "why": why,
     }
     payload["summary"] = summary_of(payload)
@@ -245,6 +318,13 @@ def _check_add_stage(
             "要给它排任务就点名那个阶段，别再加一个同名的"
         )
 
+    raw, _ = _wanted_tasks(suggestion)
+    tasks, problem = _clean_tasks(
+        conn, plan_id, raw, parent_id=None, where="add_stage", allow_empty=True
+    )
+    if problem is not None:
+        return None, problem
+
     payload = {
         "plan_id": int(plan_id),
         "action": ADD_STAGE,
@@ -253,6 +333,7 @@ def _check_add_stage(
             "deliverable": deliverable,
             "why": str(suggestion.stage.get("why") or "").strip(),
         },
+        "tasks": tasks,
         "why": why,
     }
     payload["summary"] = summary_of(payload)
@@ -297,13 +378,41 @@ def summary_of(payload: dict[str, Any]) -> str:
         )
         return f"改「{node_title}」的{labels}：{parts}"
     if action == ADD_TASK:
-        task = payload.get("task") or {}
-        due = f"｜截止 {task['due_date']}" if task.get("due_date") else ""
-        return f"加一件任务：{task.get('title')}（挂在「{payload.get('stage_title')}」下）{due}"
+        tasks = _tasks_in(payload)
+        if not tasks:
+            return f"加一件任务（挂在「{payload.get('stage_title')}」下）"
+        if len(tasks) == 1:
+            due = f"｜截止 {tasks[0]['due_date']}" if tasks[0].get("due_date") else ""
+            return (
+                f"加一件任务：{tasks[0]['title']}"
+                f"（挂在「{payload.get('stage_title')}」下）{due}"
+            )
+        return (
+            f"加 {len(tasks)} 件任务（挂在「{payload.get('stage_title')}」下）："
+            + "；".join(f"{item['title']}{_due_suffix(item)}" for item in tasks)
+        )
     if action == ADD_STAGE:
         stage = payload.get("stage") or {}
-        return f"加一个阶段：{stage.get('title')}（排最后）｜要交的东西：{stage.get('deliverable')}"
+        tasks = _tasks_in(payload)
+        head = f"加一个阶段：{stage.get('title')}（排最后）"
+        if tasks:
+            head += f"｜含 {len(tasks)} 件任务：" + "；".join(
+                f"{item['title']}{_due_suffix(item)}" for item in tasks
+            )
+        return f"{head}｜要交的东西：{stage.get('deliverable')}"
     return "计划改动建议"
+
+
+def _tasks_in(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """payload 里的任务列表：`tasks` 优先，老形状 `task` 兜底（两边都认）。"""
+    tasks = [item for item in (payload.get("tasks") or []) if isinstance(item, dict)]
+    if not tasks and payload.get("task"):
+        tasks = [payload["task"]]
+    return tasks
+
+
+def _due_suffix(task: dict[str, Any]) -> str:
+    return f"（截止 {task['due_date']}）" if task.get("due_date") else ""
 
 
 def _show(value: Any, name: str) -> str:
@@ -316,19 +425,31 @@ def _show(value: Any, name: str) -> str:
 # ---------- 批准那一刻：先只读地查完，再动手 ----------
 
 @dataclass
+class PendingNode:
+    """批准时要建的一个节点。`tasks` 那批跟着阶段一起排队，先后顺序就是列表顺序。"""
+
+    level: str
+    title: str
+    parent_id: int | None = None
+    deliverable: str | None = None
+    due_date: str | None = None
+
+
+@dataclass
 class ChangePlan:
-    """一条建议落到计划里的样子。`resolve` 产出它，`apply` 执行它。"""
+    """一条建议落到计划里的样子。`resolve` 产出它，`apply` 执行它。
+
+    加的这两类不再是「一个节点」，而是**一串要建的节点**：加阶段＝阶段本身 + 它下面
+    的任务，加任务＝一批任务。`nodes` 的顺序就是建它们的顺序（阶段必须先建出来，
+    下面的任务才挂得上）。
+    """
 
     plan_id: int
     action: str
     why: str
     node_id: int | None = None
     fields: dict[str, Any] = field(default_factory=dict)
-    level: str = ""
-    title: str = ""
-    parent_id: int | None = None
-    deliverable: str | None = None
-    due_date: str | None = None
+    nodes: list[PendingNode] = field(default_factory=list)
 
 
 def resolve(conn: sqlite3.Connection, payload: dict[str, Any]) -> ChangePlan:
@@ -383,21 +504,25 @@ def resolve(conn: sqlite3.Connection, payload: dict[str, Any]) -> ChangePlan:
             raise PlanChangeError(f"节点 #{stage_id} 不是阶段，任务挂不上去")
         if int(stage["plan_id"]) != plan_id:
             raise PlanChangeConflict(f"阶段 #{stage_id} 现在不属于计划 #{plan_id}")
-        task = payload.get("task") or {}
-        title = str(task.get("title") or "").strip()
-        if not title:
+        tasks = _tasks_in(payload)
+        if not tasks:
             raise PlanChangeError("这条提案里没有任务名")
-        # 防重名闸在 add_node 里还有一道；这里先查一次，好给出「撞上哪一条」的中文原因
-        plan.assert_no_open_duplicate(conn, plan_id, "task", title, parent_id=stage_id)
-        return ChangePlan(
-            plan_id=plan_id,
-            action=action,
-            why=why,
-            level="task",
-            title=title,
-            parent_id=stage_id,
-            due_date=task.get("due_date"),
-        )
+        nodes = []
+        for item in tasks:
+            title = str(item.get("title") or "").strip()
+            if not title:
+                raise PlanChangeError("这条提案里有一件任务没写名字")
+            # 防重名闸在 add_node 里还有一道；这里先查一次，好给出「撞上哪一条」的中文原因
+            plan.assert_no_open_duplicate(conn, plan_id, "task", title, parent_id=stage_id)
+            nodes.append(
+                PendingNode(
+                    level="task",
+                    title=title,
+                    parent_id=stage_id,
+                    due_date=item.get("due_date"),
+                )
+            )
+        return ChangePlan(plan_id=plan_id, action=action, why=why, nodes=nodes)
 
     if action == ADD_STAGE:
         stage = payload.get("stage") or {}
@@ -408,14 +533,20 @@ def resolve(conn: sqlite3.Connection, payload: dict[str, Any]) -> ChangePlan:
         if not deliverable:
             raise PlanChangeError(f"阶段「{title}」没有「要交的东西」，阶段必须带交付物")
         plan.assert_no_open_duplicate(conn, plan_id, "stage", title)
-        return ChangePlan(
-            plan_id=plan_id,
-            action=action,
-            why=why,
-            level="stage",
-            title=title,
-            deliverable=deliverable,
-        )
+        # 阶段先排队，它的任务跟着（下面的任务挂得上，靠的就是这个先后）
+        nodes = [PendingNode(level="stage", title=title, deliverable=deliverable)]
+        for item in _tasks_in(payload):
+            task_title = str(item.get("title") or "").strip()
+            if not task_title:
+                raise PlanChangeError("这条提案里有一件任务没写名字")
+            nodes.append(
+                PendingNode(
+                    level="task",
+                    title=task_title,
+                    due_date=item.get("due_date"),
+                )
+            )
+        return ChangePlan(plan_id=plan_id, action=action, why=why, nodes=nodes)
 
     raise PlanChangeError(f"这条提案的 action「{action}」看不懂，先驳回它")
 
@@ -432,26 +563,40 @@ def apply(conn: sqlite3.Connection, change: ChangePlan) -> dict[str, Any]:
             **change.fields,
         )
 
-    # 加的这两类：走建节点，同一道防重名闸；新阶段排最后（决策 39 的默认）
-    sort_order = 0
-    if change.level == "stage":
-        sort_order = max(
-            [int(row["sort_order"]) for row in plan.get_stages(conn, change.plan_id)] + [0]
-        ) + 1
-    node_id = plan.add_node(
-        conn,
-        change.plan_id,
-        change.level,
-        change.title,
-        parent_id=change.parent_id,
-        deliverable=change.deliverable,
-        due_date=change.due_date,
-        sort_order=sort_order,
-        actor="user",
-    )
-    return {
-        "id": node_id,
-        "level": change.level,
-        "title": change.title,
-        "parent_id": change.parent_id,
-    }
+    # 加的这两类：走建节点，同一道防重名闸；新阶段排最后（决策 39 的默认），
+    # 它下面的任务按给定顺序排 1..n。一个节点一次 add_node，逐个提交（台账本就没有
+    # 请求级事务）；所以 resolve 必须在动手之前把冲突全查完——验不过就一条都不写。
+    next_stage_order = max(
+        [int(row["sort_order"]) for row in plan.get_stages(conn, change.plan_id)] + [0]
+    ) + 1
+    created: list[dict[str, Any]] = []
+    task_index = 0
+    for node in change.nodes:
+        parent_id = node.parent_id
+        if node.level == "stage":
+            sort_order = next_stage_order
+            next_stage_order += 1
+        else:
+            parent_id = parent_id if parent_id is not None else created[0]["id"]
+            task_index += 1
+            sort_order = task_index
+        node_id = plan.add_node(
+            conn,
+            change.plan_id,
+            node.level,
+            node.title,
+            parent_id=parent_id,
+            deliverable=node.deliverable,
+            due_date=node.due_date,
+            sort_order=sort_order,
+            actor="user",
+        )
+        created.append(
+            {
+                "id": node_id,
+                "level": node.level,
+                "title": node.title,
+                "parent_id": parent_id,
+            }
+        )
+    return {"nodes": created}

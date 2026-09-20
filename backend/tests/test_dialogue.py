@@ -1,17 +1,19 @@
-"""计划级对话的单测（T28：SPEC 决策 37；T31 起含「一条可执行建议」决策 39）。
+"""计划级对话的单测（T28：SPEC 决策 37；T31 起含「一条可执行建议」决策 39；
+2026-09-20 起走**受控工具循环**，决策 40）。
 
 覆盖五组东西：
 ① 看与聊：历史、句数、计划不存在 404；**不限轮数**（与候选对话的 6 轮不同）；输出是
-   **信封**（人话 + 最多一条建议），形状不合格带原因重试 1 次；
-② 上下文：阶段、任务与状态、交付物、最近报告、落后量、档案都要进去——这是它给出有用
-   回答的前提；历史按 6000 字符从最早截断，最新一句永远留着；**节点编号也要进去**，
-   不然它给的建议没处指；
+   **信封**（人话 + 最多一条建议），形状不合格带原因重说一次；
+② 资料**由它自己读**（决策 40）：这一轮不再预装业务事实，模型先要资料、系统取来给它，
+   取来的才进上下文；历史仍按 6000 字符从最早截断，最新一句永远留着；**节点编号**在
+   读来的资料里，它给建议时照抄；
 ③ 提炼档案提案：没聊过 409、空 items 不产提案、类别非法判不合格并重试、最多 3 条；
 ④ **建议落成提案与当场裁定**（T31）：一次最多一条、字段缺一 / 节点不存在 / 不属于本计划 /
    改前＝改后 / 名字撞车一律判不合格且**一条都不落**；批准后节点真改了且**编号不变**、
    加东西真的建了节点、**忽略什么都没写**；
 ⑤ 端到端：聊 → 提炼 → 批准 → 档案里真多一条（与 T28-1 的裁定分支接得上）。
 
+工具本身与循环那几道闸（上限、拒绝、运行账）的用例在 `test_agent.py`。
 一律假上游打桩，不打真实接口、不花钱。
 """
 
@@ -21,7 +23,18 @@ import json
 
 import pytest
 
-from app import advisor, db, dialogue, ledger, llm, plan, plan_change, proposals
+from app import (
+    advisor,
+    agent_runtime,
+    agent_tools,
+    db,
+    dialogue,
+    ledger,
+    llm,
+    plan,
+    plan_change,
+    proposals,
+)
 
 
 class ScriptedTransport:
@@ -86,6 +99,13 @@ def envelope(reply: str = "嗯", suggestion: dict | None = None) -> str:
     return json.dumps({"reply": reply, "suggestion": suggestion}, ensure_ascii=False)
 
 
+def ask(*names: str, **args) -> str:
+    """模型要读资料的那一种输出（决策 40）：一次可以要好几样。"""
+    return json.dumps(
+        {"tool_calls": [{"name": name, "args": args} for name in names]}, ensure_ascii=False
+    )
+
+
 def node_id_of(conn, title: str) -> int:
     row = conn.execute(
         "SELECT id FROM plan_node WHERE title = ? AND status != 'skipped'", (title,)
@@ -113,9 +133,14 @@ def change(category: str = "current_state", content: str = "晚上只剩一小�
     return {"category": category, "content": content, "why": why}
 
 
-def context_of(transport: ScriptedTransport, index: int = 0) -> str:
-    """那次调用里「事实块」那一条（system 之后、历史之前）。"""
+def opening_of(transport: ScriptedTransport, index: int = 0) -> str:
+    """那次调用里「工具目录」那一条（system 之后、历史之前）。"""
     return transport.seen[index]["payload"]["messages"][1]["content"]
+
+
+def facts_of(transport: ScriptedTransport, index: int = -1) -> str:
+    """那次调用里回填给模型的「你读到的资料」（循环里第 index 次调用的最后一条）。"""
+    return transport.seen[index]["payload"]["messages"][-1]["content"]
 
 
 # ---------- 看与聊 ----------
@@ -189,17 +214,18 @@ def test_an_empty_reply_costs_the_turn_but_keeps_your_words(conn):
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    # 两次都不合格：空回复、以及根本不是信封的纯文本
-    transport = ScriptedTransport("   ", "就是一段没人话的话")
+    # 三次都不合格：空回复、根本不是信封的纯文本、以及一个不完整的 JSON
+    transport = ScriptedTransport("   ", "就是一段没人话的话", "{}")
 
     with pytest.raises(dialogue.DialogueError):
         dialogue.say(conn, plan_id, "我先说说现状", transport=transport)
 
-    assert len(transport.seen) == 2  # 形状不合格 → 带原因重试一次（T31）
+    # 形状不合格 → 带原因重说一次；**重说也计入这一轮的模型调用上限**（决策 40）
+    assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS
     rows = dialogue.messages_of(conn, plan_id)
     assert [row["role"] for row in rows] == ["user"]  # 你的话留着
     assert dialogue.turns_used(conn, plan_id) == 1
-    assert pending_changes(conn) == []  # 两次都不合格 → 一条提案都没落
+    assert pending_changes(conn) == []  # 一直不合格 → 一条提案都没落
 
 
 def test_a_paused_plan_can_still_be_discussed(conn):
@@ -208,17 +234,42 @@ def test_a_paused_plan_can_still_be_discussed(conn):
     add_profile(conn)
     plan_id = make_plan(conn)
     plan.pause_plan(conn, plan_id)
-    transport = ScriptedTransport(envelope("那就先停两周，把手上这条交出去再回来。"))
+    transport = ScriptedTransport(
+        ask("read_current_plan"), envelope("那就先停两周，把手上这条交出去再回来。")
+    )
 
     done = dialogue.say(conn, plan_id, "我有点想停一下", transport=transport)
 
     assert done["turns_used"] == 1
-    assert "paused" in context_of(transport)  # 上下文里如实写着它现在是暂停
+    assert "paused" in facts_of(transport)  # 它读来的计划事实里如实写着现在是暂停
 
 
-# ---------- 上下文 ----------
+# ---------- 资料是它自己读的（2026-09-20，决策 40） ----------
+#
+# 用户拍板的方向：Agent 得**主动判断需要哪些资料**，而不是每轮把整棵计划树、全部档案
+# 一起塞给它。所以这一节验两件事：① 不预装——目录里只有「能读什么」，没有任何业务事实；
+# ② 读了就真进上下文——它要来的资料原样回填，它据此说话。
 
-def test_the_context_carries_the_execution_facts(conn):
+def test_the_opening_carries_only_the_catalog(conn):
+    """第一轮就预装全部业务事实是不行的——目录只说明「你能读什么」，事实一样没有。"""
+    make_provider(conn)
+    add_profile(conn, "current_state", "晚上有两小时")
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(envelope("嗯"))
+
+    dialogue.say(conn, plan_id, "随便聊聊", transport=transport)
+    opening = opening_of(transport)
+
+    for name in agent_tools.TOOLS:
+        assert name in opening  # 四个只读工具都在目录里
+    assert "把后端写通" not in opening  # 计划目标没预装
+    assert "读 MDN" not in opening  # 阶段与任务没预装
+    assert "晚上有两小时" not in opening  # 长期档案也没预装
+    assert str(dialogue.DIALOGUE_CHAR_LIMIT) not in opening  # 目录里不该有历史上限之类的噪音
+
+
+def test_reading_more_than_one_thing_in_a_single_call(conn):
+    """一次模型调用可以批量要好几样——省得为读两样资料多花一轮模型（决策 40）。"""
     make_provider(conn)
     add_profile(conn, "current_state", "晚上有两小时")
     plan_id = make_plan(conn)
@@ -228,24 +279,69 @@ def test_the_context_carries_the_execution_facts(conn):
         "SELECT id FROM plan_node WHERE parent_id = ? AND title = '跑通一个路由'", (stage_id,)
     ).fetchone()["id"]
     plan.submit_report(conn, int(done_task), status="done", note="能跑了")
-    transport = ScriptedTransport(envelope("嗯"))
+    transport = ScriptedTransport(
+        ask("read_current_plan", "read_recent_reports", "read_profile"),
+        envelope("嗯"),
+    )
 
-    dialogue.say(conn, plan_id, "下一步做什么", transport=transport)
-    context = context_of(transport)
+    done = dialogue.say(conn, plan_id, "结合我最近的状态，下一步做什么", transport=transport)
+    facts = facts_of(transport)  # 读来的资料在下一次调用的最后一条里回填
 
-    assert "把后端写通" in context  # 计划目标
-    assert "学 HTTP" in context  # 阶段
-    assert "讲清一次请求全流程" in context  # 阶段的交付物
-    assert "[x] 跑通一个路由" in context  # 任务与它的状态（打勾了）
-    assert "[ ] 读 MDN" in context
-    assert "2026-10-01" in context  # 截止日
-    assert "能跑了" in context  # 最近报告
-    assert "https://example.com/x" in context  # 已提交的交付物
-    assert "晚上有两小时" in context  # 长期档案
-    assert "落后情况" in context
-    # 节点编号必须进上下文（T31）：建议里要照抄它们，不给编号它就没处指
-    assert f"（#{stage_id}）" in context
-    assert f"（#{done_task}）" in context
+    assert "把后端写通" in facts  # 计划目标
+    assert "学 HTTP" in facts  # 阶段
+    assert "讲清一次请求全流程" in facts  # 阶段的交付物
+    assert "[x] 跑通一个路由" in facts  # 任务与它的状态（打勾了）
+    assert "[ ] 读 MDN" in facts
+    assert "2026-10-01" in facts  # 截止日
+    assert "能跑了" in facts  # 最近报告
+    assert "https://example.com/x" in facts  # 已提交的交付物
+    assert "晚上有两小时" in facts  # 长期档案
+    assert "落后情况" in facts
+    # 节点编号必须在读来的资料里（T31）：建议里要照抄它们，不给编号它就没处指
+    assert f"（#{stage_id}）" in facts
+    assert f"（#{done_task}）" in facts
+    # 这一轮读了什么，回执里说得清清楚楚（界面「本轮依据」就是它）
+    assert done["tools_used"] == ["read_current_plan", "read_recent_reports", "read_profile"]
+    assert done["run"]["tool_calls"] == 3 and done["run"]["status"] == "ok"
+    assert done["stop_reason"].startswith("答完了")
+
+
+def test_a_turn_that_reads_nothing_still_works(conn):
+    """不读也能答（闲聊那种）。那时 `tools_used` 是空的，运行账照样留一行。"""
+    make_provider(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(envelope("那就先从最小的一步开始。"))
+
+    done = dialogue.say(conn, plan_id, "随便聊聊", transport=transport)
+
+    assert done["tools_used"] == [] and done["run"]["tool_calls"] == 0
+    assert done["calls"] == 1  # 老字段没动：还是「调了几次模型」
+
+
+def test_the_run_is_recorded_and_comes_back_with_the_view(conn):
+    """运行账落在 `agent_run` 里，看对话时随消息带回来——刷新页面「本轮依据」还在。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(ask("read_current_plan"), envelope("嗯"))
+
+    done = dialogue.say(conn, plan_id, "下一步做什么", transport=transport)
+    planned = done["tools_used"]
+
+    row = conn.execute("SELECT * FROM agent_run ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["plan_id"] == plan_id and row["status"] == "ok"
+    assert row["model_calls"] == 2 and row["tool_calls"] == 1
+    assert row["dialogue_id"] == dialogue.messages_of(conn, plan_id)[-1]["id"]  # 挂在助手那条上
+    carried = dialogue.view(conn, plan_id)["messages"][-1]["run"]
+    assert carried["status"] == "ok"
+    # GET 的 `run` 与 POST 回执的 `tool_names` 永远同一个形状（前端两处都靠它）
+    assert carried["tool_names"] == planned == ["read_current_plan"]
+    assert [tool["name"] for tool in carried["tools"]] == ["read_current_plan"]
+    assert carried["tools"][0]["ok"] is True
+    assert "阶段" in carried["tools"][0]["summary"]  # 人话摘要，不是原始字段
+    assert carried["stop_reason"] == done["stop_reason"]
+    # 你那一句上没有运行账（助手那条才有）
+    assert dialogue.view(conn, plan_id)["messages"][-2]["run"] is None
 
 
 def test_history_is_truncated_from_the_earliest(conn):
@@ -419,13 +515,13 @@ def test_at_most_one_suggestion_by_shape(conn):
         },
         ensure_ascii=False,
     )
-    transport = ScriptedTransport(two, two)
+    transport = ScriptedTransport(two, two, two)
 
     with pytest.raises(dialogue.DialogueError):
         dialogue.say(conn, plan_id, "帮我看看", transport=transport)
 
-    assert len(transport.seen) == 2  # 不合格 → 带原因重说一次
-    assert "字段不合格" in transport.seen[1]["payload"]["messages"][-1]["content"]
+    assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS  # 不合格 → 带原因重说
+    assert "字段不合格" in transport.seen[-1]["payload"]["messages"][-1]["content"]
     assert pending_changes(conn) == []
 
 
@@ -440,9 +536,13 @@ def bad_suggestions(stage_id: int, task_id: int) -> list[tuple[dict, str]]:
         ({"action": "update_node", "node_id": task_id, "fields": {"due_date": "2026-10-01"}, "why": "理由"}, "一模一样"),
         ({"action": "update_node", "node_id": task_id, "fields": {"due_date": "下周三"}, "why": "理由"}, "不是日期"),
         ({"action": "update_node", "node_id": task_id, "fields": {"deliverable": "交个东西"}, "why": "理由"}, "只属于阶段"),
-        ({"action": "add_task", "node_id": stage_id, "task": {}, "why": "理由"}, "要有 title"),
+        ({"action": "add_task", "node_id": stage_id, "task": {}, "why": "理由"}, "tasks 里至少写一件"),
         ({"action": "add_task", "node_id": task_id, "task": {"title": "新任务"}, "why": "理由"}, "只能挂在阶段下"),
         ({"action": "add_task", "node_id": stage_id, "task": {"title": "读 MDN"}, "why": "理由"}, "已经开着同名任务"),
+        (
+            {"action": "add_task", "node_id": stage_id, "tasks": [{"title": " "}], "why": "理由"},
+            "没写 title",
+        ),
         ({"action": "add_stage", "stage": {"title": "新阶段"}, "why": "理由"}, "没写「要交的东西」"),
         ({"action": "add_stage", "stage": {"title": "学 HTTP", "deliverable": "再讲一遍"}, "why": "理由"}, "同名阶段"),
     ]
@@ -458,11 +558,11 @@ def test_a_bad_suggestion_is_unqualified_and_lands_nothing(conn):
 
     for bad, hint in bad_suggestions(stage_id, task_id):
         payload = envelope("我提一条", bad)
-        transport = ScriptedTransport(payload, payload)
+        transport = ScriptedTransport(payload, payload, payload)
         with pytest.raises(dialogue.DialogueError):
             dialogue.say(conn, plan_id, "帮我看看这条", transport=transport)
-        assert len(transport.seen) == 2, bad  # 不合格 → 带原因重说一次
-        assert hint in transport.seen[1]["payload"]["messages"][-1]["content"], bad
+        assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS, bad  # 不合格 → 带原因重说
+        assert hint in transport.seen[-1]["payload"]["messages"][-1]["content"], bad
         assert pending_changes(conn) == [], bad
     assert plan.get_node(conn, task_id)["due_date"] == "2026-10-01"  # 计划一个字没动
 
@@ -493,12 +593,12 @@ def test_a_suggestion_cannot_touch_another_plan(conn):
     other_stage = plan.add_node(conn, other_plan, "stage", "背单词", deliverable="记住 500 词")
     other_task = plan.add_node(conn, other_plan, "task", "每天二十分钟", parent_id=other_stage)
     payload = envelope("顺手把英语那边也改了", update_due(other_task))
-    transport = ScriptedTransport(payload, payload)
+    transport = ScriptedTransport(payload, payload, payload)
 
     with pytest.raises(dialogue.DialogueError):
         dialogue.say(conn, plan_id, "顺便看看", transport=transport)
 
-    assert "不属于计划" in transport.seen[1]["payload"]["messages"][-1]["content"]
+    assert "不属于计划" in transport.seen[-1]["payload"]["messages"][-1]["content"]
     assert pending_changes(conn) == []
     assert plan.get_node(conn, other_task)["due_date"] is None
 
@@ -579,10 +679,142 @@ def test_confirming_an_add_task_puts_it_under_the_named_stage(conn):
     decided = proposals.decide(conn, done["proposal_id"], approved=True)
 
     assert decided["effect"] == "node_added"
-    assert decided["added"]["level"] == "task" and decided["added"]["parent_id"] == stage_id
-    added = plan.get_node(conn, int(decided["added"]["id"]))
+    first = decided["added"]["nodes"][0]
+    assert first["level"] == "task" and first["parent_id"] == stage_id
+    added = plan.get_node(conn, int(first["id"]))
     assert added["title"] == "把错误处理补上"
     assert added["parent_id"] == stage_id and added["due_date"] == "2026-10-15"
+
+
+def test_one_suggestion_can_carry_several_tasks(conn):
+    """2026-09-19 用户走查放宽：往一个已有阶段里补任务，一条建议可以给一批。
+
+    真实使用里「帮我排一下这个阶段的任务」是常态，一次只让加一件会把人逼成连点好几次
+    确认，还逼出两组重复任务（他在真库里撞上过）。上限仍在（`MAX_TASKS`）。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    stage_id = node_id_of(conn, "学 HTTP")
+    suggestion = {
+        "action": "add_task",
+        "node_id": stage_id,
+        "tasks": [
+            {"title": "把错误处理补上", "due_date": "2026-10-15"},
+            {"title": "写一个并发压测脚本"},
+            {"title": "给接口加日志"},
+        ],
+        "why": "他要把这个阶段的任务一次排完",
+    }
+    transport = ScriptedTransport(envelope("排好了，三条一起给你。", suggestion))
+    done = dialogue.say(conn, plan_id, "帮我排一下这个阶段的任务", transport=transport)
+
+    assert done["suggestion"]["summary"] == (
+        "加 3 件任务（挂在「学 HTTP」下）：把错误处理补上（截止 2026-10-15）；"
+        "写一个并发压测脚本；给接口加日志"
+    )
+    decided = proposals.decide(conn, done["proposal_id"], approved=True)
+
+    assert decided["effect"] == "node_added"
+    nodes = decided["added"]["nodes"]
+    assert [node["title"] for node in nodes] == [
+        "把错误处理补上",
+        "写一个并发压测脚本",
+        "给接口加日志",
+    ]
+    assert all(node["level"] == "task" and node["parent_id"] == stage_id for node in nodes)
+    created = plan.get_node(conn, int(nodes[1]["id"]))
+    assert created["parent_id"] == stage_id and created["due_date"] is None
+
+
+def test_a_stage_can_be_added_together_with_its_tasks(conn):
+    """加阶段时能一次连它下面的任务一起建——真实使用里最常见的形状。
+
+    为什么要连建：一个阶段拆出来就是几件任务；先建空壳阶段再一件件补，计划表上会出现
+    一个「一个任务都没有」的阶段，看着像空壳（他在真库里就撞上过这个观感）。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    suggestion = {
+        "action": "add_stage",
+        "stage": {
+            "title": "开发日志上线",
+            "deliverable": "一个已开好且发过内容的账号，至少 5 条内容上线",
+            "why": "手上没有在建的东西，先把现成素材发出去验证节奏",
+        },
+        "tasks": [
+            {"title": "选定平台开号并发出第一条"},
+            {"title": "录一条两账号数据互不可见的屏", "due_date": "2026-10-02"},
+        ],
+        "why": "他要把这一阶段一次建出来，别一件一件挤",
+    }
+    transport = ScriptedTransport(envelope("阶段和它的任务一起给你。", suggestion))
+    done = dialogue.say(conn, plan_id, "加一个阶段，里面放两件任务", transport=transport)
+
+    assert "含 2 件任务" in done["suggestion"]["summary"]
+    decided = proposals.decide(conn, done["proposal_id"], approved=True)
+
+    assert decided["effect"] == "node_added"
+    nodes = decided["added"]["nodes"]
+    assert [node["level"] for node in nodes] == ["stage", "task", "task"]
+    stage_node = plan.get_node(conn, int(nodes[0]["id"]))
+    assert stage_node["title"] == "开发日志上线"
+    assert stage_node["deliverable"] == "一个已开好且发过内容的账号，至少 5 条内容上线"
+    assert [row["title"] for row in plan.get_stages(conn, plan_id)] == [
+        "学 HTTP",
+        "开发日志上线",
+    ]  # 新阶段仍排在最后
+    children = conn.execute(
+        "SELECT * FROM plan_node WHERE parent_id = ? ORDER BY sort_order, id",
+        (int(nodes[0]["id"]),),
+    ).fetchall()
+    assert [row["title"] for row in children] == [
+        "选定平台开号并发出第一条",
+        "录一条两账号数据互不可见的屏",
+    ]
+    assert children[1]["due_date"] == "2026-10-02"
+
+
+def test_too_many_tasks_in_one_suggestion_is_refused(conn):
+    """上限仍在：一条建议最多 MAX_TASKS 件——一次改半个计划就没法复核了。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    stage_id = node_id_of(conn, "学 HTTP")
+    too_many = [{"title": f"任务 {index}"} for index in range(plan_change.MAX_TASKS + 1)]
+    bad = envelope(
+        "排好了。",
+        {"action": "add_task", "node_id": stage_id, "tasks": too_many, "why": "排一下"},
+    )
+    # 一直不合格 → 按上限中止，且**一条都不落**
+    transport = ScriptedTransport(bad, bad, bad)
+    with pytest.raises(dialogue.DialogueError) as error:
+        dialogue.say(conn, plan_id, "把这个阶段的任务全排出来", transport=transport)
+    assert f"最多加 {plan_change.MAX_TASKS} 件" in str(error.value)
+    assert pending_changes(conn) == []
+
+
+def test_two_tasks_with_the_same_name_in_one_batch_are_refused(conn):
+    """批内自己撞自己也要拦：否则一次确认就把同一件事建了两遍。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    stage_id = node_id_of(conn, "学 HTTP")
+    bad = envelope(
+        "排好了。",
+        {
+            "action": "add_task",
+            "node_id": stage_id,
+            "tasks": [{"title": "录演示视频"}, {"title": " 录演示视频 "}],
+            "why": "排一下",
+        },
+    )
+    transport = ScriptedTransport(bad, bad, bad)
+    with pytest.raises(dialogue.DialogueError) as error:
+        dialogue.say(conn, plan_id, "把这个阶段的任务排出来", transport=transport)
+    assert "重名" in str(error.value)
+    assert pending_changes(conn) == []
 
 
 def test_confirming_an_add_stage_puts_it_last(conn):
@@ -609,7 +841,7 @@ def test_confirming_an_add_stage_puts_it_last(conn):
     assert decided["effect"] == "node_added"
     titles = [row["title"] for row in plan.get_stages(conn, plan_id)]
     assert titles == ["学 HTTP", "做一个小服务"]  # 新阶段排在最后
-    assert plan.get_node(conn, int(decided["added"]["id"]))["deliverable"] == (
+    assert plan.get_node(conn, int(decided["added"]["nodes"][0]["id"]))["deliverable"] == (
         "一个能在浏览器里访问到的地址"
     )
 
@@ -662,10 +894,11 @@ def test_from_chat_to_archive_in_three_steps(conn):
     # 旧的没被顶掉：这是**新增**一条，不是取代（要取代得先有「哪一条该被取代」的信息）
     assert dialogue.view(conn, plan_id)["turns_used"] == 1
 
-# ---------- 上下文里「这个计划是怎么来的」（2026-09-18 用户要求） ----------
+# ---------- 「这个计划是怎么来的」（2026-09-18 用户要求；2026-09-20 起改为按需读） ----------
 #
 # 他的原话：只要是这个计划里面的，都该让它知道——包括当时没勾的部分与每个阶段的理由。
-# 所以在「计划现在长什么样」之外，上下文还带上这条方向的来历与蓝图全貌。
+# 决策 40 之后这一整块不再预装，改成 `read_plan_origin` 这一个工具：问「当初为什么这么排」
+# 时它自己去读，读完进上下文。
 
 def add_lineage(conn, plan_id: int, *, title: str = "学 HTTP", why: str = "对主线有帮助"):
     """造一段「定方向」的历史：一条被采纳的候选 + 它那段对话。"""
@@ -703,23 +936,23 @@ def add_blueprint(conn, plan_id: int, *, stages: list[dict], status: str = "pend
     return proposal_id
 
 
-def test_context_carries_how_the_direction_came_about(conn):
+def test_reading_the_origin_brings_how_the_direction_came_about(conn):
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
     add_lineage(conn, plan_id)
-    transport = ScriptedTransport(envelope("嗯"))
+    transport = ScriptedTransport(ask("read_plan_origin"), envelope("嗯"))
 
-    dialogue.say(conn, plan_id, "开始吧", transport=transport)
-    context = context_of(transport)
+    dialogue.say(conn, plan_id, "当初为什么先排学 HTTP", transport=transport)
+    facts = facts_of(transport)
 
-    assert "这条方向的来历" in context
-    assert "学 HTTP" in context and "对主线有帮助" in context  # 采纳的是哪条、当时给的理由
-    assert "我每周大概能投入 6 小时" in context  # 出蓝图之前聊过什么
-    assert "信息够了" in context  # 助手那侧存的是 JSON，喂回去时渲染成人话
+    assert "这条方向的来历" in facts
+    assert "学 HTTP" in facts and "对主线有帮助" in facts  # 采纳的是哪条、当时给的理由
+    assert "我每周大概能投入 6 小时" in facts  # 出蓝图之前聊过什么
+    assert "信息够了" in facts  # 助手那侧存的是 JSON，喂回去时渲染成人话
 
 
-def test_context_carries_the_blueprint_and_what_was_not_ticked(conn):
+def test_reading_the_origin_brings_the_blueprint_and_what_was_not_ticked(conn):
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
@@ -738,17 +971,17 @@ def test_context_carries_the_blueprint_and_what_was_not_ticked(conn):
         ],
         status="accepted",
     )
-    transport = ScriptedTransport(envelope("嗯"))
+    transport = ScriptedTransport(ask("read_plan_origin"), envelope("嗯"))
 
     dialogue.say(conn, plan_id, "下一步做什么", transport=transport)
-    context = context_of(transport)
+    facts = facts_of(transport)
 
-    assert "蓝图" in context
-    assert "它是后面所有接口的地基" in context  # 每个阶段的理由
-    assert "做一个小服务" in context and "当时没勾，没建" in context  # 没勾的那部分
-    assert "写个 demo" in context and "读 MDN" in context
+    assert "蓝图" in facts
+    assert "它是后面所有接口的地基" in facts  # 每个阶段的理由
+    assert "做一个小服务" in facts and "当时没勾，没建" in facts  # 没勾的那部分
+    assert "写个 demo" in facts and "读 MDN" in facts
     # 已建的那些要标成已建，别让它以为整棵树都没建
-    assert "学 HTTP」（已建）" in context
+    assert "学 HTTP」（已建）" in facts
 
 
 def test_a_superseded_blueprint_version_is_only_counted(conn):
@@ -758,26 +991,28 @@ def test_a_superseded_blueprint_version_is_only_counted(conn):
     stages = [{"title": "学 HTTP", "deliverable": "讲清流程", "why": "地基", "tasks": []}]
     add_blueprint(conn, plan_id, stages=stages, status="superseded")
     add_blueprint(conn, plan_id, stages=stages, status="pending")
-    transport = ScriptedTransport(envelope("嗯"))
+    transport = ScriptedTransport(ask("read_plan_origin"), envelope("嗯"))
 
     dialogue.say(conn, plan_id, "看看", transport=transport)
-    context = context_of(transport)
+    facts = facts_of(transport)
 
-    assert "1 版更早的已被新版顶掉" in context  # 旧版不铺开，只报个数
-    assert "待你勾选的那一版" in context
+    assert "1 版更早的已被新版顶掉" in facts  # 旧版不铺开，只报个数
+    assert "待你勾选的那一版" in facts
 
 
-def test_context_says_so_when_there_is_nothing_to_tell(conn):
+def test_reading_the_origin_says_so_when_there_is_nothing_to_tell(conn):
     """不是从候选/蓝图来的老计划：如实说没有记录，而不是留一片空白。"""
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    transport = ScriptedTransport(envelope("嗯"))
+    transport = ScriptedTransport(ask("read_plan_origin"), envelope("嗯"))
 
-    dialogue.say(conn, plan_id, "开始吧", transport=transport)
-    context = context_of(transport)
+    done = dialogue.say(conn, plan_id, "开始吧", transport=transport)
+    facts = facts_of(transport)
 
-    assert context.count("没有记录") == 2  # 来历与蓝图各一句
+    assert facts.count("没有记录") == 2  # 来历与蓝图各一句
+    # 摘要里也说清「没有记录」，免得把这句读成「读失败了」
+    assert "没有记录" in done["run"]["tools"][0]["summary"]
 
 
 def test_the_lineage_is_truncated_from_the_earliest(conn):
@@ -790,10 +1025,10 @@ def test_the_lineage_is_truncated_from_the_earliest(conn):
         (plan_id, candidate_id, "user", "AAA" * 900, "2026-09-18T11:00:00+08:00"),
     )
     conn.commit()
-    transport = ScriptedTransport(envelope("嗯"))
+    transport = ScriptedTransport(ask("read_plan_origin"), envelope("嗯"))
 
     dialogue.say(conn, plan_id, "接着聊", transport=transport)
-    context = context_of(transport)
+    facts = facts_of(transport)
 
-    assert "AAA" in context  # 最新那一大段留着（它才是「我刚说的」）
-    assert "我每周大概能投入 6 小时" not in context  # 更早的那些被截掉
+    assert "AAA" in facts  # 最新那一大段留着（它才是「我刚说的」）
+    assert "我每周大概能投入 6 小时" not in facts  # 更早的那些被截掉
