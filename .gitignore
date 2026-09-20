@@ -7,3 +7,8 @@ data/*.db
 data/*.bak-*
 exports/
 *.log
+
+# 工具产物（ZCode 本地目录，不入库）
+.zcode/
+.dsh-vision-toolkit/
+.zcodeignore
