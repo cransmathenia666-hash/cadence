@@ -130,6 +130,73 @@ def test_skip_as_completed_unblocks_the_stage(conn):
     assert plan.stage_finished(conn, plan.get_node(conn, stage_id)) is True
 
 
+# ---------- ②b 阶段跳过（T35：SPEC 决策 41） ----------
+#
+# 「不要了」在三层各有一个语义正确的出口：方向层否决＝永久拉黑（太重）、蓝图不勾＝本版不建、
+# 计划里跳过＝这一步不做了（留一句理由）。T35 补的就是第三层里**阶段**那一格。
+
+def test_skip_stage_needs_reason_and_marks_it_finished(conn):
+    plan_id, stage_id = make_plan(conn, due_date="2026-09-01")  # 已经过期，本该算落后
+    task_id = add_task(conn, plan_id, stage_id, "任务 1")
+
+    with pytest.raises(plan.PlanError):
+        plan.skip_node(conn, stage_id, reason="   ")
+    assert plan.get_node(conn, stage_id)["status"] == "not_started"  # 没动它
+
+    result = plan.skip_node(conn, stage_id, reason="这条路先不走了，转去做别的")
+
+    assert result["level"] == "stage"
+    assert result["node_status"] == "skipped"
+    # 其下的任务原样留着——它们是痕迹，不是待办
+    assert plan.get_node(conn, task_id)["status"] == "not_started"
+    assert plan.stage_completion(conn, stage_id)["total"] == 1
+    # 跳过视同完成：阶段完成判定直接满足（同「没有任务的阶段」那条逻辑）
+    assert plan.stage_finished(conn, plan.get_node(conn, stage_id)) is True
+    plan_row = plan.get_node(conn, stage_id)
+    assert plan.node_lag_days(conn, plan_row, TODAY) is None  # 落后量不再算它
+    assert plan.plan_lag(conn, plan_id, TODAY)["behind"] is False
+    assert ledger.history(conn, "plan_node", stage_id)[-1]["reason"] == "这条路先不走了，转去做别的"
+
+
+def test_skipping_the_current_stage_moves_to_the_next_one(conn):
+    plan_id, first_stage = make_plan(conn)
+    second = plan.add_node(conn, plan_id, "stage", "阶段 2")
+
+    assert plan.current_stage(conn, plan_id)["id"] == first_stage
+    plan.skip_node(conn, first_stage, reason="这一步先不做了")
+    assert plan.current_stage(conn, plan_id)["id"] == second
+
+
+def test_skip_refuses_a_checkpoint(conn):
+    """周打卡不给跳——它是节奏节点，报告里本来就有「跳过」这个状态。"""
+    plan_id, stage_id = make_plan(conn)
+    checkpoint_id = plan.add_node(conn, plan_id, "checkpoint", "本周打卡", parent_id=stage_id)
+
+    with pytest.raises(plan.PlanError):
+        plan.skip_node(conn, checkpoint_id, reason="这周没打")
+    assert plan.get_node(conn, checkpoint_id)["status"] == "not_started"
+
+
+def test_skip_route_accepts_a_stage(conn):
+    """路由是同一条（`/skip`），阶段与任务都能走——只认自己的层级。"""
+    plan_id, stage_id = make_plan(conn)
+
+    result = post_task_skip(stage_id, TaskSkipIn(reason="这一步不做了"), conn)
+
+    assert result["level"] == "stage" and result["node_status"] == "skipped"
+
+    with pytest.raises(HTTPException):
+        post_task_skip(999, TaskSkipIn(reason="不存在"), conn)
+
+
+def test_skip_task_still_refuses_a_stage(conn):
+    """`skip_task` 保留原口径（只认任务）——阶段得走 `skip_node`。"""
+    _, stage_id = make_plan(conn)
+
+    with pytest.raises(plan.PlanError):
+        plan.skip_task(conn, stage_id, reason="想跳阶段")
+
+
 # ---------- ③ 交付物提交 ----------
 
 def test_deliverable_resubmit_keeps_history(conn):

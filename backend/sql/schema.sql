@@ -36,17 +36,24 @@ CREATE INDEX IF NOT EXISTS idx_ledger_entity ON ledger_event (entity_type, entit
 -- 每轮输入：search（不知道学什么）/ evaluate（判断某个资料值不值得学）
 -- plan_id（2026-09-17 T24 加）：这一轮针对哪个计划；为空 = 「新方向（不属于任何计划）」。
 -- 候选随请求继承这个归属，采纳时才知道该落进哪个计划。老库由 db.init 的加列迁移补齐。
+-- clarify（2026-09-20 T36 加）：这一轮问出的追问（JSON：{question, missing, answer}）。
+-- 追问为什么在这里而不另立表：它本就是「这一轮说过什么」的一部分，且「问过的不再问」
+-- 要求下一轮读得到——反馈流水是从这张表拼的。answer 为空 = 还没答。
 CREATE TABLE IF NOT EXISTS learning_request (
   id         INTEGER PRIMARY KEY,
   kind       TEXT    NOT NULL,
   raw_text   TEXT    NOT NULL,
   plan_id    INTEGER,
+  clarify    TEXT,
   created_at TEXT    NOT NULL
 );
 
 -- 候选清单：每条都带初判（why / depth_target），审批结果留痕以便去重
 -- status：proposed / accepted / rejected / expired（过期 = 新一轮「找」落库时上一轮未裁定的自动过期；
 -- 过期 ≠ 否决——不进禁区，模型以后还能再推）
+-- payload（2026-09-20 T34 加）：路径形状（shape=path）的**步骤草案**，JSON
+-- {shape, steps:[{title, deliverable, why}]}——与 `proposal.payload` 同一用法。
+-- 步骤不是候选：不单独裁定、不进禁区；伞候选过期时它跟着失效。
 CREATE TABLE IF NOT EXISTS candidate (
   id            INTEGER PRIMARY KEY,
   request_id    INTEGER NOT NULL,
@@ -56,6 +63,7 @@ CREATE TABLE IF NOT EXISTS candidate (
   depth_target  TEXT,                     -- 浅尝 / 够用 / 熟练 / 精通
   rank          INTEGER,
   is_recommended INTEGER NOT NULL DEFAULT 0,
+  payload       TEXT,
   status        TEXT    NOT NULL DEFAULT 'proposed',  -- proposed / accepted / rejected
   superseded_by INTEGER,
   reject_reason TEXT,

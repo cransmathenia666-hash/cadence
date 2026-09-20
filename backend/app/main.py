@@ -110,6 +110,7 @@ _FIELD_LABELS: dict[str, str] = {
     "reason": "理由",
     "accept": "是否采纳",
     "kind": "类型",
+    "clarify_answer": "对追问的回答",
 }
 
 # Pydantic 的错误类型 → 中文说明。没登记的类型回退用原始的英文 msg——
@@ -261,10 +262,15 @@ def post_task_check(node_id: int, conn: sqlite3.Connection = Depends(get_conn)) 
 def post_task_skip(
     node_id: int, payload: TaskSkipIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """跳过任务：跳过算完成的一种，但必须写一句理由（它是裁定，要留痕）。"""
+    """跳过：**阶段与任务**都能跳，跳过算完成的一种，但必须写一句理由（它是裁定，要留痕）。
+
+    2026-09-20（T35，决策 41）起放开到阶段：「建出来之后不要某一步」由此有了出口——
+    在方向层否决是永久拉黑，太重；蓝图勾选只是「本版不建」；已经建出来的这一步要收回，
+    就是这里。周打卡不给跳（它是节奏节点，报告里本来就有「跳过」这个状态）。
+    """
     _require_node(conn, node_id)
     try:
-        return plan.skip_task(conn, node_id, payload.reason)
+        return plan.skip_node(conn, node_id, payload.reason)
     except plan.PlanError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -554,6 +560,15 @@ class RequestIn(BaseModel):
         default=None,
         description="这一轮针对哪个计划（search 用）；不传 = 「新方向（不属于任何计划）」",
     )
+    clarify_answer: str | None = Field(
+        default=None,
+        description=(
+            "回答上一轮追问槽的那句话（search 用，2026-09-20 T36 新增）。"
+            "给了就把它与**原问题**拼成这一轮的输入（不拼上原问题，下一轮模型就丢了前提），"
+            "并把这条追问标记成「已答」进反馈流水，后续轮次不再重复问同一件事。"
+            "没有待答的追问时，这句话会作为补充缀在 raw_text 后面，不会被丢掉"
+        ),
+    )
 
 
 class VerdictIn(BaseModel):
@@ -595,20 +610,43 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
     `plan_id` 是这一轮针对的计划（SPEC 决策 33 ①）：带上它，「找」会把该计划的当前阶段
     当上下文；不传 = 「新方向（不属于任何计划）」。
 
-    `clarify` 是「找」的追问槽位（SPEC 决策 35 ②）：模型觉得档案缺了某类信息时会先问一句。
-    它**不落库**——只在这次响应里给你，你回答的那句话就是下一轮的输入。
+    `clarify` 是「找」的追问槽位（SPEC 决策 35 ②）：模型觉得档案缺了某类信息时会先问一句，
+    你回答的那句话就是下一轮的输入。
+
+    `shape` 与 `steps` 是 2026-09-20 T34 新增的（SPEC 决策 41）：这一轮它给的是一条路
+    （`path`：1 条伞候选 + 2–8 个先后步骤）还是几个互相竞争的方向（`directions`）。
+    `path` 时那一轮只落**一行**伞候选，步骤进它的 payload——步骤不单独裁定、不进禁区。
+
+    回答追问走 `clarify_answer`（T36）：后端把「原问题 + 你的回答」拼成这一轮的输入，
+    并把那条追问标成已答（进反馈流水，后续轮次不再重复问同一件事）。
     """
-    request_id = advisor.record_request(conn, payload.kind, payload.raw_text, payload.plan_id)
+    raw_text = payload.raw_text
+    if payload.kind == "search" and str(payload.clarify_answer or "").strip():
+        answer = str(payload.clarify_answer).strip()
+        asked = advisor.pending_clarify(conn, payload.plan_id)
+        if asked is None:
+            # 没有待答的追问（页面刷新过、或已经答过一遍）：不吞掉你的话，缀在后面
+            raw_text = f"{raw_text}\n补充：{answer}"
+        else:
+            advisor.mark_clarify_answered(conn, asked["request_id"], answer)
+            raw_text = f"{asked['question']}\n我的回答：{answer}"
+
+    request_id = advisor.record_request(conn, payload.kind, raw_text, payload.plan_id)
     try:
         if payload.kind == "search":
-            found = advisor.find_candidates(conn, payload.raw_text, plan_id=payload.plan_id)
+            found = advisor.find_candidates(conn, raw_text, plan_id=payload.plan_id)
             candidate_ids = advisor.propose_candidates(
                 conn, request_id=request_id, result=found
             )
+            if found["clarify"] is not None:
+                # 追问落库（T36）：只记「问了什么、缺哪类」，answer 等你下一轮回答时补上
+                advisor.record_clarify(conn, request_id, found["clarify"])
             return {
                 "request_id": request_id,
                 "kind": "search",
                 "plan_id": found["plan_id"],
+                "shape": found["shape"],
+                "steps": found["steps"],
                 "candidate_ids": candidate_ids,
                 "candidates": found["candidates"],
                 "recommended_start": found["recommended_start"],
@@ -620,7 +658,7 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
                 "feedback_lines": found["feedback_lines"],
                 "calls": found["calls"],
             }
-        result = advisor.judge(conn, payload.raw_text)
+        result = advisor.judge(conn, raw_text)
     except advisor.AdvisorError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except llm.LlmError as error:

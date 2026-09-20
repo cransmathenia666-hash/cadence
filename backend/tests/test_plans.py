@@ -70,9 +70,13 @@ def make_plan(conn, goal: str) -> int:
 
 
 def found_json(*titles: str) -> str:
-    """一份合格的「找」输出（依据 id 由调用方保证存在）。"""
+    """一份合格的「找」输出（依据 id 由调用方保证存在）。
+
+    `shape` 是必填的（T34）：这几个用例要的都是「几条互相竞争的方向」，所以写 directions。
+    """
     return json.dumps(
         {
+            "shape": "directions",
             "candidates": [
                 {
                     "title": title,

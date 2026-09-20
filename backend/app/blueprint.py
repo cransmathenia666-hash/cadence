@@ -217,6 +217,29 @@ def _background(conn: sqlite3.Connection, candidate: sqlite3.Row, plan_id: int) 
         f"- 标题：{candidate['title']}",
         f"- 当时的理由：{candidate['why']}",
         f"- 建议深度：{candidate['depth_target']}",
+    ]
+    steps = advisor.candidate_steps(candidate)
+    if steps:
+        # T34（决策 41）：`path` 形状的候选自己带着「这一条路上的先后几步」。它是**底稿**
+        # 不是成品——规划对话要做的是在它上面增减，而不是从零再问一遍。
+        lines += [
+            "",
+            "【这条路它给的先后步骤（草案，不是成品）】",
+        ]
+        for index, step in enumerate(steps, start=1):
+            head = f"{index}. {str(step.get('title') or '').strip()}"
+            deliverable = str(step.get("deliverable") or "").strip()
+            why = str(step.get("why") or "").strip()
+            lines.append(head)
+            if deliverable:
+                lines.append(f"   要交的东西：{deliverable}")
+            if why:
+                lines.append(f"   为什么排在这个位置：{why}")
+        lines += [
+            "**以这份草案为底稿**：哪儿要合并、哪儿要补一步、哪儿这轮先不做，你直接说；"
+            "别把它当作没看见、从零再问我一遍。",
+        ]
+    lines += [
         "",
         "【我的长期档案】方括号里是类别（判断要对着它说，别讲放之四海皆准的话）：",
     ]
@@ -343,6 +366,9 @@ def view(conn: sqlite3.Connection, candidate_id: int, plan_id: int | None = None
         "max_turns": MAX_TURNS,
         # 生成前至少要聊过一轮（决策 36：不是一次性静默生成）
         "can_generate": used >= 1,
+        # T34：这条候选自带的步骤草案（只有 path 形状的候选有）。对话区顶部把它列出来，
+        # 让你看得见「它在照哪份底稿聊」；刷新页面也还在（从 payload 解，不靠当刻响应）。
+        "steps": advisor.candidate_steps(row),
         "blueprint": None if pending is None else {
             "id": int(pending["id"]),
             "created_at": pending["created_at"],

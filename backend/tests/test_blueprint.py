@@ -625,3 +625,68 @@ def test_building_into_a_closed_plan_is_refused(conn):
 
     row = conn.execute("SELECT status FROM proposal WHERE id = ?", (proposal_id,)).fetchone()
     assert row["status"] == "pending"
+
+# ---------- 路径形状的步骤草案进对话上下文（T34：SPEC 决策 41） ----------
+#
+# 采纳一条路径候选时，那几步自动建的同名阶段只有一条（伞候选那一条）。步骤是**草案**：
+# 它进规划对话的上下文当底稿，模型在它上面增减，而不是从零再问六轮。
+
+def adopted_path_candidate(conn, steps: list[dict], title: str = "从零到部署学通 agent 开发"):
+    """一条**带步骤草案**的已采纳候选（走真路径，采纳会顺带建同名伞阶段）。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": f"计划：{title}"}, actor="user")
+    request_id = advisor.record_request(conn, "search", "学 agent 开发怎么学", plan_id)
+    candidate_id = ledger.create_active(
+        conn,
+        "candidate",
+        {
+            "request_id": request_id,
+            "title": title,
+            "why": "对主线有直接帮助",
+            "depth_target": "够用",
+            "rank": 1,
+            "payload": json.dumps({"shape": "path", "steps": steps}, ensure_ascii=False),
+        },
+        actor="agent",
+        reason="测试用",
+    )
+    advisor.decide_candidate(conn, candidate_id, accept=True)
+    return candidate_id, plan_id
+
+
+def test_path_steps_ride_into_the_chat_context(conn):
+    make_provider(conn)
+    add_profile(conn)
+    steps = [
+        {"title": "先把异步基础打牢", "deliverable": "一个会跑的 async 小 demo", "why": "不然后面看不懂调度"},
+        {"title": "写一个能跑通的循环", "deliverable": "一个能跑通的脚本", "why": "前面的基础在这儿用上"},
+    ]
+    candidate_id, plan_id = adopted_path_candidate(conn, steps)
+
+    # 对话区（刷新页面也在）：草案从 candidate.payload 解出来，不靠当刻响应
+    assert [item["title"] for item in blueprint.view(conn, candidate_id, plan_id)["steps"]] == [
+        "先把异步基础打牢",
+        "写一个能跑通的循环",
+    ]
+
+    transport = ScriptedTransport(chat_reply(["每周能投入几小时？"]))
+    blueprint.say(conn, candidate_id, "我想先把基础弄明白", transport=transport)
+
+    prompt = transport.seen[0]["payload"]["messages"][1]["content"]
+    assert "【这条路它给的先后步骤（草案，不是成品）】" in prompt
+    assert "1. 先把异步基础打牢" in prompt
+    assert "一个会跑的 async 小 demo" in prompt
+    assert "不然后面看不懂调度" in prompt
+    assert "以这份草案为底稿" in prompt
+
+
+def test_direction_candidate_has_no_steps_section(conn):
+    """老形状（directions）的候选没有草案——那一段整个不出现，不留空标题。"""
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
+
+    assert blueprint.view(conn, candidate_id, plan_id)["steps"] == []
+
+    transport = ScriptedTransport(chat_reply(["每周几小时？"]))
+    blueprint.say(conn, candidate_id, "先聊两句", transport=transport)
+    assert "步骤（草案" not in transport.seen[0]["payload"]["messages"][1]["content"]

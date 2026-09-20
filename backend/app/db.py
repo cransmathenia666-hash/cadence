@@ -54,6 +54,11 @@ def init(db_path: Path | str | None = None) -> Path:
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-17（T24）：一轮「找」属于哪个计划——候选随请求继承归属
     ("learning_request", "plan_id", "INTEGER"),
+    # 2026-09-20（T34）：路径形状的步骤草案。`candidate` 加一列，与 `proposal.payload` 同一用法
+    ("candidate", "payload", "TEXT"),
+    # 2026-09-20（T36）：这一轮问出的追问（JSON：{question, missing, answer}）。
+    # 「问过的不再问」要求下一轮读得到，而反馈流水是从这张表拼的——所以它必须落库。
+    ("learning_request", "clarify", "TEXT"),
 )
 
 

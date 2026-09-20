@@ -46,6 +46,10 @@ class Brief:
     kinds: tuple[str, ...]
     min_candidates: int
     max_candidates: int
+    # `path` 形状下步骤的条数区间（2026-09-20 T34）。与候选条数分开两个常量：
+    # 「一条路上的几步」和「几个互相竞争的方向」不是同一个量级。
+    min_steps: int = 2
+    max_steps: int = 8
     # 已否决过的标题（归一化前），prompt 里要明确列出来当禁区
     banned_titles: list[str] = field(default_factory=list)
 
@@ -110,18 +114,30 @@ class RouteOnlySource:
             lines += brief.feedback_lines
             lines += [
                 "别再推我已经否决或已经过期的那几条；采纳过的那条也别再重复推（要推就推它的下一步）。",
+                "行尾写着「我问→我答」的，是我已经答过的事实——**别再问第二遍**。",
             ]
 
         lines += [
             "",
             "【硬性要求】",
-            f"- 给 {brief.min_candidates}–{brief.max_candidates} 条候选，**列表顺序就是你排的优先级**"
-            "（最有价值的放第一个）。",
+            "- 先自己判断这一轮给的是哪种**形状**，只能选一种，写进 `shape`：",
+            "  · `directions`（默认）：几条**互相竞争**的方向，每条都能单独采纳或否决。"
+            "我的困惑是「不知道往哪走」时用它。",
+            "  · `path`：**只有当这几条明显是同一条路上的先后步骤**（缺了前面那步就走不到后面那步）"
+            "时才用它——这时只给**一条伞候选**（标题是这条路本身，例如「从零到部署学通 agent 开发」），"
+            "先后步骤放进 `steps`。同一条路上的几步**不是**几个互相竞争的方向：摆成几个方向，"
+            "我就得一条条单独采纳，而否决其中一步会被当成永久拉黑。",
+            f"- `shape` 为 `directions` 时：给 {brief.min_candidates}–{brief.max_candidates} 条候选，"
+            "`steps` 给空数组。",
+            f"- `shape` 为 `path` 时：`candidates` 只放 1 条伞候选，"
+            f"`steps` 给 {brief.min_steps}–{brief.max_steps} 个先后步骤"
+            "（每个 `{title, deliverable, why}`，按先做的顺序；`why` 说清这一步为什么必须排在那个位置）。",
+            "- **列表顺序就是你排的优先级**（最有价值的放第一个）。",
             f"- 每条的 `kind` 只能是这些之一：{' / '.join(brief.kinds)}"
             "（概念 / 资料 / 项目 / 课程）。",
             f"- 每条的 `depth_target` 只能是这些之一：{' / '.join(brief.depth_targets)}。",
-            "- 每条都要写 `why`：为什么对**我**有用——对着上面我的档案说，别讲放之四海皆准的好处。",
-            "- 每条都要给 `profile_item_ids`，写清依据的是上面哪几条档案（写 # 后面的数字），"
+            "- 伞候选也要写 `why` 与 `depth_target`：为什么这条路对**我**有用。",
+            "- 每条候选都要给 `profile_item_ids`，写清依据的是上面哪几条档案（写 # 后面的数字），"
             "只能从上面出现过的 id 里选；编一个不存在的 id 会被判为不合格。",
             "- 某一类方向在我档案里确实找不到依据时，`why` 要明说「依据不足」并说清缺哪类信息，"
             "`profile_item_ids` 给空数组。宁可说依据不足，也不许编造依据。",
@@ -134,12 +150,19 @@ class RouteOnlySource:
             + " / ".join(brief.clarify_keys)
             + "），不许写空泛的话——"
             "像「你想学什么」这种把问题抛回给我的追问会被判为不合格。",
-            "- **`clarify` 不能替代清单**：带追问的这一轮照样要给满 "
-            f"{brief.min_candidates}–{brief.max_candidates} 条候选。没有要追问的就不要给这个字段。",
+            "- **追问只问「关于我的一件事」**：档案里缺的那类事实，一句话就能答完"
+            "（例如「你现在每周能稳定投入几小时」）。**不许问「这条路怎么走」**"
+            "（先学哪个 / 怎么排顺序 / 用什么节奏 / 想先交出什么）——那是采纳之后的规划对话该问的，"
+            "在这里问会被判为不合格。`question` 写一句话，别写成一段、别一次问好几件事。",
+            f"- **`clarify` 不能替代清单**：带追问的这一轮照样按上面的形状给满候选。"
+            "没有要追问的就不要给这个字段。",
             "- 只输出一个 JSON 对象，不要解释、不要 Markdown 代码块。形状："
-            '{"candidates": [{"title": "...", "kind": "...", "why": "...", "depth_target": "...",'
-            ' "profile_item_ids": [数字, ...]}, ...], "recommended_start": "...", "start_reason": "..."'
-            '[, "clarify": {"question": "...", "missing": "..."}]}',
+            '{"shape": "directions", "candidates": [{"title": "...", "kind": "...", "why": "...",'
+            ' "depth_target": "...", "profile_item_ids": [数字, ...]}, ...], "steps": [],'
+            ' "recommended_start": "...", "start_reason": "..."'
+            '[, "clarify": {"question": "...", "missing": "..."}]}；'
+            "`shape` 为 `path` 时是同一个形状，只是 `candidates` 只有 1 条、"
+            '`steps` 给 [{"title": "...", "deliverable": "...", "why": "..."}, ...]。',
         ]
 
         if brief.banned_titles:

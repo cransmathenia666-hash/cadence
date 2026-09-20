@@ -346,13 +346,33 @@ def check_task(conn: sqlite3.Connection, node_id: int, actor: str = "user") -> d
     }
 
 
-def skip_task(
+# 「跳过」认哪几层（T35，SPEC 决策 41）：阶段与任务。周打卡不认——它是节奏节点，
+# 报告本来就带 `skipped` 这个状态，不需要第二个「不做了」的说法。
+SKIPPABLE_LEVELS: tuple[str, ...] = ("stage", "task")
+
+
+def skip_node(
     conn: sqlite3.Connection, node_id: int, reason: str, actor: str = "user"
 ) -> dict[str, Any]:
-    """任务跳过：跳过算完成的一种，但必须写一句理由——它是裁定，要留痕。"""
+    """跳过：**跳过算完成的一种**，但必须写一句理由——它是裁定，要留痕。
+
+    改自 T23 的 `skip_task`（T35 放开到阶段，SPEC 决策 41）。阶段与任务共用这一条路：
+    「不要了」在计划里只有这一个出口（没有真删除——报告与交付物指着节点编号，删了引用全断）。
+
+    阶段跳过时**其下的任务原样留着**：它们是「当时打算做什么」的痕迹，不是待办；
+    落后量不再算这个阶段（`node_lag_days` 对 skipped 一律返回 None），
+    阶段完成判定直接满足（`stage_finished` 看 `SETTLED_STATUSES`）。
+    """
     if not str(reason or "").strip():
-        raise PlanError("跳过任务必须写一句理由——它进台账，回答「当时为什么不做」")
-    node = _require_level(conn, node_id, "task", "跳过")
+        raise PlanError("跳过必须写一句理由——它进台账，回答「当时为什么不做」")
+    node = get_node(conn, node_id)
+    if node is None:
+        raise PlanError(f"节点 id={node_id} 不存在")
+    if node["level"] not in SKIPPABLE_LEVELS:
+        raise PlanError(
+            f"id={node_id} 是 {node['level']}，「跳过」只对阶段与任务用"
+            f"（周打卡用报告里的「跳过」那个状态）"
+        )
     before = node["status"]
     assert_transition(before, "skipped")
     ledger.set_status(
@@ -360,10 +380,19 @@ def skip_task(
     )
     return {
         "node_id": node_id,
+        "level": node["level"],
         "node_status_before": before,
         "node_status": "skipped",
         "proposal_id": None,  # T29：不再顺产推进提案
     }
+
+
+def skip_task(
+    conn: sqlite3.Connection, node_id: int, reason: str, actor: str = "user"
+) -> dict[str, Any]:
+    """任务跳过：只认任务层（阶段跳过走 `skip_node`，`/skip` 路由两条都收）。"""
+    _require_level(conn, node_id, "task", "跳过")
+    return skip_node(conn, node_id, reason, actor)
 
 
 def submit_deliverable(
