@@ -48,6 +48,8 @@ type Row = {
   rejectReason: string | null;
   basis: number[] | null;
   planId: number | null;
+  /** 采纳时落进了哪个计划（T37）——规划对话认它，不认上面的提问归属。 */
+  landingPlanId: number | null;
   /** 这一轮给的是一条路（`path`）还是几个方向（`directions`）——T34。 */
   shape: string;
   /** 路径形状下的分步草案；方向形状下是空数组。 */
@@ -66,6 +68,7 @@ function rowsFromFind(found: FindResult): Row[] {
     rejectReason: null,
     basis: item.profile_item_ids,
     planId: found.plan_id,
+    landingPlanId: null, // 这一批刚找出来，还没采纳
     shape: found.shape,
     steps: found.steps,
   }));
@@ -83,6 +86,7 @@ function rowsFromStored(stored: CandidateList): Row[] {
     rejectReason: item.reject_reason,
     basis: null,
     planId: item.plan_id,
+    landingPlanId: item.landing_plan_id,
     shape: item.shape,
     steps: item.steps,
   }));
@@ -863,7 +867,10 @@ export default function CandidatesPage() {
                   {chattingId === row.id && (
                     <ChatBox
                       candidateId={row.id}
-                      planId={landingPlans[row.id] ?? row.planId}
+                      // 落点优先级：这一轮的采纳回执（刚点的）> 采纳时记下的落点（T37，刷新后
+                      // 就靠它）> 这一轮提问的计划归属。少了中间那一档，「新方向」的候选一刷新
+                      // 页面就会又让你「先指定注入的计划」。
+                      planId={landingPlans[row.id] ?? row.landingPlanId ?? row.planId}
                       title={row.title}
                       plans={plans}
                     />

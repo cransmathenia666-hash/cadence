@@ -704,6 +704,14 @@ export type CandidateRow = {
   reject_reason: string | null;
   /** 这一轮针对的计划；null = 「新方向」。采纳时落点看它（没有就得显式选）。 */
   plan_id: number | null;
+  /**
+   * **采纳时落进了哪个计划**（T37）。未采纳为 null。
+   *
+   * 为什么单独一条：`plan_id` 是「这一轮提问针对哪个计划」，而「新方向」的候选它是空的；
+   * 落点是采纳那一刻现选的，不在这一列里。规划对话认的就是这个落点——不带上它，刷新一次
+   * 页面就会又让你「先指定注入的计划」（甚至报「没有计划归属」）。
+   */
+  landing_plan_id: number | null;
   /** 形状与步骤草案（T34）。2026-09-20 之前落的老候选是 `directions` + 空步骤。 */
   shape: CandidateShape;
   steps: PathStep[];

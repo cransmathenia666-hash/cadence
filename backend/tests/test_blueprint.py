@@ -333,12 +333,13 @@ def test_view_reports_the_plan_recorded_by_the_thread(conn):
     add_profile(conn)
     transport = ScriptedTransport(chat_reply(["第一问？"]))
 
-    # 还没聊过：候选自己查不出归属，界面就得先问用户（见 `view` 的 plan_id 为 null）
-    assert blueprint.view(conn, candidate_id)["plan_id"] is None
+    # 采纳时记下的落点（T37）：刷新页面照样定得下来，不必再问用户一遍
+    assert blueprint.view(conn, candidate_id)["plan_id"] == plan_id
 
     blueprint.say(conn, candidate_id, "第一句", plan_id=plan_id, transport=transport)
 
-    assert blueprint.view(conn, candidate_id)["plan_id"] == plan_id  # 之后从对话里认出来
+    assert blueprint.view(conn, candidate_id)["plan_id"] == plan_id  # 之后从对话里也认
+    assert blueprint.thread_plan(conn, candidate_id) == plan_id  # 对话里记了一份
 
 
 def test_a_recorded_thread_stops_when_its_plan_is_no_longer_running(conn):
@@ -690,3 +691,35 @@ def test_direction_candidate_has_no_steps_section(conn):
     transport = ScriptedTransport(chat_reply(["每周几小时？"]))
     blueprint.say(conn, candidate_id, "先聊两句", transport=transport)
     assert "步骤（草案" not in transport.seen[0]["payload"]["messages"][1]["content"]
+
+
+def test_a_new_direction_candidate_remembers_where_it_landed(conn):
+    """走查踩到的缺口（T37）：采纳后刷新页面，规划对话不该再问「注入哪个计划」。
+
+    「新方向」的候选（那一轮不属于任何计划）落点是采纳那一刻现选的——不记在候选自己身上，
+    刷新一次就只剩当刻响应里那一下，对话便不知道自己在哪个计划里。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = ledger.create_active(conn, "plan", {"goal": "Python 后端"}, actor="user")
+    request_id = advisor.record_request(conn, "search", "从 Python 底座到后端上线")
+    candidate_id = ledger.create_active(
+        conn,
+        "candidate",
+        {
+            "request_id": request_id,
+            "title": "从 Python 工程底座到 FastAPI 后端上线",
+            "why": "对主线有直接帮助",
+            "depth_target": "熟练",
+            "rank": 1,
+        },
+        actor="agent",
+        reason="测试用",
+    )
+    advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)
+
+    # 模拟页面刷新：不带当刻响应里的任何东西再问一遍
+    assert blueprint.view(conn, candidate_id, None)["plan_id"] == plan_id
+
+    transport = ScriptedTransport(chat_reply(["每周几小时？"]))
+    assert blueprint.say(conn, candidate_id, "先打基础", transport=transport)["plan_id"] == plan_id

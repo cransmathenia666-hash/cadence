@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS learning_request (
 -- payload（2026-09-20 T34 加）：路径形状（shape=path）的**步骤草案**，JSON
 -- {shape, steps:[{title, deliverable, why}]}——与 `proposal.payload` 同一用法。
 -- 步骤不是候选：不单独裁定、不进禁区；伞候选过期时它跟着失效。
+-- landing_plan_id（2026-09-21 T37 加）：**采纳时落进了哪个计划**。
+-- 「新方向」的候选（`learning_request.plan_id` 为空）落点是采纳那一刻现选的，此前这个
+-- 事实只活在当刻响应与 `plan_chat` 里——刷新一次页面，规划对话就不知道自己在哪个计划里，
+-- 又让你「先指定注入的计划」（甚至报「没有计划归属」）。落点是候选自己的事实，记在这里。
 CREATE TABLE IF NOT EXISTS candidate (
   id            INTEGER PRIMARY KEY,
   request_id    INTEGER NOT NULL,
@@ -64,6 +68,7 @@ CREATE TABLE IF NOT EXISTS candidate (
   rank          INTEGER,
   is_recommended INTEGER NOT NULL DEFAULT 0,
   payload       TEXT,
+  landing_plan_id INTEGER,                -- 采纳时落进的计划；未采纳为空
   status        TEXT    NOT NULL DEFAULT 'proposed',  -- proposed / accepted / rejected
   superseded_by INTEGER,
   reject_reason TEXT,

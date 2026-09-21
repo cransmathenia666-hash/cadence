@@ -1049,3 +1049,81 @@ def test_old_candidates_without_payload_render_as_directions(conn):
 
     assert item["shape"] == "directions"
     assert item["steps"] == []
+
+
+# ---------- 采纳落点要留得住（T37） ----------
+#
+# 走查发现的缺口：「新方向」的候选（那一轮不属于任何计划）落点是采纳那一刻现选的，此前
+# 这个事实只活在当刻响应与 `plan_chat` 里——刷新一次页面，规划对话就不知道自己在哪个计划里，
+# 又让人「先指定注入的计划」，直接聊甚至报「这条候选没有计划归属」。可它明明已经落进去了。
+
+def fresh_row(conn, candidate_id: int):
+    """重新从库里取一行（模拟页面刷新后不再持有当刻响应里的任何东西）。"""
+    return conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
+
+
+def test_accepting_remembers_the_landing_plan(conn):
+    plan_id = ledger.create_active(conn, "plan", {"goal": "Python 后端"}, actor="user")
+    candidate_id = make_candidate(conn, "从 Python 底座到后端上线")  # 「新方向」，没有归属
+
+    advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)
+
+    row = fresh_row(conn, candidate_id)
+    assert row["landing_plan_id"] == plan_id
+    # 刷新之后照样定得下来——不必再问一次「进哪个计划」
+    assert advisor.landing_plan(conn, row, None) == plan_id
+    # 界面拿得到它（规划对话据此知道自己在哪个计划里）
+    assert advisor.list_candidates(conn)["candidates"][0]["landing_plan_id"] == plan_id
+
+
+def test_landing_plan_refuses_a_different_plan(conn):
+    """落点是既定事实，不是每次调用都能重新表决的。"""
+    landed = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    other = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+    candidate_id = make_candidate(conn, "某条路")
+    advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=landed)
+
+    with pytest.raises(advisor.CandidateConflict):
+        advisor.landing_plan(conn, fresh_row(conn, candidate_id), other)
+
+
+def test_landing_plan_of_a_plan_closed_afterwards_is_reported(conn):
+    """落进去之后计划被收尾了：报「已不是进行中」，而不是含糊的「没有计划归属」。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": "会被收尾"}, actor="user")
+    candidate_id = make_candidate(conn, "某条路")
+    advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)
+    plan.close_plan(conn, plan_id)
+
+    with pytest.raises(advisor.CandidateConflict) as error:
+        advisor.landing_plan(conn, fresh_row(conn, candidate_id), None)
+
+    assert "已不是进行中" in str(error.value)
+
+
+def test_rejecting_leaves_no_landing_plan(conn):
+    candidate_id = make_candidate(conn, "不要的方向")
+
+    advisor.decide_candidate(conn, candidate_id, accept=False, reason="和主线无关")
+
+    assert fresh_row(conn, candidate_id)["landing_plan_id"] is None
+
+
+def test_attributed_candidate_still_lands_in_its_round_plan(conn):
+    """回归：有归属的候选落点与归属一致，两列说的是同一件事。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": "学英语"}, actor="user")
+    candidate_id = make_candidate(conn, "背单词", plan_id=plan_id)
+
+    advisor.decide_candidate(conn, candidate_id, accept=True)
+
+    assert fresh_row(conn, candidate_id)["landing_plan_id"] == plan_id
+
+
+def test_old_accepted_candidate_without_landing_still_resolves(conn):
+    """真库里 2026-09-21 之前采纳的老候选落点是 NULL——有归属的仍按归属定，不受影响。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": "老计划"}, actor="user")
+    candidate_id = make_candidate(conn, "老候选", plan_id=plan_id)
+    ledger.set_status(conn, "candidate", candidate_id, "accepted", actor="user", reason="老库直接改的")
+
+    row = fresh_row(conn, candidate_id)
+    assert row["landing_plan_id"] is None  # 老数据就是没有
+    assert advisor.landing_plan(conn, row, None) == plan_id

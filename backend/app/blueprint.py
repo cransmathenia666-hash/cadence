@@ -78,7 +78,7 @@ def _accepted_candidate(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.
 def resolve_plan(
     conn: sqlite3.Connection, candidate: sqlite3.Row, explicit_plan_id: int | None
 ) -> int:
-    """这段对话属于哪个计划：**调用方说明 > 已有对话记着的 > 候选自带归属**。
+    """这段对话属于哪个计划：**调用方说明 > 已有对话记着的 > 候选自带的采纳落点/归属**。
 
     中间那一档为什么必须存在：候选是「新方向」时（`learning_request.plan_id` 为空），
     落点是采纳那一刻现选的——那个事实当时只活在两个地方：当刻的响应，和 `plan_chat`
@@ -86,8 +86,9 @@ def resolve_plan(
     `view` 一样认 `plan_chat` 的账，否则会出现「对话明明聊成了、最后一步却说没有计划
     归属」——那是同一个流程里两套判断标准，不是用户选错了。
 
-    最后一档复用 `advisor.landing_plan`：采纳落到哪个计划、这段对话记在哪个计划名下、
-    蓝图往哪个计划里建，必须是同一个答案。
+    最后一档复用 `advisor.landing_plan`：采纳落到哪个计划（**2026-09-21 T37 起这一步
+    就记在 `candidate.landing_plan_id` 上，不再依赖「你有没有先聊过一句」**）、
+    这段对话记在哪个计划名下、蓝图往哪个计划里建，必须是同一个答案。
     """
     recorded = thread_plan(conn, int(candidate["id"]))
     if recorded is not None:

@@ -4,6 +4,8 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.14 变更（2026-09-21）**：新增并完成 T37（采纳落点留得住）——用户走查截图发现：**已采纳**的候选上仍写着「该候选为『新方向』，请先指定注入的计划」，因为「新方向」的落点只活在采纳那一刻的响应里，刷新一次就没了。补 `candidate.landing_plan_id` 一列并改归属优先序。
+
 **v0.13 变更（2026-09-20）**：新增并完成 P3.7（T34 候选的路径形状 / T35 阶段跳过 / T36 追问槽收口）——用户走查触发（「五个连续性的方案，不应该独立」、追问槽「有追问、没有输入框」）；方案见 `docs/候选路径与追问槽方案.md`，规格落 SPEC 决策 41 与 31/34/35/36 的修订。用户当日授权 `candidate` 加一列 `payload`；T36 走方案口径 A（加输入框）。
 
 **v0.11 变更（2026-09-18）**：新增并完成 T28（计划级对话——蓝图落地之后接着聊）——用户走查提的第 5 条；对应 SPEC 决策 37 与决策 6 的第二次修订。
@@ -230,6 +232,15 @@
   - Verify：单测盯「规划类追问判不合格并重试」「太长 / 多问号 / 换行的追问判不合格」「关于事实的追问照旧合格」「回答拼成下一轮输入」「已答的追问进反馈流水且 prompt 让模型别再问」「没有待答追问时不吞掉那句话」；`pytest -q`、lint/tsc exit=0
   - Files：`backend/app/advisor.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`backend/app/db.py`、`backend/tests/test_candidates.py`、`frontend/lib/api.ts`、`frontend/app/candidates/page.tsx`、`docs/SPEC.md`（决策 35 两条修订 + 新增 41）
   - 实施记录（2026-09-20）：**追问改为落库**（`learning_request.clarify`，可空 JSON `{question, missing, answer}`）——T25 定的「不落库」挡着「问过的别再问」，因为反馈流水是从库里拼的；它不另立表，追问本就是「这一轮说过什么」的一部分。回答走 `POST /api/requests` 的可选新字段 `clarify_answer`：后端取同一计划归属下最近一轮待答的追问，把它标成已答，并把「原问题 + 我的回答」拼成这一轮的输入；**没有待答追问时**（页面刷新过、或已经答过一遍）那句话作为「补充」缀在 raw_text 后面，不吞掉。追问的判据加了三条：长度上限 60 字、不许换行、问号最多一个，「这条路怎么走」用明确说法表（先学哪 / 什么顺序 / 分几步 / 怎么排 / 取舍…）拦下——只收明确的规划说法，不收「先」「节奏」这类单独的词，免得误伤「你平时的作息节奏」。**真库已 `db.init` 补列**（`learning_request.clarify`）
+
+## P3.8 采纳落点留得住（2026-09-21；用户走查截图触发）
+
+- [x] **T37 采纳时把落点记在候选自己身上**
+  - Acceptance：① `candidate` 加一列 `landing_plan_id`（可空；老库由 `db.init` 加列迁移补齐）；② 采纳时与状态迁移**同一条 UPDATE** 写进去（`ledger.set_status` 的 `extra`，不绕过台账）；③ `advisor.landing_plan` 的优先序改成**采纳落点 > 调用方显式指定 > 候选归属**，三者冲突一律 409；④ 落点指向的计划事后被收尾/作废要在当场核对时报「已不是进行中」，不是留到建树那一步；⑤ `GET /api/candidates` 每条带 `landing_plan_id`，规划对话用它（`planId` 优先序：当刻回执 > 落点 > 提问归属）
+  - Verify：单测盯「采纳后重新取行仍定得下来」「换一个计划要拒」「落点计划被收尾后报得清楚」「否决不留落点」「有归属的候选两列一致」「老候选（无落点）不受影响」「刷新后 `view.plan_id` 不为空、直接聊得下去」；`pytest -q`、`tools\smoke_p1.py`、lint/tsc exit=0
+  - Files：`backend/sql/schema.sql`、`backend/app/db.py`、`backend/app/advisor.py`、`backend/app/blueprint.py`、`backend/tests/test_candidates.py`、`backend/tests/test_blueprint.py`、`frontend/lib/api.ts`、`frontend/app/candidates/page.tsx`、`docs/SPEC.md`（决策 33 ② + 第 11 节两行契约）
+  - 实施记录（2026-09-21）：临时库复现确认根因——采纳落进计划 #1（阶段都建好了），但候选行、那一轮提问、对话表里**一个地方都没记**，所以刷新后 `view.plan_id` 为 `null`、直接聊报「这条候选没有计划归属」；只有「采纳后先聊过一句」的情况下对话表才把它记下来，而那一档要能读到落点才写得进去——是个环。修法是把落点当成候选自己的事实记下来（一列 + 采纳时一条 UPDATE），并把「计划还在不在」的核对从只覆盖归属那一档改成三条来源共用。`plan_chat` 那一档保留（对话记着的计划仍最优先，改口照样拒）。**真库已 `db.init` 补列**
+  - 契约变化：`GET /api/candidates` 每条多 `landing_plan_id`；verdict 回执的 `plan_id` 即落点，另有副作用写库
 
 ## P4 触达兜底
 

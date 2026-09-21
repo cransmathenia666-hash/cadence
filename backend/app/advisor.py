@@ -1102,7 +1102,8 @@ def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> 
     ).fetchone()
     rows = conn.execute(
         "SELECT id, title, kind, why, depth_target, rank, is_recommended, status,"
-        " reject_reason, payload FROM candidate WHERE request_id = ? ORDER BY rank, id",
+        " reject_reason, payload, landing_plan_id FROM candidate WHERE request_id = ?"
+        " ORDER BY rank, id",
         (request_id,),
     ).fetchall()
     candidates = [dict(row) for row in rows]
@@ -1196,7 +1197,11 @@ def decide_candidate(
         target,
         actor="user",
         reason=None if reason is None else reason.strip(),
-        extra={"reject_reason": reason.strip()} if not accept else None,
+        # 否决理由与**采纳落点**都并进同一条 UPDATE（T37：落点要留得住，见 `landing_plan`）。
+        # 两者互斥：采纳时记落点、否决时记理由，不会同时出现。
+        extra=(
+            {"reject_reason": reason.strip()} if not accept else {"landing_plan_id": target_plan_id}
+        ),
     )
 
     node_id: int | None = None
@@ -1222,31 +1227,51 @@ def landing_plan(
 ) -> int:
     """这条候选该落进哪个计划（SPEC 决策 33 ②）。
 
-    顺序：候选自带的归属 > 调用方显式指定；两者都没有就报错（不许偷偷落最新）。
-    显式指定与归属不一致也报错——免得候选被落到别的计划里去。
+    顺序：**采纳时已经落定的那个计划**（`landing_plan_id`，T37）> 调用方显式指定 >
+    候选自带的归属；都定不下来就报错（不许偷偷落最新）。
+
+    第一档为什么必须在最前（2026-09-21 T37 补的洞）：「新方向」的候选（那一轮不属于任何
+    计划）落点是**采纳那一刻现选的**——此前这个事实只活在当刻响应与 `plan_chat` 里，
+    刷新一次页面就没了：规划对话会不知道自己在哪个计划里，又让人「先指定注入的计划」，
+    直接聊甚至报「这条候选没有计划归属」。可它明明已经落进去了（阶段都建好了）。
+    所以落点记在候选自己身上（`candidate.landing_plan_id`），它同时是这段对话的归属依据。
+
+    显式指定与它不一致也报错——与「候选归属 vs 显式指定」同一条口径：落点是一个既定事实，
+    不是每次调用都能重新表决的。
 
     公开（去掉前导下划线）是因为 `blueprint.py` 的对话与蓝图要用**同一套**归属校验：
     采纳落哪个计划、这段对话属于哪个计划，必须是同一个答案，否则蓝图会建到别的计划里。
     """
-    request_row = conn.execute(
-        "SELECT plan_id FROM learning_request WHERE id = ?", (candidate["request_id"],)
-    ).fetchone()
-    inherited = None if request_row is None else request_row["plan_id"]
-    if inherited is not None and explicit_plan_id is not None and int(inherited) != int(explicit_plan_id):
-        raise CandidateConflict(
-            f"这条候选属于计划 #{inherited}，不能落到计划 #{explicit_plan_id}"
-        )
-    target = inherited if inherited is not None else explicit_plan_id
-    if target is None:
-        raise CandidateConflict(
-            "这条候选没有计划归属（「新方向」）——采纳时要指明进哪个计划，"
-            "或先建一个新计划再采纳"
-        )
-    plan_row = plan.resolve_plan(conn, int(target))
+    landed = candidate["landing_plan_id"]
+    if landed is not None:
+        if explicit_plan_id is not None and int(landed) != int(explicit_plan_id):
+            raise CandidateConflict(
+                f"这条候选采纳时已经落进计划 #{landed}，不能改成 #{explicit_plan_id}"
+            )
+        target = int(landed)
+    else:
+        request_row = conn.execute(
+            "SELECT plan_id FROM learning_request WHERE id = ?", (candidate["request_id"],)
+        ).fetchone()
+        inherited = None if request_row is None else request_row["plan_id"]
+        if inherited is not None and explicit_plan_id is not None and int(inherited) != int(explicit_plan_id):
+            raise CandidateConflict(
+                f"这条候选属于计划 #{inherited}，不能落到计划 #{explicit_plan_id}"
+            )
+        chosen = inherited if inherited is not None else explicit_plan_id
+        if chosen is None:
+            raise CandidateConflict(
+                "这条候选没有计划归属（「新方向」）——采纳时要指明进哪个计划，"
+                "或先建一个新计划再采纳"
+            )
+        target = int(chosen)
+
+    # 两条路都要当场核对：计划可能在这条候选落进去之后被收尾或作废了
+    plan_row = plan.resolve_plan(conn, target)
     if plan_row is None:
         raise CandidateConflict(f"计划 id={target} 不存在")
     if plan_row["status"] != "active":
         raise CandidateConflict(
             f"计划 id={target} 已不是进行中（{plan_row['status']}），不能往里落阶段"
         )
-    return int(target)
+    return target

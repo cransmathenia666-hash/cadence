@@ -59,6 +59,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-20（T36）：这一轮问出的追问（JSON：{question, missing, answer}）。
     # 「问过的不再问」要求下一轮读得到，而反馈流水是从这张表拼的——所以它必须落库。
     ("learning_request", "clarify", "TEXT"),
+    # 2026-09-21（T37）：采纳时落进了哪个计划。「新方向」的候选落点是采纳那一刻现选的，
+    # 不记下来，刷新一次页面规划对话就不知道自己在哪个计划里。
+    ("candidate", "landing_plan_id", "INTEGER"),
 )
 
 
