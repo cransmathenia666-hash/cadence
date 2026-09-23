@@ -15,6 +15,10 @@
    **从最旧的那一轮往下丢**（并留一句「更早的一次读取已省略」）——优先保当前问题与最新事实。
 4. **停止必有原因**。答完了、撞上限、输出一直不合格，三种都写进 `agent_run` 并带中文一句话。
 
+**输出验收有两档**（2026-09-21 走查整改第 2 条）：第一次不合格照老规矩带原因重说一次
+（这一档是在教它套壳）；重试之后仍然是一段纯散文（不带 JSON 壳）的，由调用方的散文兜底
+收下——整轮不至于连一句好好的回答一起丢掉。兜底**只在重试过一次之后**生效，且不落任何提案。
+
 循环里**不吞错**：上游调用失败（`llm.LlmError`）原样往上抛，由调用方记一行失败的运行。
 工具层的错（名字不认识、参数非法）不中断这一轮，而是原文回给模型让它自己纠正——
 反复问不存在的东西最终会撞上限，那一刻才中止，并且**什么都不落**。
@@ -135,6 +139,10 @@ class ToolRequest(BaseModel):
 # 这个模块只管「循环怎么转、什么时候停」。
 FinalCheck = Callable[[str], tuple[str | None, dict[str, Any] | None, str | None]]
 
+# 散文兜底验收器：模型 slipped 成纯散文（不带 JSON 壳）时接原始文本、给那段人话；
+# 「这不是散文」就给 None。由调用方给（`dialogue._prose_reply`）。
+ProseFallback = Callable[[str], str | None]
+
 
 def run(
     conn: sqlite3.Connection,
@@ -144,6 +152,8 @@ def run(
     system_prompt: str,
     history: list[dict[str, str]],
     check_final: FinalCheck,
+    prose_fallback: ProseFallback | None = None,
+    notice: str | None = None,
     provider_id: int | None = None,
     model: str | None = None,
     transport: llm.Transport | None = None,
@@ -152,17 +162,27 @@ def run(
 
     `history` 是**已经截断过**的历史（含用户这一句，最后一条）。资料不预装：这一轮它
     能看到的事实只有历史里说过的、和它自己读来的。
+
+    `prose_fallback` 是**回话出口的那一道宽松**（2026-09-21 走查整改第 2 条）：模型偶尔
+    不套信封、直接说一段人话，那一整轮就连人话一起丢掉、界面只剩一条红条。所以规则是
+    **先照老规矩带原因重试一次，重试后仍然是散文就把它当回话收下**（建议记为空）。
+    它只在「已经重试过一次之后」被问——第一次仍是严格判不合格，宽松只是兜底，不是通行证。
+    「要读资料」与「建议」两处一行没动：解析不出 `tool_calls` 就不算读资料，散文里也永远
+    解析不出建议（所以兜底不落任何提案）。
+
+    `notice` 是这一轮开头那一段可选的提醒（工具目录与额度之后），目前是「记忆库变了」。
     """
     operation = llm.Operation(conn, task, limit=MAX_MODEL_CALLS, transport=transport)
     runbook = Runbook(status=STATUS_FAILED, stop_reason="")
     rounds: list[list[dict[str, str]]] = []
     problem = "它还没来得及说话"
     asked_for_tools = False
+    retried = False
 
     for attempt in range(MAX_MODEL_CALLS):
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _opening(attempt, runbook.tool_calls)},
+            {"role": "user", "content": _opening(attempt, runbook.tool_calls, notice)},
             *history,
             *_kept_rounds(rounds),
         ]
@@ -200,14 +220,26 @@ def run(
                     raise AgentStop("内部状态异常：验收通过却没有拿到人话", runbook)
                 return Outcome(reply=reply, suggestion=payload, runbook=runbook)
 
-        # 不合格（含 tool_calls 写成别的样子这种形状错）：带原因重说一次。
-        # 这次重说**也计入**上面那道模型调用上限。
+        # 不合格（含 tool_calls 写成别的样子这种形状错）：先看散文兜底，再带原因重说一次。
+        # 兜底**只在已经重试过一次之后**生效：第一次仍严格判不合格（严格才是常态，
+        # 宽松只是接住它偶尔 slips 的那一下）。这次重说**也计入**上面那道模型调用上限。
+        if retried and prose_fallback is not None:
+            prose = prose_fallback(raw)
+            if prose:
+                runbook.status = STATUS_OK
+                runbook.stop_reason = (
+                    f"答完了（调模型 {runbook.model_calls} 次、读资料 {runbook.tool_calls} 次；"
+                    "它没套信封，这一轮用了散文兜底、没提建议）"
+                )
+                return Outcome(reply=prose, suggestion=None, runbook=runbook)
+
         rounds.append(
             [
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": _retry_hint(problem)},
             ]
         )
+        retried = True
 
     if asked_for_tools:
         runbook.status = STATUS_LIMIT
@@ -229,14 +261,18 @@ def run(
 
 # ---------- 上下文的两段固定内容 ----------
 
-def _opening(attempt: int, tool_calls_used: int) -> str:
-    """工具目录 + 剩余额度。每一轮重发，额度是这一轮当下还剩多少。"""
-    return (
+def _opening(attempt: int, tool_calls_used: int, notice: str | None = None) -> str:
+    """工具目录 + 剩余额度（+ 有变化时那一行记忆提醒）。每一轮重发，额度是这一轮当下还剩多少。
+
+    `notice` 放在这一段之后：它是「系统刚看见的变化」，不属于它可以选的资料目录，也不是额度。
+    """
+    head = (
         f"{agent_tools.catalog_text()}\n"
         f"【额度】这一轮你还能调模型 {MAX_MODEL_CALLS - attempt} 次、"
         f"读资料 {MAX_TOOL_CALLS - tool_calls_used} 次；能一次读完的别分几轮读。"
         "读不出结论就直说还缺什么，不要猜。"
     )
+    return f"{head}\n{notice}" if notice else head
 
 
 def _results_text(attempt: int, runbook: Runbook, results: list[str]) -> str:
@@ -269,7 +305,7 @@ def _read(conn: sqlite3.Connection, plan_id: int, runbook: Runbook, call: ToolCa
         runbook.tools.append(
             ToolUse(
                 name=str(call.name),
-                args=agent_tools.summarize_args(call.args),
+                args=agent_tools.summarize_call(call.name, call.args),
                 ok=False,
                 summary=str(error),
                 duration_ms=int((time.perf_counter() - started) * 1000),
@@ -281,7 +317,7 @@ def _read(conn: sqlite3.Connection, plan_id: int, runbook: Runbook, call: ToolCa
     runbook.tools.append(
         ToolUse(
             name=str(call.name),
-            args=agent_tools.summarize_args(call.args),
+            args=agent_tools.summarize_call(call.name, call.args),
             ok=True,
             summary=outcome.summary,
             duration_ms=int((time.perf_counter() - started) * 1000),

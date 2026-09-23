@@ -186,6 +186,33 @@ def test_one_turn_records_both_sides_in_plain_words(conn):
     assert "一轮最多一条" in transport.seen[0]["payload"]["messages"][0]["content"]
 
 
+def test_the_contract_and_style_prompts_add_up_to_the_system_prompt(conn):
+    """提示词拆两块（走查整改第 2 条）：契约段（形状与纪律）+ 风格段（语气与篇幅）。
+
+    拆开是为了让「改语气」和「改接口」不再是一件事：契约段视为代码的一部分，风格段是以后
+    调语气、甚至做成设置项的唯一入口。拼起来仍是发出去的那一段——模型那边看不出区别。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(envelope("在的。"))
+
+    dialogue.say(conn, plan_id, "在吗", transport=transport)
+
+    system = transport.seen[0]["payload"]["messages"][0]["content"]
+    assert system == dialogue.SYSTEM_PROMPT
+    assert dialogue.SYSTEM_PROMPT == f"{dialogue.CONTRACT_PROMPT}\n{dialogue.STYLE_PROMPT}"
+    # 各归各位：形状与纪律在契约段，语气与篇幅在风格段
+    assert "只输出一个 JSON 对象" in dialogue.CONTRACT_PROMPT
+    assert "不要 Markdown 代码块" in dialogue.CONTRACT_PROMPT
+    assert "一轮最多一条" in dialogue.CONTRACT_PROMPT
+    # 记忆变化那条硬规则也在契约段里（走查整改第 3 条）
+    assert "必须先调用一次 read_memories" in dialogue.CONTRACT_PROMPT
+    assert "200 字" in dialogue.STYLE_PROMPT
+    assert "陪跑顾问" in dialogue.STYLE_PROMPT
+    assert "只输出一个 JSON 对象" not in dialogue.STYLE_PROMPT
+
+
 def test_there_is_no_turn_cap(conn):
     """长期窗口不能「聊六次就锁死」——成本闸是历史字符上限（决策 6/37 修订）。"""
     make_provider(conn)
@@ -210,12 +237,39 @@ def test_a_blank_message_is_refused_and_records_nothing(conn):
     assert dialogue.messages_of(conn, plan_id) == []
 
 
-def test_an_empty_reply_costs_the_turn_but_keeps_your_words(conn):
+def test_a_prose_reply_is_accepted_after_one_retry(conn):
+    """它 slipped 成纯散文：**带原因重说一次之后仍然没套壳**，那段散文就当回话收下。
+
+    2026-09-21 走查整改第 2 条。走查里正是这种：模型直接说了一段人话（走查截图 1 那种），
+    整轮被判不合格，界面只剩一条红条——好好的回答跟壳一起丢了。宽松只落在这一处：
+    建议记为空（散文里永远解析不出建议，所以**一条提案都不落**）。
+    """
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    # 三次都不合格：空回复、根本不是信封的纯文本、以及一个不完整的 JSON
-    transport = ScriptedTransport("   ", "就是一段没人话的话", "{}")
+    transport = ScriptedTransport("   ", "就是一段没人话的话")
+
+    done = dialogue.say(conn, plan_id, "我先说说现状", transport=transport)
+
+    assert done["reply"] == "就是一段没人话的话"
+    assert done["suggestion"] is None and done["proposal_id"] is None
+    assert done["run"]["status"] == agent_runtime.STATUS_OK
+    assert "散文兜底" in done["stop_reason"]
+    assert pending_changes(conn) == []
+    rows = dialogue.messages_of(conn, plan_id)
+    assert [row["role"] for row in rows] == ["user", "assistant"]  # 你的话留着、它的话也留下来了
+
+
+def test_a_shape_error_that_keeps_coming_costs_the_turn(conn):
+    """一直是**形状错**（能解成 JSON、字段就是不合格）→ 照样按上限中止，一条都不落。
+
+    兜底只接散文——它不该变成「不管输出成什么样都能混过去」的后门。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    # 三次都不合格：空回复、一个空的 JSON 对象、以及一个 reply 是空的信封
+    transport = ScriptedTransport("   ", "{}", '{"reply": ""}')
 
     with pytest.raises(dialogue.DialogueError):
         dialogue.say(conn, plan_id, "我先说说现状", transport=transport)

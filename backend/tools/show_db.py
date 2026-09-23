@@ -1,4 +1,4 @@
-"""只读打印 cadence 库里的内容：计划树、报告、台账流水、待裁定提案。
+"""只读打印 cadence 库里的内容：计划树、报告、台账流水、待裁定提案、记忆与删除墓碑。
 
 为什么留这么一把固定的工具：这台机器上没有 `sqlite3` 命令行，
 而"库里现在到底是什么状态"是最常要回答的问题——之前每次都得临时写脚本导出 JSON。
@@ -20,7 +20,7 @@ from pathlib import Path
 # 所以这里手动把 backend/ 加进去，才能 import app.*
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import db, ledger, plan  # noqa: E402
+from app import db, ledger, memory, plan  # noqa: E402
 
 STATUS_LABELS = {
     "not_started": "未开始",
@@ -128,6 +128,69 @@ def show_proposals(conn: sqlite3.Connection) -> None:
         print(f"  #{row['id']} [{row['kind']}] {short(row['reason'])}")
 
 
+def show_memories(conn: sqlite3.Connection) -> None:
+    """记忆那一段：现在还作数的、等你裁的候选、扫过几次、删过什么（墓碑）。
+
+    为什么要把它放进这把只读工具：记忆是**可以彻底删除**的东西，「到底还在不在」必须有个
+    不看界面的查法——墓碑那一行证明「删过」，来源证据那一行让你对得上原话。
+    这一段的取数一律走 `app/memory.py`（与接口同一个口径），不在这里重算。
+    """
+    global_items = ledger.fetch_active(conn, "profile_item")
+    plan_items = ledger.fetch_active(conn, "plan_memory")
+    print(f"\n长期记忆：全局 {len(global_items)} 条、计划内 {len(plan_items)} 条")
+    for row in global_items:
+        where = "全局"
+        detail = f"[{row['category']}]"
+        print(f"  #{row['id']}（{where}·{detail}·{row['source_kind'] or '来源不明'}）{short(row['content'], 50)}")
+    for row in plan_items:
+        print(
+            f"  #{row['id']}（计划 #{row['plan_id']}·{row['kind']}·{row['source_kind'] or '来源不明'}）"
+            f"{short(row['content'], 50)}"
+        )
+    shown = [("global", int(row["id"])) for row in global_items] + [
+        ("plan", int(row["id"])) for row in plan_items
+    ]
+    for scope, memory_id in shown:
+        for evidence in memory.evidence_of(conn, scope, memory_id):
+            print(
+                f"      来源：{evidence['source_label']}#{evidence['source_id']}"
+                f"（{evidence['source_time']}）「{short(evidence['excerpt'], 40)}」"
+            )
+
+    inbox = memory.list_inbox(conn)["candidates"]
+    print(f"\n记忆收件箱（待裁定）：{len(inbox)} 条")
+    if not inbox:
+        print("  （没有待裁定的记忆候选）")
+    for candidate in inbox:
+        print(
+            f"  #{candidate['proposal_id']} [{candidate['action_label']}·{candidate['scope_label']}·"
+            f"{candidate['source_kind_label']}] {short(candidate['content'] or candidate['target_content'], 40)}"
+        )
+
+    scans = memory.scan_report(conn, limit=5)
+    print(f"\n最近 {len(scans)} 次记忆扫描")
+    if not scans:
+        print("  （还没扫过）")
+    for scan in scans:
+        outcome = scan["error"] if scan["error"] else f"扫 {scan['scanned']} 条 / 落 {scan['candidates']} 条候选"
+        print(
+            f"  #{scan['scan_id']} {scan['trigger_label']}"
+            f"（计划 #{scan['plan_id']}）[{scan['status']}] {outcome}"
+        )
+
+    tombstones = conn.execute(
+        "SELECT * FROM memory_deletion ORDER BY id DESC LIMIT 5"
+    ).fetchall()
+    print(f"\n彻底删除的墓碑：{len(tombstones)} 条（只记「删过」，不含正文）")
+    if not tombstones:
+        print("  （没删过）")
+    for row in tombstones:
+        print(
+            f"  {row['deleted_at']} {row['scope']}#{row['memory_id']}"
+            f" 清了 {row['affected']} 处（{short(row['reason'], 30)}）"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="只读打印 cadence 库内容")
     parser.add_argument("--db", help="库文件路径，默认用 app.db 里的 data/cadence.db")
@@ -151,6 +214,7 @@ def main() -> int:
         show_reports(conn, args.limit)
         show_ledger(conn, args.limit)
         show_proposals(conn)
+        show_memories(conn)
         print("\n状态对照：" + "，".join(f"{key}={value}" for key, value in STATUS_LABELS.items()))
     finally:
         conn.close()

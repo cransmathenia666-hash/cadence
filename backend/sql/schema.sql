@@ -5,12 +5,20 @@
 -- ========== 长期档案与状态台账 ==========
 
 -- 长期档案五类：生活习惯 / 生活记录 / 当前状态 / 短期目标+痛点 / 长期主线
+-- 记忆系统（2026-09-21，见 docs/记忆系统.md）把它当作「全局长期记忆」，并补三列可空元数据：
+-- fact_time    这条事实说的是什么时候的状态（不是入库时间）
+-- review_at    到了这个时候进「待复核」，Agent 不再默认使用它
+-- source_kind  user_stated（用户明确陈述）/ agent_inferred（Agent 推断）/ legacy_manual（历史手工录入）
+-- 三列都可空：老库由 db.init 加列迁补齐并统一标成 legacy_manual，**不猜测证据**。
 CREATE TABLE IF NOT EXISTS profile_item (
   id            INTEGER PRIMARY KEY,
   category      TEXT    NOT NULL,
   content       TEXT    NOT NULL,
   status        TEXT    NOT NULL DEFAULT 'active',   -- active / superseded / void
   superseded_by INTEGER,
+  fact_time     TEXT,
+  review_at     TEXT,
+  source_kind   TEXT,
   valid_from    TEXT    NOT NULL,
   created_at    TEXT    NOT NULL
 );
@@ -249,3 +257,80 @@ CREATE TABLE IF NOT EXISTS agent_run (
   created_at  TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_run_dialogue ON agent_run (dialogue_id, id);
+
+-- ========== 记忆系统（2026-09-21，方案见 docs/记忆系统.md） ==========
+--
+-- 三层分工：**工作记忆**沿用 `agent_runtime` 本轮目标与工具结果（运行结束清空，不落表）；
+-- **经历记忆**不复制数据，统一从既有的六类记录里现查（见 `app/memory.py`）；
+-- **长期记忆**分两级——全局的沿用 `profile_item`，计划内的存下面这张 `plan_memory`。
+-- `agent_run` 与 `ledger_event` 仍是**运行审计**，不作为记忆内容交给模型。
+
+-- 计划内记忆：这个计划里的约束 / 决定 / 偏好（不是全局档案，也不污染别的计划与四问判断）。
+-- 与 `profile_item` 同样是**有状态的对象**：active / superseded / void，状态变更一律走台账
+-- （`ledger.SPECS` 里注册了它，supports_lifecycle=True）——「取代」在这里语义是成立的：
+-- 它没有表达否决的业务终态，旧值该被标 superseded 而不是删掉。
+-- kind：constraint（约束）/ decision（决定）/ preference（偏好）。
+CREATE TABLE IF NOT EXISTS plan_memory (
+  id            INTEGER PRIMARY KEY,
+  plan_id       INTEGER NOT NULL,
+  kind          TEXT    NOT NULL,
+  content       TEXT    NOT NULL,
+  status        TEXT    NOT NULL DEFAULT 'active',   -- active / superseded / void
+  superseded_by INTEGER,
+  fact_time     TEXT,
+  review_at     TEXT,
+  source_kind   TEXT,                                -- user_stated / agent_inferred
+  valid_from    TEXT    NOT NULL,
+  created_at    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_memory ON plan_memory (plan_id, status);
+
+-- 来源证据：一条长期记忆可以有多条来源。**摘录只存原话片段**，不复制整段经历。
+-- scope 说明 memory_id 指向哪张表（global → profile_item / plan → plan_memory）——
+-- 两张记忆表各自的主键空间，所以关联靠应用层，不加外键（同 `agent_run.dialogue_id` 的先例）。
+-- source_type 六取值与「经历记忆」的六类一一对应：plan_dialogue / plan_chat / report /
+-- candidate / proposal / field_change。
+CREATE TABLE IF NOT EXISTS memory_evidence (
+  id          INTEGER PRIMARY KEY,
+  scope       TEXT    NOT NULL,   -- global / plan
+  memory_id   INTEGER NOT NULL,
+  source_type TEXT    NOT NULL,
+  source_id   INTEGER NOT NULL,
+  excerpt     TEXT    NOT NULL,
+  source_time TEXT,
+  created_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_evidence ON memory_evidence (scope, memory_id);
+
+-- 记忆扫描：手动 / 每周 / 计划收尾三种触发各记一行。
+-- `cursor` 是**成功之后**才推进的游标——JSON `{来源类型: 已处理到的最大 id}`，下一批从它之后接着取；
+-- 「没有候选」也是成功（游标照样推进），失败则**不动游标、不落任何候选**（下一批重来）。
+-- plan_id 为空 = 扫的是全局（跨计划）那一批。
+CREATE TABLE IF NOT EXISTS memory_scan (
+  id          INTEGER PRIMARY KEY,
+  trigger     TEXT    NOT NULL,   -- manual / weekly / plan_close
+  plan_id     INTEGER,
+  status      TEXT    NOT NULL,   -- ok / failed（pending 只出现在「计划收尾登记待扫描」那一步）
+  cursor      TEXT,               -- JSON：这次扫到哪了（成功才写）
+  scanned     INTEGER NOT NULL DEFAULT 0,
+  candidates  INTEGER NOT NULL DEFAULT 0,
+  error       TEXT,
+  created_at  TEXT    NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memory_scan ON memory_scan (plan_id, status, id);
+
+-- 彻底删除的墓碑：**只记对象类型、时间和影响范围，不含任何原文**——
+-- 它的用途是「证明这件事发生过」，不是「让你日后还能拼回来」。
+-- plan_id（2026-09-21 走查整改加，可空）：计划内记忆被彻底删除后，记忆行已经没了，
+-- 只有墓碑知道「这件事是哪个计划里的」——没有它就算不出「某个计划里刚删过一条」。
+-- 老行留空（那些删除发生在加列之前，当时的计划归属已不可考）。
+CREATE TABLE IF NOT EXISTS memory_deletion (
+  id           INTEGER PRIMARY KEY,
+  scope        TEXT    NOT NULL,   -- global / plan
+  memory_id    INTEGER NOT NULL,
+  plan_id      INTEGER,            -- 计划内记忆是哪个计划；全局记忆为空
+  reason       TEXT,
+  affected     INTEGER NOT NULL DEFAULT 0,   -- 这次一共清掉了几处正文（记忆 + 证据 + 候选 + 来源原文）
+  deleted_at   TEXT    NOT NULL
+);

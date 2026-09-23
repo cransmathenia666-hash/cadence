@@ -24,7 +24,14 @@
 
 **输出是信封**（T31 起）：`{"reply": "人话", "suggestion": null 或一条建议}`；要读资料时
 换成 `{"tool_calls": [{"name": ..., "args": {}}]}`。库里仍只存 `reply` 那一段人话——
-历史拼回上下文与 6000 字符截断的口径一行不改。
+历史拼回上下文与 6000 字符截断的口径一行不改。**回话出口另有一道兜底**（2026-09-21 走查
+整改第 2 条）：带原因重试一次之后**仍然是纯散文**的，就把那段散文当回话收下、建议记为空
+（「要读资料」与「建议」两处仍严格——它们要真去查表、真去落提案）。提示词因此拆成两段：
+`CONTRACT_PROMPT`（形状与纪律，视为代码的一部分）+ `STYLE_PROMPT`（语气与篇幅，可调）。
+
+**每轮开头可能多一行记忆提醒**（走查整改第 3 条）：记忆库自这段对话上次读之后变过，就把
+「变过哪几条」写在工具目录之后（`memory.change_digest`，没有变化就没有这一行），契约段里的
+硬规则要求那一轮先读一次记忆。它读的是**整份当前值**，不是增量——只给增量压不住历史里的旧说法。
 
 **每轮留一行运行账**（`agent_run`，决策 40）：调了几次模型、读了哪几样、为什么停下。
 它不是记忆（下一轮不读它），是给人排错与对账用的；界面上的「本轮依据」就是它。
@@ -44,6 +51,7 @@ from . import (
     blueprint as blueprint_mod,
     ledger,
     llm,
+    memory,
     plan_change,
     profile,
 )
@@ -142,17 +150,20 @@ def _trim(rows: list[sqlite3.Row]) -> list[dict[str, str]]:
     return kept
 
 
-SYSTEM_PROMPT = (
-    "你是这个学习计划的陪跑顾问，正在和计划的主人讨论它的执行情况。"
-    "**你不预先拿到他的业务数据**（阶段、任务、报告、档案、这个计划的来历都在系统里，"
-    "要什么自己读）——别讲放之四海皆准的话，也别凭空编事实。默认控制在 200 字以内，"
-    "除非他要求展开。\n"
-    "每一轮你只输出一个 JSON 对象，两种形状选一种：\n"
+# ---------- 提示词：契约与风格分开两块（2026-09-21 走查整改第 2 条） ----------
+#
+# 为什么拆：原先它们混在同一段 `SYSTEM_PROMPT` 里，于是「改语气」和「改接口」看起来是同一
+# 件事。拆开之后**契约段视为代码的一部分**——改它等于改接口（输出形状、校验口径、动作清单、
+# 哪些不许做，都在这儿）；风格段是以后调语气、甚至做成设置项的唯一入口。
+# 拼起来仍是原来那一段系统提示词，模型那边看不出区别。
+
+# 契约段：输出的形状与纪律。**动它要连带改验收器与测试**。
+CONTRACT_PROMPT = (
+    "【输出契约】每一轮你只输出一个 JSON 对象，两种形状选一种：\n"
     "① 要读资料：" '{"tool_calls": [{"name": "read_current_plan", "args": {}}]}'
     "——一次可以要好几样，能一次读完的别分几轮读；读不出结论就直说还缺什么，不要猜。\n"
     "② 直接回话：" '{"reply": "你要说的话", "suggestion": null 或一条建议}'
     "——不要解释、不要客套、不要 Markdown 代码块。\n"
-    "- reply：直接说人话，可以用短段落或列表，不要客套开场。\n"
     "- suggestion：**一轮最多一条**，只在「改哪里、改成什么、为什么」都说得具体时才提；"
     "拿不准就在 reply 里先问一句、suggestion 给 null。只给点了名的节点编号——"
     "编号得是你从读到的资料里看到的 #号，不要自己编：\n"
@@ -171,8 +182,22 @@ SYSTEM_PROMPT = (
     "- 你不能：删节点、替他打勾 / 跳过 / 交交付物、碰别的计划。"
     "「这块不做了」在计划里是用打勾 / 跳过 / 收尾表达的，不是你该提的建议。\n"
     "- 一次给一批不等于可以大改：只排你真说得清的那几件，剩下一律别凑数。\n"
-    "- 建议只是建议：他点「确认」才会真改，所以别在 reply 里吹你已经改完了。"
+    "- 建议只是建议：他点「确认」才会真改，所以别在 reply 里吹你已经改完了。\n"
+    "- **出现【记忆库变了】那一行时，本轮必须先调用一次 read_memories 再回答**——"
+    "你早先读到的说法可能已经不作数了。\n"
 )
+
+# 风格段：你是谁、怎么说。调语气只动这一块，不碰上面的契约。
+STYLE_PROMPT = (
+    "【你是谁、怎么说】你是这个学习计划的陪跑顾问，正在和计划的主人讨论它的执行情况。"
+    "**你不预先拿到他的业务数据**（阶段、任务、报告、档案、这个计划的来历都在系统里，"
+    "要什么自己读）——别讲放之四海皆准的话，也别凭空编事实。"
+    "reply 里直接说人话，可以用短段落或列表，不要客套开场；默认控制在 200 字以内，"
+    "除非他要求展开。"
+)
+
+# 拼起来发出去的那一段（契约在前、风格在后——形状是硬要求，语气是软要求）。
+SYSTEM_PROMPT = f"{CONTRACT_PROMPT}\n{STYLE_PROMPT}"
 
 EXTRACT_SYSTEM_PROMPT = (
     "你从一段对话里提炼「需要更新长期档案」的条目。你只输出一个 JSON 对象："
@@ -228,6 +253,19 @@ def _check_reply(
     if problem is not None:
         return None, None, f"建议不合格（{problem}）"
     return said, payload, None
+
+
+def _prose_reply(text: str) -> str | None:
+    """散文兜底（2026-09-21 走查整改第 2 条）：模型 slipped 成纯散文时，那一段当我们的人话收下。
+
+    只在「取不到 JSON 对象、去空白后又非空」时给东西——能解成对象的那些一律不接（形状不对
+    就该由 `_check_reply` 判不合格、带原因重说）。`agent_runtime` 也只在**重试过一次之后**
+    才问这个验收器，所以它接住的是「它第二次还是没套壳」，不是「它第一次就随便说」。
+    """
+    raw = str(text or "").strip()
+    if not raw or advisor.extract_json(raw) is not None:
+        return None
+    return raw
 
 
 def _suggestions(conn: sqlite3.Connection, plan_id: int) -> dict[int, dict[str, Any]]:
@@ -389,6 +427,10 @@ def say(
             system_prompt=SYSTEM_PROMPT,
             history=_trim(messages_of(conn, plan_id)),
             check_final=lambda raw: _check_reply(conn, plan_id, raw),
+            prose_fallback=_prose_reply,
+            # 记忆库自它上次读之后变过 → 这一轮开头多一行提醒（走查整改第 3 条）。
+            # 没有变化、或这段对话从没读过记忆，就是 None（不硬塞噪音）。
+            notice=memory.change_digest(conn, plan_id),
             provider_id=provider_id,
             model=model,
             transport=transport,

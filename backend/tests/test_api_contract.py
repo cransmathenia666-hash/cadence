@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import date
 
 import pytest
@@ -34,6 +35,27 @@ def conn(tmp_path):
     connection = db.connect(path)
     yield connection
     connection.close()
+
+
+# ---------- 数据库连接必须允许跨线程先后使用 ----------
+#
+# 回归用例：FastAPI 把同步依赖与同步接口分两次丢进线程池，两次**不保证落在同一个线程**上。
+# sqlite3 默认禁止跨线程使用一条连接，于是同一个请求会随机抛 ProgrammingError——页面上
+# 表现为零星的 500 与「连不上后端」（本机 Python 3.14 + 现版 anyio 上几乎每次都撞）。
+
+def test_a_connection_survives_being_used_from_another_thread(tmp_path):
+    path = tmp_path / "thread.db"
+    db.init(path)
+    conn = db.connect(path)
+    seen: list[tuple] = []
+    try:
+        worker = threading.Thread(target=lambda: seen.extend(conn.execute("SELECT 1").fetchall()))
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "跨线程查询没跑完——多半是被 sqlite3 的线程检查挡住了"
+        assert seen, "跨线程查询没有拿到结果"
+    finally:
+        conn.close()  # close() 同样要能跨线程调用
 
 
 # ---------- 建节点的 due_date 收成真日期 ----------

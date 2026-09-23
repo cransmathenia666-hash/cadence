@@ -960,6 +960,8 @@ export type ProposalDecision = {
    * `node_updated` = **原地改**了一个已有节点的字段（`updated` 里是改前改后，**id 不变**）；
    * `node_added` = 往计划里加了节点（`added.nodes` 里按建的顺序列出每一条——加阶段时
    * 第一条是阶段、后面跟着它下面的任务；一批任务也走它）；
+   * `memory_added` / `memory_superseded` / `memory_renewed` / `memory_voided` = 批准一条
+   * **记忆候选**（2026-09-21 记忆系统）：新增 / 取代 / 复核续期 / 复核作废，详见 `remembered`；
    * `recorded_only` = 纯记账（驳回也是它）。
    */
   effect:
@@ -967,7 +969,13 @@ export type ProposalDecision = {
     | "profile_written"
     | "node_updated"
     | "node_added"
+    | "memory_added"
+    | "memory_superseded"
+    | "memory_renewed"
+    | "memory_voided"
     | "recorded_only";
+  /** 只在批准记忆候选时有值：这次真写进去的那条记忆（取代时另带 `before`）。 */
+  remembered: { effect: string; memory?: MemoryItem; before?: string } | null;
   /** 只在批准档案变更时有值：真写进档案的那一条。 */
   written: { id: number; category: string; content: string } | null;
   /** 只在批准蓝图时有值：这次真建了哪些节点，外加「没能写进去」那类实话。 */
@@ -1364,4 +1372,305 @@ export async function listJudgments(limit = 20): Promise<{ items: JudgmentRecord
       created_at: item.created_at,
     })),
   };
+}
+
+// ---------- 记忆系统（2026-09-21，方案 docs/记忆系统.md） ----------
+//
+// 三层记忆里，前端只管**长期记忆**这一层（全局 + 计划内）与它的收件箱：
+// 工作记忆在对话那一轮里、经历记忆由 Agent 自己检索，都不从这里走。
+// 两条口径写在类型注释里，页面照着渲染就行：候选**只有满足批量规则**的才允许勾选、
+// 彻底删除**先预览再确认**（预览是只读的）。
+
+/** 记忆分两级：全局长期记忆（沿用档案五类）与计划内记忆（约束 / 决定 / 偏好）。 */
+export type MemoryScope = "global" | "plan";
+
+/** 这条是谁说的。`legacy_manual` 是记忆系统落地之前的历史手工条目，只读不写。 */
+export type MemorySourceKind = "user_stated" | "agent_inferred" | "legacy_manual";
+
+/** 计划内记忆的三种内容；全局那一级仍用档案的五个类别（PROFILE_CATEGORIES）。 */
+export const MEMORY_KINDS: Record<string, string> = {
+  constraint: "约束",
+  decision: "决定",
+  preference: "偏好",
+};
+
+/** 记忆候选的三种动作：新增 / 取代 / 复核处理。 */
+export type MemoryAction = "add" | "supersede" | "review";
+
+/** 一条来源证据：哪类经历的哪一条、原话摘录、发生时间。 */
+export type MemoryEvidence = {
+  source_type: string;
+  /** 来源类别中文名，后端给（前端不自己查表）。 */
+  source_label: string;
+  source_id: number;
+  excerpt: string;
+  source_time: string | null;
+};
+
+export type MemoryItem = {
+  id: number;
+  scope: MemoryScope;
+  scope_label: string;
+  plan_id: number | null;
+  category: string | null;
+  category_label: string | null;
+  kind: string | null;
+  kind_label: string | null;
+  content: string;
+  source_kind: MemorySourceKind | null;
+  source_kind_label: string;
+  fact_time: string | null;
+  review_at: string | null;
+  /** 到了复核时间：还在「当前记忆」里看得见，但**默认不再当依据**。 */
+  review_due: boolean;
+  status: string;
+  valid_from: string;
+  created_at: string;
+  evidence: MemoryEvidence[];
+};
+
+export type MemoryListing = {
+  today: string;
+  plan_id: number | null;
+  global: MemoryItem[];
+  plan: MemoryItem[];
+  /** 两级里所有到了复核时间的，页面「待复核」标签页用它。 */
+  due: MemoryItem[];
+  counts: { global: number; plan: number; due: number };
+};
+
+/** 收件箱里的一条候选。`batch_eligible` 为真才允许勾选批量批准。 */
+export type MemoryCandidate = {
+  proposal_id: number;
+  action: MemoryAction;
+  action_label: string;
+  scope: MemoryScope;
+  scope_label: string;
+  plan_id: number | null;
+  category: string | null;
+  category_label: string | null;
+  kind: string | null;
+  kind_label: string | null;
+  content: string | null;
+  target_id: number | null;
+  target_content: string | null;
+  decision: string | null;
+  decision_label: string | null;
+  review_at: string | null;
+  fact_time: string | null;
+  source_kind: MemorySourceKind | null;
+  source_kind_label: string;
+  reason: string;
+  /** 疑似与某条重复时的提示（**只提示、不自动合并**）。 */
+  duplicate_hint: string | null;
+  evidence: MemoryEvidence[];
+  batch_eligible: boolean;
+  purged: boolean;
+  created_at: string;
+};
+
+export type MemoryInbox = { candidates: MemoryCandidate[]; count: number };
+
+/** 一行扫描记录：扫了几条、落了几条候选、失败为什么。 */
+export type MemoryScanRecord = {
+  scan_id: number;
+  trigger: string;
+  trigger_label: string;
+  plan_id: number | null;
+  status: string;
+  scanned: number;
+  candidates: number;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+};
+
+export type MemoryScanReport = MemoryScanRecord & {
+  landed: { proposal_id: number; content: string | null }[];
+  /** 当批里被判不合格、因此没落库的候选（写明为什么）。 */
+  dropped: { content: string; why: string }[];
+  /** 还有没扫完的经历：再点一次「扫描」接着扫。 */
+  has_more: boolean;
+};
+
+/** 彻底删除的影响预览：要动哪些地方、以及**清不掉的残留**（这一步只读）。 */
+export type PurgePreview = {
+  scope: MemoryScope;
+  id: number;
+  content: string;
+  evidence: MemoryEvidence[];
+  candidate_proposals: number[];
+  copies: { table: string; column: string; id: number }[];
+  irreversible: boolean;
+  note: string;
+};
+
+export type PurgeResult = {
+  scope: MemoryScope;
+  id: number;
+  affected: number;
+  /** 清干净了才是 true；false 时 `leftover` 列出残留位置——**不宣称成功**。 */
+  complete: boolean;
+  leftover: { table: string; column: string; id: number }[];
+  note: string;
+};
+
+export async function getMemory(planId?: number): Promise<MemoryListing> {
+  const query = planId === undefined ? "" : `?plan_id=${planId}`;
+  return request<MemoryListing>(`/api/memory${query}`);
+}
+
+export async function getMemoryInbox(): Promise<MemoryInbox> {
+  return request<MemoryInbox>("/api/memory/inbox");
+}
+
+export async function listMemoryScans(limit = 20): Promise<{ scans: MemoryScanRecord[] }> {
+  return request<{ scans: MemoryScanRecord[] }>(`/api/memory/scans?limit=${limit}`);
+}
+
+/**
+ * 扫一批新经历，**只产候选**（不写任何长期记忆）。
+ *
+ * 不传 `planId` 就是全局那一批；`has_more` 为真说明还有没扫完的，再点一次接着扫。
+ */
+export async function scanMemories(input: {
+  planId?: number;
+  trigger?: "manual" | "weekly" | "plan_close";
+}): Promise<{ scans: MemoryScanReport[] }> {
+  return request<{ scans: MemoryScanReport[] }>("/api/memory/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      plan_id: input.planId ?? null,
+      trigger: input.trigger ?? "manual",
+    }),
+  });
+}
+
+/** 手工补一条长期记忆。**你自己敲的这条不需要来源证据**——你就是来源。 */
+export async function createMemory(input: {
+  scope: MemoryScope;
+  content: string;
+  planId?: number;
+  category?: string;
+  kind?: string;
+  sourceKind?: MemorySourceKind;
+  factTime?: string;
+  reviewAt?: string;
+  reason?: string;
+}): Promise<MemoryItem> {
+  return request<MemoryItem>("/api/memory", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope: input.scope,
+      content: input.content,
+      plan_id: input.planId ?? null,
+      category: input.category ?? null,
+      kind: input.kind ?? null,
+      source_kind: input.sourceKind ?? "user_stated",
+      fact_time: input.factTime || null,
+      review_at: input.reviewAt || null,
+      reason: input.reason || null,
+    }),
+  });
+}
+
+/** 改一条记忆：走台账「取代」，旧值留痕、理由必填。 */
+export async function updateMemory(input: {
+  memoryId: number;
+  scope: MemoryScope;
+  content: string;
+  reason: string;
+  factTime?: string;
+  reviewAt?: string;
+}): Promise<MemoryItem> {
+  return request<MemoryItem>(`/api/memory/${input.memoryId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope: input.scope,
+      content: input.content,
+      reason: input.reason,
+      fact_time: input.factTime ?? null,
+      review_at: input.reviewAt ?? null,
+    }),
+  });
+}
+
+/** 作废一条记忆（普通纠错走这条，留痕）。 */
+export async function voidMemory(input: {
+  memoryId: number;
+  scope: MemoryScope;
+  reason: string;
+}): Promise<{ id: number; voided: boolean }> {
+  return request<{ id: number; voided: boolean }>(`/api/memory/${input.memoryId}/void`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope: input.scope, reason: input.reason }),
+  });
+}
+
+/** 处理「待复核」：还作数就往后推（renew），不再作数就作废（void）。 */
+export async function reviewMemory(input: {
+  memoryId: number;
+  scope: MemoryScope;
+  decision: "renew" | "void";
+  reviewAt?: string;
+  reason?: string;
+}): Promise<{ decision: string; memory?: MemoryItem; voided?: boolean }> {
+  return request<{ decision: string; memory?: MemoryItem; voided?: boolean }>(
+    `/api/memory/${input.memoryId}/review`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope: input.scope,
+        decision: input.decision,
+        review_at: input.reviewAt || null,
+        reason: input.reason || null,
+      }),
+    },
+  );
+}
+
+/** 批量批准：只收「新增 + 用户明确陈述」；其余进 skipped 并写明原因。 */
+export async function batchApproveMemories(
+  proposalIds: number[],
+  reason?: string,
+): Promise<{
+  approved: { proposal_id: number; memory?: MemoryItem }[];
+  skipped: { proposal_id: number; why: string }[];
+}> {
+  return request("/api/memory/batch-approve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_ids: proposalIds, reason: reason ?? null }),
+  });
+}
+
+/** 彻底删除的**影响预览**：这一步不改任何数据。 */
+/** 彻底删除的**影响预览**：这一步不改任何数据。 */
+export async function previewMemoryPurge(
+  memoryId: number,
+  scope: MemoryScope,
+): Promise<PurgePreview> {
+  return request<PurgePreview>(`/api/memory/${memoryId}/purge-preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
+  });
+}
+
+/** 执行彻底删除（不可恢复）。清不干净时 `complete` 为 false——那不是报错，是实话。 */
+export async function purgeMemory(input: {
+  memoryId: number;
+  scope: MemoryScope;
+  reason: string;
+}): Promise<PurgeResult> {
+  return request<PurgeResult>(`/api/memory/${input.memoryId}/purge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope: input.scope, reason: input.reason }),
+  });
 }

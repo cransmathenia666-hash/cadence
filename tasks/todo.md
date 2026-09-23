@@ -4,6 +4,8 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.15 变更（2026-09-21）**：新增并完成 P3.9 记忆系统（T38–T41）——用户给出方案 `docs/记忆系统.md` 并要求照它开发：三层记忆（工作 / 经历 / 长期）、记忆候选进收件箱由人裁定、扫描只产候选、到期复核、彻底删除要能证明清干净。规格落 **SPEC 决策 42**（另补第 10 节两条调用纪律与第 11 节十一条契约行），新增三张表（`plan_memory` / `memory_evidence` / `memory_scan`）与一张墓碑表，`profile_item` 加三列可空元数据。
+
 **v0.14 变更（2026-09-21）**：新增并完成 T37（采纳落点留得住）——用户走查截图发现：**已采纳**的候选上仍写着「该候选为『新方向』，请先指定注入的计划」，因为「新方向」的落点只活在采纳那一刻的响应里，刷新一次就没了。补 `candidate.landing_plan_id` 一列并改归属优先序。
 
 **v0.13 变更（2026-09-20）**：新增并完成 P3.7（T34 候选的路径形状 / T35 阶段跳过 / T36 追问槽收口）——用户走查触发（「五个连续性的方案，不应该独立」、追问槽「有追问、没有输入框」）；方案见 `docs/候选路径与追问槽方案.md`，规格落 SPEC 决策 41 与 31/34/35/36 的修订。用户当日授权 `candidate` 加一列 `payload`；T36 走方案口径 A（加输入框）。
@@ -241,6 +243,66 @@
   - Files：`backend/sql/schema.sql`、`backend/app/db.py`、`backend/app/advisor.py`、`backend/app/blueprint.py`、`backend/tests/test_candidates.py`、`backend/tests/test_blueprint.py`、`frontend/lib/api.ts`、`frontend/app/candidates/page.tsx`、`docs/SPEC.md`（决策 33 ② + 第 11 节两行契约）
   - 实施记录（2026-09-21）：临时库复现确认根因——采纳落进计划 #1（阶段都建好了），但候选行、那一轮提问、对话表里**一个地方都没记**，所以刷新后 `view.plan_id` 为 `null`、直接聊报「这条候选没有计划归属」；只有「采纳后先聊过一句」的情况下对话表才把它记下来，而那一档要能读到落点才写得进去——是个环。修法是把落点当成候选自己的事实记下来（一列 + 采纳时一条 UPDATE），并把「计划还在不在」的核对从只覆盖归属那一档改成三条来源共用。`plan_chat` 那一档保留（对话记着的计划仍最优先，改口照样拒）。**真库已 `db.init` 补列**
   - 契约变化：`GET /api/candidates` 每条多 `landing_plan_id`；verdict 回执的 `plan_id` 即落点，另有副作用写库
+
+## P3.9 记忆系统（2026-09-21 定；方案见 `docs/记忆系统.md`，规格落 SPEC 决策 42）
+
+用户给出方案并要求照它开发。**三层记忆**：工作记忆沿用受控工具循环（不落表）、经历记忆从既有六类记录现查（不复制数据、不引向量库）、长期记忆分全局（沿用 `profile_item` + 三列元数据）与计划内（新表 `plan_memory`）。**产与裁**：系统只产候选进「记忆收件箱」，写入必须由用户批准；**批量批准只收「新增 + 用户陈述」**。**四条硬边界**：不接本地知识库、不联网、不引向量库、不做后台自主修改。
+
+- [x] **T38 记忆的数据模型与收件箱**
+  - Acceptance：① `profile_item` 加三列可空元数据 `fact_time` / `review_at` / `source_kind`（老条目由 `db.init` 统一标 `legacy_manual`，**不猜来源**；新写入自带来源性质）；② 新表 `plan_memory`（计划内记忆，约束 / 决定 / 偏好，active / superseded / void，**注册进台账**走取代与作废）；③ 新表 `memory_evidence`（一条记忆多条来源：来源类型 / 编号 / 原文摘录 / 来源时间）；④ 新表 `memory_scan`（三种触发的扫描记录：范围、游标、结果、失败原因）；⑤ 记忆候选复用 `proposal`（`kind=memory_change`，payload 按 `add` / `supersede` / `review` 分流）；⑥ **确定性校验四条**——来源存在、摘录能在来源里一字不差找到、取代 / 复核目标仍有效且属同一计划、没有完全重复；近似重复**只提示不合并**；⑦ `/api/memory`、`/api/memory/inbox` 与手工新增 / 修改 / 作废三条写路径；⑧ `proposals.decide` 增第五类分支（批准 = 真写记忆，**批准前再验一次**）
+  - Verify：单测盯三层边界与计划隔离、六类经历检索、五种来源 / 摘录 / 重复 / 跨计划不合格、新增与取代与作废、批准后记忆真的落库、取代保持旧值留痕、期间目标被作废则 409 且提案保持 pending；`pytest -q`
+  - Files：`backend/sql/schema.sql`、`backend/app/db.py`、`backend/app/ledger.py`、`backend/app/profile.py`、`backend/app/memory.py`（新）、`backend/app/proposals.py`、`backend/app/main.py`、`backend/tests/test_memory.py`（新）
+  - 实施记录（2026-09-21）：`plan_memory` 在 `ledger.SPECS` 里注册为 `supports_lifecycle=True`——判据仍是决策 22 那条（它没有表达否决的业务终态，「不主动动它」只能由台账的 superseded / void 表达）。取代出来的新条目**继承旧条目的证据**，否则来源一栏会凭空空掉。判重放两次：落候选时一次、批准前再一次（期间世界会变）。
+
+- [x] **T39 经历检索与 Agent 的两个新工具**
+  - Acceptance：① `memory.search_experiences`：六类经历合并成一条时间线（计划对话 / 规划对话 / 报告 / 候选裁定 / 提案裁定 / 节点字段变更），按关键词、来源类型、时间筛选，**最多返回 8 条**，确定性排序（最新在前），不引向量库；② 新增只读工具 `search_experiences`（计划编号由系统注入、读不到别的计划）与 `read_memories`（分区返回当前有效的全局与计划记忆，**到复核时间的单独标出、不进默认结果**）；③ 保留 `read_profile` 兼容入口；④ 检索的关键词**不进运行账**（只记「给了」）——日志里不留查询原文
+  - Verify：单测盯六类都能翻到、三种筛法、条数上限与最新在前、到期的不进默认结果、跨计划读不到、参数里给 `plan_id` 被拒、工具目录与注册表一致；`pytest -q`
+  - Files：`backend/app/memory.py`、`backend/app/agent_tools.py`、`backend/app/agent_runtime.py`、`backend/tests/test_memory.py`、`backend/tests/test_agent.py`
+  - 实施记录（2026-09-21）：**记忆候选本身不算经历**（`_proposal_experiences` 把 `kind=memory_change` 排除）——它是记忆系统的产出而不是「发生过的事」，算进来会转成一个圈：落几条候选，下一批就把这几条候选当新经历再扫一遍（单测先踩到这个）。`Tool` 多一个 `hidden_args`：参数值本身要保护的那些键只进 prompt 与执行，不进 `agent_run` 的参数摘要。
+
+- [x] **T40 扫描与批量批准**
+  - Acceptance：① 三种触发：手动（记忆页「扫描新经历」）、每周（复用 P4 周任务，**按进行中的计划各扫一批**）、计划收尾（**只登记待扫描**，不在收尾接口里同步调模型）；② 每批有条数与字符上限，超出的留到下一批——游标**只推进处理过的部分**（`has_more` 告诉页面还能接着扫）；③ **「没有候选」也是成功**（游标照推）；④ 失败（模型两次不合格、或没配 provider）记一行 `failed`、**不落任何候选**、游标不动；⑤ 单条候选不合格只丢它自己，同批合格的照常进收件箱；⑥ `/api/memory/scan` 与 `/api/memory/batch-approve`（只收「新增 + 用户陈述」）+ `/api/memory/scans`
+  - Verify：单测盯游标推进与去重、没有候选也算成功、失败不落候选且游标不动、坏候选不拖累好候选、收尾只登记、每周先做欠着的再按计划扫；`pytest -q` + `tools\smoke_p1.py`（动了契约）
+  - Files：`backend/app/memory.py`、`backend/app/main.py`、`backend/tools/smoke_p1.py`、`backend/tests/test_memory.py`
+  - 实施记录（2026-09-21）：`llm_call.task` 新增 `memory_scan`（每批 1 次调用 + 不合格重试 1 次）。**每周那一批按计划分开扫**——计划内记忆的作用域就是单个计划，一次混扫会让模型分不清「这条是哪儿的」。计划收尾那条登记走 `memory_scan.status='pending'`，`run_pending` 之后做掉。
+
+- [x] **T41 彻底删除与 `/memory` 页**
+  - Acceptance：① `purge-preview`（只读）给出影响预览；② `purge` 清掉记忆正文、候选 payload 里的内容、证据摘录，并把来源里那句原话换成「已按用户要求删除」（行与状态时间保留）；**来源行自己那几行台账流水里的正文副本一并换掉**；③ 清完**全库复扫**，证明不了清干净就 `complete=false` 并列出残留，**拒绝宣称成功**；④ 只留不含内容的墓碑；⑤ `/memory` 页三个标签页（当前记忆 / 记忆收件箱 / 待复核）+ 计划筛选 + 手工补记 + 扫描按钮 + 来源展示 + 改 / 作废 / 彻底删除（二次确认）+ 批量勾选（只有 `batch_eligible` 给复选框）
+  - Verify：单测盯预览只读、删后四处正文都不在、来源行保住状态与时间、台账副本也清掉、清不干净时如实说没删干净、候选 payload 不再含正文；`pytest -q`、`tools\smoke_p1.py`（12–17 步走记忆这几条不调模型的接口）、前端 `lint` 与 `tsc` exit=0。**浏览器走查归用户**
+  - Files：`backend/app/memory.py`、`backend/app/main.py`、`backend/tools/smoke_p1.py`、`backend/tests/test_memory.py`、`frontend/app/memory/page.tsx`（新）、`frontend/lib/api.ts`、`frontend/components/app-header.tsx`、`docs/记忆系统.md`
+  - 实施记录（2026-09-21）：`ledger_event` 里那份正文副本是**冒烟跑出来的**——「取代」那条流水的 `entity_id` 挂在**旧行**编号上（`ledger.supersede` 的写法），照新行 id 去清正好漏掉它，所以改成按「这一类的流水里出现过这段话」来清，并补了一条回归用例。全库复扫覆盖 12 组表列（档案 / 计划内记忆 / 证据 / 候选 payload / 两类对话 / 报告 / 候选 / 台账三个字段）。**未覆盖**：真实模型跑一遍扫描（走查归用户）；`docs/记忆系统.md` 里「每周触发」那一步要等 P4 的 T16 周任务接上（现在接口已支持 `trigger=weekly`，`weekly_scans` 也写好了，只差定时入口）。
+
+## P3.10 记忆走查整改（2026-09-21；用户真机走查四条，方案见 `docs/记忆走查整改方案.md`，规格落 SPEC 决策 43）
+
+用户走查 `/memory` 与计划对话后提出四条，口径全部定稿；分两批落（第一批不碰模型行为主体，第二批动提示词与运行账的读法）。总原则一句话：**要系统动手的必须严格，只给用户看的可以宽松；感知靠摘要，依据靠整份重读。**
+
+- [x] **T42 「还作数」带日期选择 + 复核时间常驻可见**
+  - Acceptance：① 待复核那一行点「还作数」展开日期输入框（预填今天 + 90 天，与后端 `REVIEW_DAYS` 同值）、确认才提交，所填日期随复核接口带上；② 凡带复核时间的记忆（当前记忆与待复核两栏）条目上常驻一行「下次复核：YYYY-MM-DD」，到期时那行变成「已到复核时间 · 不再当依据」；③ 后端不改（复核接口本来就接受显式日期）
+  - Verify：单测盯「显式日期优先于默认 90 天」「不给日期才是那个默认」「续期仍不产生新行」；`tools\smoke_p1.py` 第 13 步带上所挑日期并核对回执；前端 `lint` 与 `tsc` exit=0。**浏览器走查归用户**
+  - Files：`frontend/app/memory/page.tsx`、`backend/tests/test_memory.py`、`backend/tools/smoke_p1.py`
+  - 实施记录（2026-09-21）：后端一行没动——`renew_memory` 本来就「给了日期照给的、没给才推 90 天」，缺的只是界面入口与那个日期可见（原先它只出现在操作回执的一句话里，走查时被误读成「永久生效」）。前端 `defaultReviewDate()` 自己算本地日期（不用 `toISOString`，那个按 UTC 算会差一天）。
+  - 契约变化：无（`review_at` 本来就是可选入参）
+
+- [x] **T43 回话散文兜底 + 提示词拆契约段与风格段**
+  - Acceptance：① 最终回话的验收改三段式——合法信封照旧；不是 JSON 带原因重试一次；重试后**仍是**非空散文就把它当回话收下、建议记为空、运行账写明「用了散文兜底」；② 「要读资料」与「建议」两条路一行不动（没有 `tool_calls` 数组就不算读资料，散文里永远解析不出建议，所以兜底**一条提案都不落**）；③ 兜底落在**代码的验收分支**里、不落在提示词里（提示词仍要求套壳）；④ `dialogue.SYSTEM_PROMPT` 拆成 `CONTRACT_PROMPT`（两种形状、校验口径、动作清单、不许 Markdown 代码块、**记忆变化那条硬规则**）+ `STYLE_PROMPT`（陪跑顾问、说人话、200 字以内），调用时拼起来；契约段视为代码的一部分
+  - Verify：单测盯「散文 → 重试 → 仍散文 → 收下为回话且运行账 ok 带兜底说明」「**第一次**仍是判不合格、带原因重说」「一直形状错照样撞上限、一条都不落」「散文里写「我想先读计划」不算读资料、`tool_calls` 记 0」「契约段 + 风格段拼起来就是发出去的那一段、目录与校验行为不变」；`pytest -q`、`tools\smoke_p1.py`、lint/tsc exit=0
+  - Files：`backend/app/agent_runtime.py`、`backend/app/dialogue.py`、`backend/tests/test_agent.py`、`backend/tests/test_dialogue.py`
+  - 实施记录（2026-09-21）：循环多一个 `prose_fallback` 回调（由 `dialogue._prose_reply` 提供：`extract_json` 取不到对象且去空白后非空 → 返回那段文字），**只在 `retried` 为真时被问**——即「已经带原因重试过一次」之后。两条既有用例按新口径改写：`test_an_empty_reply_costs_the_turn_but_keeps_your_words` 拆成「散文兜底收下」与「形状一错到底仍中止」两条。
+  - 契约变化：计划对话那一轮的**验收口径**变了（散文可被收下）；模型调用上限（决策 40 的 3 次）与工具上限不变
+
+- [x] **T44 工具报错人话 + 类别中文别名**
+  - Acceptance：① 读档案工具的 `category` 同时接受五个约定令牌**与它们的中文名**（短名、带括号的全名都认）；② 类别仍不认时报「类别只能是 生活习惯 / 生活记录 / 当前状态 / 短期目标+痛点 / 长期主线 之一（你写的是「…」）」——**不再把英文令牌甩进「本轮依据」**；③ 经历检索的 `source_type` 同一条口径（中文名也认、报错只列中文名），工具目录里的示例与取值一并换成中文
+  - Verify：单测盯「中文名与令牌读到同一批档案」「非法类别报错含中文名、不含令牌」「中文别名检索到同一批经历」「非法来源类型报错只列中文名」「运行账里的摘要读得懂」；`pytest -q`
+  - Files：`backend/app/agent_tools.py`、`backend/app/memory.py`、`backend/tests/test_agent.py`、`backend/tests/test_memory.py`
+  - 实施记录（2026-09-21）：别名归一化「先去空白、再去括号举例」——`短期目标 + 当下痛点` 与 `当前状态（精力/时间/压力）` 都落到同一个令牌上。报错统一成「只能是 A / B / C 之一（你写的是「…」）」这一句形状，其余工具的措辞照此过了一遍。
+  - 契约变化：工具参数取值域放宽（认中文名），拒绝时的措辞变人话
+
+- [x] **T45 记忆变化感知（摘要行 + 整份重读）**
+  - Acceptance：① **水印不加列**——这段对话上次读记忆的时间 = 该计划运行账里最近一条「读成了 `read_memories`」的时间；② **变化清单**从台账流水取（新增 / 取代 / 作废），彻底删除并上**墓碑表**（`memory_deletion` 加一列可空 `plan_id`，加列迁移，老行不受影响）；③ **范围按作用域切**：全局记忆的变化对所有对话都算，计划内记忆的变化只算它那一个计划；④ **摘要行**：有变化时在每轮开头（工具目录与额度那一段之后）多一行「记忆库自你上次读（时间）之后变过 N 条：#15 被取代、#33 作废、#7 被彻底删除。涉及它们就先读一次记忆」；没变化、或这段对话**从没读过记忆**时**不出现**；⑤ **硬规则进契约段**：出现那行时本轮必须先调用 `read_memories` 再回答（读的是整份当前值，不是增量——只给增量压不住历史里的旧说法）
+  - Verify：单测盯「变过 → 摘要列对动作（含走墓碑的彻底删除）」「没变 → 不出现」「从没读过 → 不出现」「另一个计划的计划内变化看不到、全局变化两边都算」「摘要确实进了下一轮开头的 prompt 且排在额度之后」「契约段含硬规则」；`pytest -q`、`tools\smoke_p1.py`、lint/tsc exit=0。**「摘要出现那一轮它真读了记忆」留给用户真机走查**
+  - Files：`backend/app/memory.py`、`backend/app/agent_runtime.py`、`backend/app/dialogue.py`、`backend/sql/schema.sql`、`backend/app/db.py`、`backend/tests/test_memory.py`
+  - 实施记录（2026-09-21）：同一段记忆在那段时间里被折腾过好几次的只报**最后一次**动作（摘要行是提醒、不是流水账）。**代价明写**：摘要行每轮多几十字，硬规则会占掉一轮六次读资料额度里的一次。单测里为了把「新增 → 读记忆 → 改动」三步在时间上分开，加了 `rewind_to_past`（库里的时间戳是秒级精度，同秒判不出先后）。
+  - 契约变化：`agent_run` 的读法多一层用途（水印）；`memory_deletion` 加列；`dialogue` 与 `agent_runtime` 的提示词多一行提醒与一条硬规则
 
 ## P4 触达兜底
 

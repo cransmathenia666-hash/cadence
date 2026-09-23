@@ -129,6 +129,8 @@ def main() -> int:
     try:
         wait_ready(base)
         overdue = (date.today() - timedelta(days=5)).isoformat()
+        # 「还作数」挑的日期（走查整改第 1 条）：给了就照给的，不再固定推 90 天。
+        picked_review = (date.today() + timedelta(days=7)).isoformat()
 
         status, plan = request(base, "POST", "/api/plan", {"goal": f"冒烟 {stamp}"})
         checker.step(1, "建计划", status, plan)
@@ -210,6 +212,52 @@ def main() -> int:
             "title": "阶段 · 冒烟", "reason": "   ",
         })
         checker.expect("改字段缺理由被拒（T30，理由只有空白 → 业务拒绝 400）", status, 400)
+
+        # 记忆系统（2026-09-21）：这里只走**不调模型**的那几条——手工补记、看、改、复核、
+        # 彻底删除。扫描那条要接真模型，不进冒烟（它由单测的假上游覆盖）。
+        status, added = request(base, "POST", "/api/memory", {
+            "scope": "plan", "plan_id": plan["id"], "kind": "constraint",
+            "content": f"冒烟记忆 {stamp}", "review_at": overdue, "reason": "冒烟：补一条计划内记忆",
+        })
+        checker.step(12, "手工补一条计划内记忆（复核时间故意设在 5 天前）", status, added)
+        checker.expect("补记忆状态码", status, 201)
+
+        status, listing = request(base, "GET", f"/api/memory?plan_id={plan['id']}")
+        checker.step(13, "看记忆：它应当在「待复核」那一组里", status, listing["counts"])
+        checker.expect("到期待复核的条数", listing["counts"]["due"], 1)
+
+        status, renewed = request(base, "POST", f"/api/memory/{added['id']}/review", {
+            "scope": "plan", "decision": "renew", "review_at": picked_review,
+            "reason": "冒烟：还作数，下次复核挑了个自己填的日子",
+        })
+        checker.expect("复核续期后不再到期", renewed["memory"]["review_due"], False)
+        checker.expect("复核时间就是挑的那天（不是默认 90 天）",
+                       renewed["memory"]["review_at"], picked_review)
+
+        status, replaced = request(base, "PUT", f"/api/memory/{added['id']}", {
+            "scope": "plan", "content": f"冒烟记忆 {stamp} · 改过", "reason": "冒烟：改内容",
+        })
+        checker.step(14, "改一条记忆（走台账取代：旧值留痕、id 换新）", status, replaced)
+        checker.expect("取代后是另一条记录", replaced["id"] != added["id"], True)
+
+        status, preview = request(base, "POST", f"/api/memory/{replaced['id']}/purge-preview",
+                                  {"scope": "plan"})
+        checker.step(15, "彻底删除的影响预览（这一步只读）",
+                     status, {"copies": preview["copies"], "irreversible": preview["irreversible"]})
+        still_there = request(base, "GET", f"/api/memory?plan_id={plan['id']}")[1]
+        checker.expect("预览没有动任何数据", still_there["counts"]["plan"], 1)
+
+        status, purged = request(base, "POST", f"/api/memory/{replaced['id']}/purge",
+                                 {"scope": "plan", "reason": "冒烟：删干净"})
+        checker.step(16, "彻底删除并全库复扫一遍",
+                     status, {"complete": purged["complete"], "leftover": purged["leftover"]})
+        checker.expect("清干净了（complete=True）", purged["complete"], True)
+
+        status, closed = request(base, "POST", f"/api/plans/{plan['id']}/close",
+                                 {"reason": "冒烟：收尾"})
+        checker.step(17, "收尾计划：只登记一条待扫描，不在收尾里调模型",
+                     status, {"memory_scan_id": closed["memory_scan_id"]})
+        checker.expect("收尾登记了待扫描", isinstance(closed["memory_scan_id"], int), True)
 
         print()
         if checker.failures:

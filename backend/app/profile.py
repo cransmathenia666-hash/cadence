@@ -78,10 +78,15 @@ def create_item(
     content: str,
     reason: str | None = None,
     actor: str = "user",
+    source_kind: str = "user_stated",
+    fact_time: str | None = None,
+    review_at: str | None = None,
 ) -> int:
     """补一条档案：先判重，再落 active。
 
     `reason` 留给「提案批准」那条路：台账里要能看出这条是谁按哪个提案写进去的。
+    `source_kind` 从记忆系统（2026-09-21）起必填默认值：档案多了一列「来源性质」，
+    手工敲进来的就是**用户陈述**——留空会让 `db.init` 的补齐步骤把它误标成历史条目。
     """
     if category not in PROFILE_TOKENS:
         raise ProfileError(
@@ -94,7 +99,13 @@ def create_item(
     return ledger.create_active(
         conn,
         "profile_item",
-        {"category": category, "content": cleaned},
+        {
+            "category": category,
+            "content": cleaned,
+            "source_kind": source_kind,
+            "fact_time": fact_time,
+            "review_at": review_at,
+        },
         actor=actor,
         reason=reason,
     )

@@ -19,6 +19,12 @@
   `plan_change.MAX_TASKS`）。界面上那条「确认」就是这里的批准，**「忽略」= 驳回**（理由固定
   「聊天里先不动」）——所以每条建议都有归宿。这一类与 `profile_change` 的分工：一个动
   计划，一个动档案。
+- `memory_change`（`memory.py` 产，2026-09-21 记忆系统）：记忆收件箱里的一条候选
+  （新增 / 取代 / 复核处理）。批准 = **真的写长期记忆**——`add` 落新条目、`supersede` 走
+  台账取代（旧值留痕）、`review` 按 `decision` 续期或作废。**批准前再验一次**：目标那条
+  记忆可能已经被改掉了，那时给出 409 而不是照着旧假设写。批量批准走
+  `POST /api/memory/batch-approve`，只收「新增 + 用户陈述」——取代、Agent 推断、彻底删除
+  一律逐条。
 
 裁定一律走台账的**业务终态**（`accepted` / `rejected`，SPEC 第 18 节第 22 条），
 并顺手补上一直空着的 `decided_at`。
@@ -30,7 +36,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import blueprint, ledger, plan, plan_change, profile
+from . import blueprint, ledger, memory, plan, plan_change, profile
 from .db import now_iso
 
 
@@ -190,6 +196,18 @@ def decide(
             # resolve 里的防重名闸复用 `plan.assert_no_open_duplicate`，它抛的是 plan 的错误
             raise ProposalError(str(error)) from error
 
+    # 记忆候选（2026-09-21 记忆系统）：同样先把「能不能写」验完（目标那条记忆还在不在、
+    # 是否仍有效、内容有没有和某条现行记忆撞成完全一样），写的动作留到状态改完之后
+    if approved and kind == memory.KIND:
+        try:
+            memory.precheck(conn, payload)
+        except memory.MemoryNotFound as error:
+            raise ProposalNotFound(str(error)) from error
+        except memory.MemoryConflict as error:
+            raise ProposalConflict(str(error)) from error
+        except memory.MemoryError as error:
+            raise ProposalError(str(error)) from error
+
     if approved:
         if kind == blueprint.BLUEPRINT_KIND:
             task_count = sum(len(build.tasks) for build in builds)
@@ -200,6 +218,9 @@ def decide(
         elif kind == plan_change.KIND:
             # 台账那句话说清「到底批准了哪一条」——summary 是后端拼的人话一行
             base = f"批准：{payload.get('summary') or '按聊天里的建议改动计划'}"
+        elif kind == memory.KIND:
+            label = memory.ACTIONS.get(str(payload.get("action")), str(payload.get("action")))
+            base = f"批准：{label}一条长期记忆"
         else:
             base = _APPROVE_REASONS.get(kind, f"批准：{kind}")
     else:
@@ -220,6 +241,7 @@ def decide(
     written: dict[str, Any] | None = None
     added: dict[str, Any] | None = None
     updated: dict[str, Any] | None = None
+    remembered: dict[str, Any] | None = None
     if approved and kind == blueprint.BLUEPRINT_KIND:
         built = blueprint.apply_build(conn, int(payload.get("plan_id") or 0), builds)
         effect = "blueprint_built"
@@ -248,6 +270,13 @@ def decide(
         else:
             added = result
             effect = "node_added"
+    elif approved and kind == memory.KIND:
+        # 验已经全验过了（precheck），这里才是唯一一次写：新增落条目、取代走台账、复核续期 / 作废
+        try:
+            remembered = memory.apply(conn, payload, proposal_id=proposal_id)
+        except (memory.MemoryError, ledger.LedgerError) as error:
+            raise ProposalError(f"记忆没能写进去：{error}") from error
+        effect = str(remembered["effect"])
 
     return {
         "id": proposal_id,
@@ -258,4 +287,5 @@ def decide(
         "written": written,
         "added": added,
         "updated": updated,
+        "remembered": remembered,
     }

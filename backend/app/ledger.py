@@ -44,6 +44,10 @@ class EntitySpec:
 # 因为计划的读取一律经 fetch_active，被取代的计划自然消失。
 SPECS: dict[str, EntitySpec] = {
     "profile_item": EntitySpec(table="profile_item", value_column="content"),
+    # 计划内记忆（2026-09-21 记忆系统）：与 profile_item 同一种东西——有「当前有效值」
+    # 这个概念、也有「旧的说法不再算数」这个动作，所以它走台账的取代 / 作废。
+    # 判据仍是上面那条：它没有表达否决的业务终态，只能由台账的 superseded / void 表达。
+    "plan_memory": EntitySpec(table="plan_memory", value_column="content"),
     "candidate": EntitySpec(
         table="candidate", value_column="title", active_status="proposed",
         supports_lifecycle=False,

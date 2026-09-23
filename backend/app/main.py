@@ -23,7 +23,19 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import advisor, blueprint, config, db, dialogue, ledger, llm, plan, profile, proposals
+from . import (
+    advisor,
+    blueprint,
+    config,
+    db,
+    dialogue,
+    ledger,
+    llm,
+    memory,
+    plan,
+    profile,
+    proposals,
+)
 
 app = FastAPI(
     title="cadence",
@@ -388,11 +400,18 @@ def get_plans(
 def post_plan_close(
     plan_id: int, payload: PlanCloseIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """收尾一个计划：做完了，进历史，不再出现在默认列表里。可重复调用。"""
+    """收尾一个计划：做完了，进历史，不再出现在默认列表里。可重复调用。
+
+    收尾顺手**登记一条待扫描**（记忆系统，方案第 6 节）：这个计划的经历该提炼一遍了。
+    刻意**不在这里同步调模型**——收尾是一次业务动作，不该被一次模型调用拖住、也不该
+    因为模型不通而失败；由每周任务或记忆页之后来把它做掉。
+    """
     try:
-        return plan.close_plan(conn, plan_id, payload.reason)
+        result = plan.close_plan(conn, plan_id, payload.reason)
     except plan.PlanError as error:
         raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
+    scan_id = memory.register_pending_scan(conn, plan_id) if result["changed"] else None
+    return {**result, "memory_scan_id": scan_id}
 
 
 @app.post("/api/plans/{plan_id}/void")
@@ -1081,3 +1100,245 @@ def void_profile_item(
     except (profile.ProfileError, ledger.LedgerError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": item_id, "voided": True}
+
+
+# ---------- 记忆系统（2026-09-21，方案 `docs/记忆系统.md`） ----------
+#
+# 三层记忆：工作记忆在 `agent_runtime` 里（不落表）、经历记忆从既有六类记录现查
+# （`GET` 不了全部，只有 Agent 的 `search_experiences` 工具与扫描用得上）、长期记忆就是
+# 这里管的这两级——全局沿用档案表、计划内是 `plan_memory`。
+#
+# 三条口径，与方案一一对应：
+# ① **系统只产候选**：扫描出来的东西进记忆收件箱（`proposal` 表的 `memory_change` 一类），
+#    批准走既有的 `/api/proposals/{id}/decide`——候选裁定不另开口子。
+# ② **批量批准只收「新增 + 用户陈述」**：取代会改掉已成立的事实、Agent 推断不是他说过的话、
+#    彻底删除不可恢复，这三样一律逐条确认。
+# ③ **彻底删除先预览再确认**：`purge-preview` 只读，`purge` 才动手，动完**全库复扫**一遍，
+#    证明不了清干净就如实说「不敢宣称成功」。
+#
+# 状态码口径同 SPEC 第 11 节：入参不合法 422、对象不存在 404、与现状冲突（已被取代 / 作废 /
+# 已经有完全一样的一条）409、业务规则拒绝 400。
+
+
+class MemoryIn(BaseModel):
+    """手工补一条长期记忆。类别按作用域二选一：全局用档案五类、计划内用约束 / 决定 / 偏好。"""
+
+    scope: Literal["global", "plan"] = Field(description="全局长期记忆 / 计划内记忆")
+    content: str = Field(min_length=1, description="一两句结论，不是原始资料")
+    plan_id: int | None = Field(default=None, description="scope=plan 时必填")
+    category: Literal["life_habit", "life_log", "current_state", "short_term_goal", "long_axis"] | None = Field(
+        default=None, description="scope=global 时的类别（五个约定令牌之一）"
+    )
+    kind: Literal["constraint", "decision", "preference"] | None = Field(
+        default=None, description="scope=plan 时的类别"
+    )
+    source_kind: Literal["user_stated", "agent_inferred", "legacy_manual"] = Field(
+        default="user_stated", description="这条是谁说的：你说的是 user_stated"
+    )
+    fact_time: str | None = Field(default=None, description="这条事实说的是什么时候的状态（YYYY-MM-DD）")
+    review_at: str | None = Field(default=None, description="到了这个时候进「待复核」（YYYY-MM-DD）")
+    reason: str | None = Field(default=None, description="为什么记它——进台账")
+
+
+class MemoryUpdateIn(BaseModel):
+    """改一条记忆：实为台账「取代」，旧值留痕、理由必填。作用域决定改的是哪张表。"""
+
+    scope: Literal["global", "plan"]
+    content: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    fact_time: str | None = None
+    review_at: str | None = None
+    source_kind: Literal["user_stated", "agent_inferred", "legacy_manual"] | None = None
+
+
+class MemoryScopeIn(BaseModel):
+    scope: Literal["global", "plan"]
+
+
+class MemoryVoidIn(MemoryScopeIn):
+    reason: str = Field(min_length=1, description="为什么作废——写进台账")
+
+
+class MemoryReviewIn(MemoryScopeIn):
+    """待复核的两种处置（方案第 3 节）：还作数就往后推（renew），不再作数就作废（void）。"""
+
+    decision: Literal["renew", "void"]
+    review_at: str | None = Field(default=None, description="续期到哪一天；不给就按默认周期推")
+    reason: str | None = None
+
+
+class MemoryScanIn(BaseModel):
+    plan_id: int | None = Field(default=None, description="扫哪个计划；不给就是全局那一批")
+    trigger: Literal["manual", "weekly", "plan_close"] = Field(default="manual")
+
+
+class MemoryBatchIn(BaseModel):
+    proposal_ids: list[int] = Field(min_length=1, description="记忆收件箱里的提案编号")
+    reason: str | None = None
+
+
+def _memory_error(error: Exception) -> HTTPException:
+    """把记忆层的三种错翻成状态码（口径同档案那三条路由）。"""
+    if isinstance(error, memory.MemoryNotFound):
+        return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, memory.MemoryConflict):
+        return HTTPException(status_code=409, detail=str(error))
+    return HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/api/memory")
+def get_memory(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """取记忆：全局的、这个计划的、以及两边「已到复核时间」的。
+
+    到期的那组**同时列出来**（页面的「待复核」标签页就用它），但它们**默认不参与回答**
+    ——Agent 那边由 `read_memories` 工具把到期的摘出去单独标。
+    """
+    try:
+        return memory.list_memories(conn, plan_id=plan_id)
+    except memory.MemoryError as error:
+        raise _memory_error(error) from error
+
+
+@app.get("/api/memory/inbox")
+def get_memory_inbox(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """记忆收件箱：还没裁定的记忆候选。裁定走 `/api/proposals/{id}/decide`（同一个口子）。"""
+    return memory.list_inbox(conn)
+
+
+@app.get("/api/memory/scans")
+def get_memory_scans(limit: int = 20, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """最近的扫描记录：扫了几条、落了几条候选、失败为什么。"""
+    return {"scans": memory.scan_report(conn, limit=limit)}
+
+
+@app.post("/api/memory/scan")
+def post_memory_scan(
+    payload: MemoryScanIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """扫一批新经历，**只产候选**。
+
+    先把登记下来还没跑的扫描（计划收尾留下的那些）做掉，再做这一次要的那批。
+    单批有条数与字符上限，超出的留到下一批（`has_more` 为真）；某一批失败不影响别的批，
+    也不落任何不完整的候选。
+    """
+    try:
+        reports = memory.run_pending(conn)
+        reports.append(memory.scan(conn, trigger=payload.trigger, plan_id=payload.plan_id))
+    except memory.MemoryError as error:
+        raise _memory_error(error) from error
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"scans": reports}
+
+
+@app.post("/api/memory", status_code=201)
+def post_memory(payload: MemoryIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """手工补一条长期记忆。**你自己敲的这条不需要来源证据**——你就是来源。"""
+    try:
+        return memory.add_memory(
+            conn,
+            scope=payload.scope,
+            content=payload.content,
+            plan_id=payload.plan_id,
+            category=payload.category,
+            kind=payload.kind,
+            source_kind=payload.source_kind,
+            fact_time=payload.fact_time,
+            review_at=payload.review_at,
+            reason=payload.reason or "手工补记",
+        )
+    except (memory.MemoryError, ledger.LedgerError) as error:
+        raise _memory_error(error) from error
+
+
+@app.put("/api/memory/{memory_id}")
+def put_memory(
+    memory_id: int, payload: MemoryUpdateIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """改一条记忆：走台账「取代」，旧值不删、改前改后与理由都留在流水里。"""
+    try:
+        return memory.supersede_memory(
+            conn,
+            payload.scope,
+            memory_id,
+            content=payload.content,
+            reason=payload.reason,
+            fact_time=payload.fact_time,
+            review_at=payload.review_at,
+            source_kind=payload.source_kind,
+        )
+    except (memory.MemoryError, ledger.LedgerError) as error:
+        raise _memory_error(error) from error
+
+
+@app.post("/api/memory/{memory_id}/void")
+def post_memory_void(
+    memory_id: int, payload: MemoryVoidIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """作废一条记忆（普通纠错走这条，留痕）：从此不参与判断，旧值仍在台账里。"""
+    try:
+        memory.void_memory(conn, payload.scope, memory_id, reason=payload.reason)
+    except (memory.MemoryError, ledger.LedgerError) as error:
+        raise _memory_error(error) from error
+    return {"id": memory_id, "scope": payload.scope, "voided": True}
+
+
+@app.post("/api/memory/{memory_id}/review")
+def post_memory_review(
+    memory_id: int, payload: MemoryReviewIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """处理「待复核」：还作数就把复核时间往后推，不再作数就作废。两条都留痕。"""
+    try:
+        if payload.decision == "renew":
+            return {
+                "decision": "renew",
+                "memory": memory.renew_memory(
+                    conn,
+                    payload.scope,
+                    memory_id,
+                    review_at=payload.review_at,
+                    reason=payload.reason,
+                ),
+            }
+        memory.void_memory(
+            conn,
+            payload.scope,
+            memory_id,
+            reason=str(payload.reason or "").strip() or "复核后确认不再作数",
+        )
+    except (memory.MemoryError, ledger.LedgerError) as error:
+        raise _memory_error(error) from error
+    return {"decision": "void", "id": memory_id, "scope": payload.scope, "voided": True}
+
+
+@app.post("/api/memory/batch-approve")
+def post_memory_batch_approve(
+    payload: MemoryBatchIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """批量批准记忆候选：**只收「新增 + 用户明确陈述」**。
+
+    其余（取代、Agent 推断、彻底删除）进 `skipped` 并写明为什么——必须逐条确认。
+    """
+    return memory.batch_approve(conn, payload.proposal_ids, reason=payload.reason)
+
+
+@app.post("/api/memory/{memory_id}/purge-preview")
+def post_memory_purge_preview(
+    memory_id: int, payload: MemoryScopeIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """彻底删除的**影响预览**：这一步不改任何数据，只把要动的地方摆出来给你看。"""
+    try:
+        return memory.purge_preview(conn, payload.scope, memory_id)
+    except memory.MemoryError as error:
+        raise _memory_error(error) from error
+
+
+@app.post("/api/memory/{memory_id}/purge")
+def post_memory_purge(
+    memory_id: int, payload: MemoryVoidIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """执行彻底删除（不可恢复）。动完**全库复扫**：清不干净就如实说，不宣称成功。"""
+    try:
+        return memory.purge(conn, payload.scope, memory_id, reason=payload.reason)
+    except memory.MemoryError as error:
+        raise _memory_error(error) from error

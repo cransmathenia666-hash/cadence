@@ -58,7 +58,7 @@ def facts_seen(transport: ScriptedTransport, index: int = -1) -> str:
     return transport.seen[index]["payload"]["messages"][-1]["content"]
 
 
-# ---------- ① 四个工具本身 ----------
+# ---------- ① 六个工具本身 ----------
 
 def test_the_catalog_and_the_registry_are_the_same_thing(conn):
     """目录由注册表生成——「目录里写了、其实没有」这类不一致从结构上不会发生。"""
@@ -69,6 +69,9 @@ def test_the_catalog_and_the_registry_are_the_same_thing(conn):
         "read_recent_reports",
         "read_profile",
         "read_plan_origin",
+        # 2026-09-21 记忆系统加的两条（长期记忆 + 经历检索）
+        "read_memories",
+        "search_experiences",
     ]
     for name in agent_tools.TOOLS:
         assert name in catalog
@@ -117,14 +120,37 @@ def test_reading_the_profile_can_be_narrowed_to_one_category(conn):
     assert "1 条" in one_of_it.summary
 
 
-def test_an_unknown_category_is_refused(conn):
+def test_an_unknown_category_is_refused_in_plain_chinese(conn):
+    """类别不认时报**人话**：只列中文名，不甩英文令牌串（走查整改第 4 条）。
+
+    走查里模型把类别写成中文被判错，而挡下的原文直接显示在「本轮依据」里——用户看到一串
+    `life_habit / life_log / …` 只会困惑。
+    """
     add_profile(conn)
     plan_id = make_plan(conn)
 
     with pytest.raises(agent_tools.ToolError) as error:
         agent_tools.execute(conn, plan_id, "read_profile", {"category": "心情"})
 
-    assert "不是约定的类别" in str(error.value)
+    said = str(error.value)
+    assert "当前状态" in said and "你写的是「心情」" in said
+    assert "current_state" not in said and "life_habit" not in said
+
+
+def test_a_chinese_category_reads_the_same_rows(conn):
+    """中文名也认：它写「当前状态」和写 `current_state` 读到的是同一批档案。"""
+    add_profile(conn, "current_state", "晚上有两小时")
+    add_profile(conn, "long_axis", "长期做工程")
+    plan_id = make_plan(conn)
+
+    via_chinese = agent_tools.execute(conn, plan_id, "read_profile", {"category": "当前状态"})
+    via_token = agent_tools.execute(conn, plan_id, "read_profile", {"category": "current_state"})
+    spelled_out = agent_tools.execute(
+        conn, plan_id, "read_profile", {"category": "当前状态（精力/时间/压力）"}
+    )
+
+    assert via_chinese.text == via_token.text == spelled_out.text
+    assert "晚上有两小时" in via_chinese.text and "长期做工程" not in via_chinese.text
 
 
 def test_an_unknown_tool_name_is_refused(conn):
@@ -175,11 +201,14 @@ def test_it_reads_the_plan_then_answers(conn):
 
 
 def test_a_bad_output_and_a_tool_round_share_the_same_budget(conn):
-    """结构错也计入上限（决策 6 的老规矩）：读一轮 + 两次不合格 = 3 次，到此为止。"""
+    """结构错也计入上限（决策 6 的老规矩）：读一轮 + 两次不合格 = 3 次，到此为止。
+
+    后两次都是**形状错**（能解成 JSON、字段就是不合格）——散文兜底不接这种，所以照样撞上限。
+    """
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    transport = ScriptedTransport(ask("read_current_plan"), "不是信封", "还不是信封")
+    transport = ScriptedTransport(ask("read_current_plan"), "{}", '{"reply": ""}')
 
     with pytest.raises(dialogue.DialogueError) as error:
         dialogue.say(conn, plan_id, "看看计划", transport=transport)
@@ -187,6 +216,63 @@ def test_a_bad_output_and_a_tool_round_share_the_same_budget(conn):
     assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS
     assert "连着 3 次都没给出合格的输出" in str(error.value)
     assert pending_changes(conn) == []
+
+
+def test_prose_is_still_a_shape_error_on_the_first_try(conn):
+    """散文兜底**只在重试之后**生效：第一次不套壳仍然判不合格、带原因请它重说。
+
+    宽松是接住它偶尔 slips 的那一下，不是「第一次就可以随便说」。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport("我不想套壳，直接说吧。", envelope("那我还是套上吧。"))
+
+    done = dialogue.say(conn, plan_id, "看看计划", transport=transport)
+
+    assert done["reply"] == "那我还是套上吧。"
+    assert len(transport.seen) == 2
+    # 第一次那段散文没有被收下：第二轮发出去的是「你上面的输出不合格：…」
+    retry_hint = transport.seen[1]["payload"]["messages"][-1]["content"]
+    assert "不合格" in retry_hint
+
+
+def test_prose_saying_it_wants_to_read_is_not_taken_as_a_read(conn):
+    """散文里写着「我想先读计划」也**不算读资料**：没有 `tool_calls` 数组就没有读。
+
+    这一条是兜底的边界：能解析出工具调用的只有那一种形状，散文永远解析不出来——
+    所以它既不会误开工具、也永远落不出提案。
+    """
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport("我想先读一下计划，然后再回答你。", "我还是想先读计划。")
+
+    done = dialogue.say(conn, plan_id, "你看着办", transport=transport)
+
+    assert done["reply"].startswith("我还是想先读计划")
+    assert done["tools_used"] == [] and done["run"]["tool_calls"] == 0
+    assert done["suggestion"] is None and pending_changes(conn) == []
+
+
+def test_a_refused_tool_shows_up_as_plain_chinese_in_the_runbook(conn):
+    """工具拒了它一次，运行账那一行（界面「本轮依据」）读得懂——中文名，不是令牌串。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(
+        json.dumps(
+            {"tool_calls": [{"name": "read_profile", "args": {"category": "心情"}}]},
+            ensure_ascii=False,
+        ),
+        envelope("那我就不看那一类了。"),
+    )
+
+    done = dialogue.say(conn, plan_id, "看看我的状态", transport=transport)
+
+    summary = done["run"]["tools"][0]["summary"]
+    assert "当前状态" in summary and "你写的是「心情」" in summary
+    assert "current_state" not in summary
 
 
 def test_hitting_the_model_call_cap_says_what_is_missing(conn):
