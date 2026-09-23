@@ -12,3 +12,8 @@ exports/
 .zcode/
 .dsh-vision-toolkit/
 .zcodeignore
+
+# 私人文件：仅留在本机，不入库
+待办.md
+辅助对话2.md
+无标题-*.excalidraw
