@@ -1,8 +1,8 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-21（**P3.10 记忆走查整改（T42–T45）**：四条口径与实现见 SPEC 决策 43、逐条验收见 `tasks/todo.md` 的 P3.10；`pytest -q` **443 passed**、冒烟 **17 步**、lint/tsc exit=0；真库已 `db.init` 补 `memory_deletion.plan_id`。此前 P3.9：记忆系统全量落地，见 `docs/记忆系统.md`）
+> 最近更新：2026-09-23（**公开仓库收口**：P3.9+P3.10 已提交；私人物件移出版本控制并忽略、全库历史重写清干净、仓库转**公开**。此前 2026-09-21：P3.10 记忆走查整改（T42–T45），`pytest -q` **443 passed**）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜**当前在分支 `feat/frontend-a-shell`**（用户 2026-09-19 要求前端走分支、便于重做，`master` 停在 `e866d26`）｜**远端**：`origin` = GitHub 私有库 `cransmathenia666-hash/cadence`（2026-09-20 首次上传，默认分支即此）｜近期：P3.7 `5d565ed`、T37 `d42620d`｜**未提交改动**：P3.9 与 P3.10 两轮全量（后端 `memory.py` / `agent_runtime.py` / `dialogue.py` / `agent_tools.py` / `db.py` / schema、三份测试、冒烟、前端 `/memory` 与 `api.ts`、SPEC 决策 42/43、todo 两节、两份记忆文档）
+> 主工作树：`D:\cadence`｜**当前在分支 `feat/frontend-a-shell`**（`master` 刻意停在旧位置不追平）｜**远端**：`origin` = GitHub **公开**库 `cransmathenia666-hash/cadence`（2026-09-23 重写历史清掉私人物件后转公开，默认分支即此；重写前全量备份在 `D:\cadence-history-backup-20260923.bundle`）｜**未提交改动**：只剩并行窗口的前端样式改造（`globals.css` / `layout.tsx` / `app-header.tsx` / `package*.json` 与成批未跟踪的 `components/ui|workbench|primitives`、tokens 等）——**别提交、别清理**
 > 其他工作树：无
 > 当前唯一目标：**P4 触达与导出（T15–T17）**——规格在 `tasks/todo.md` 的 P4 一节；T15 的邮件实现需要用户给 SMTP 授权码，可先做 `notify` 接口与空实现
 > 下一条动作：① **走查 P3.10**（记忆页挑一次复核日期看那行是否常驻、计划对话里让它 slips 一次看还有没有红条、「本轮依据」里不该再有英文令牌；第二批要接真模型：先聊一轮 → 去记忆页改一条 → 回对话看它是否主动重读）；② **走查 P3.7 + T37**（方案那五步；真库候选 #22 在下拉里选一次计划即记住）；③ 待他定：真库那两组近似重复任务要不要「跳过 + 理由」收尾（须他点头）；④ 报 P4 短计划给他点头
@@ -48,7 +48,7 @@
 
 ## 3. 当前开放问题
 
-无阻塞。**待用户亲手做的事**：见「下一条动作」①②③，外加有空时独立复核 `pytest -q` 与 `tools\smoke_p1.py`（预期值见第 6 节注释）。已回报：P2 四页、`/providers`、真实 provider 与模型（E-27）、T13 清单与去重、采纳自动落阶段、T28/T31 那段对话走查。
+无阻塞。**待用户亲手做的事**：见「下一条动作」①②③，外加有空时独立复核 `pytest -q` 与 `tools\smoke_p1.py`（预期值见第 6 节注释）。
 
 候选队列（不影响当前目标）——**一个仍有的事**：`start_reason` 未落库（加列 = Ask first），重看旧候选看不到依据，要依据得重问一轮。**记忆系统那侧**：周扫描的定时入口要等 P4 的 T16 周任务接上（`memory.weekly_scans` 与 `trigger=weekly` 都已就绪，只差定时器）；真库现在的记忆与收件箱都是空的（老档案已标 `legacy_manual`，但一条记忆都没记过）。
 
@@ -67,7 +67,7 @@
 - **P2 取数架构：浏览器直连**（决策 26）。前端用客户端组件，`lib/api.ts` 在浏览器里 fetch 后端，因此受 CORS 名单约束。不采用 Next 16 主推的服务端取数 + Server Action 路线，理由与代价见 SPEC 第 10 节。
 - 前端不得持久化业务状态，不得直连数据库或 LLM；业务规则在后端算完再给前端；LLM 只产出结构化提案，写入必须经用户裁定。
 - 已定决策共 41 条见 `docs/SPEC.md` 第 18 节，除用户明确要求不重新讨论；台账拆列（方案 A）只在 SPEC 第 17 节第 2 条那三个条件满足时才重开。
-- `无标题-2026-09-14-2037.excalidraw` 是用户手绘的原始设计图，只读，不得删除或改写。
+- `无标题-2026-09-14-2037.excalidraw` 是用户手绘的原始设计图，**只留本机、已不入库**（公开仓库里没有它），不得删除或改写。
 - 本地库 `data/cadence.db` 存着用户真实档案与手工验收痕迹（现状见第 3 节）——**不得清库**。
 
 ## 5. 证据记录
@@ -104,7 +104,7 @@ npm run dev        # 开发服务，默认 http://localhost:3000（Turbopack，R
 npm run lint       # ESLint，当前 exit=0
 ```
 
-**端口与服务**：后端 8000、前端 3000。**停服务别只杀父进程**：`--reload` 与 `next dev` 都会留子进程占端口；用 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端换 3000）找 PID 再 `Stop-Process`。热加载只监听 Python（改 `sql/schema.sql` 不触发）。
+**端口与服务**：后端 8000、前端 3000。**停服务别只杀父进程**：`--reload` 与 `next dev` 都会留子进程占端口；用 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端换 3000）找 PID 再 `Stop-Process`。热加载只监听 Python（改 `sql/schema.sql` 不触发）。**全新克隆验收（2026-09-23 公开前跑过）**：`pip install -r requirements.txt` → 443 passed；`npm ci` + `build` 之后再 `tsc` 才过——Next 16 的 `LayoutProps` 这类类型构建时生成了才有。
 
 | 任务类型 | 必读文件 |
 | --- | --- |
