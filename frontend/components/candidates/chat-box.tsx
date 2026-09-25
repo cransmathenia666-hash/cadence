@@ -104,7 +104,7 @@ export function ChatBox({
   };
 
   return (
-    <div className="mt-4 bg-surface2/60 rounded-3xl border border-white/[0.04] p-2 flex flex-col h-[500px] shadow-sm overflow-hidden relative group/chatbox">
+    <div className="mt-0 bg-surface2/60 rounded-3xl border border-white/[0.04] p-2 flex flex-col h-full shadow-sm overflow-hidden relative group/chatbox">
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.04] bg-white/[0.01]">
         <div className="flex items-center gap-3">
@@ -190,7 +190,7 @@ export function ChatBox({
       </div>
 
       {/* Input Area */}
-      <div className="absolute bottom-4 left-4 right-4 bg-[#121214]/90 backdrop-blur-md rounded-2xl border border-white/[0.06] p-1.5 flex items-end shadow-[0_8px_32px_rgba(0,0,0,0.4)] group-focus-within/chatbox:border-white/[0.15] transition-colors z-10">
+      <div className="absolute bottom-4 left-4 right-4 bg-surface2/80 backdrop-blur-md rounded-[24px] border border-white/[0.04] p-1.5 flex items-end shadow-[0_8px_32px_rgba(0,0,0,0.2)] group-focus-within/chatbox:border-white/[0.15] group-focus-within/chatbox:bg-surface2 transition-all z-10">
         <textarea
           ref={textareaRef}
           value={text}

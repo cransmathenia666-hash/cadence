@@ -219,136 +219,166 @@ export default function CandidatesPage() {
     }
   }
 
+  function renderRightPanel() {
+    if (chattingId === null) {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center border border-white/[0.04] bg-surface2/30 rounded-3xl p-8 text-center shadow-sm">
+          <div className="text-[13px] text-white/[0.35] font-medium tracking-wide">
+            采纳候选后开始规划
+          </div>
+        </div>
+      );
+    }
+    const id = chattingId;
+    const r = getRow(id);
+    const effPlanId = r ? (landingPlans[r.id] ?? r.landingPlanId ?? r.planId) : null;
+    return (
+      <ChatBox
+        view={chatViews[id] ?? null}
+        effectivePlanId={effPlanId}
+        plans={plans}
+        chosenPlan={chatChosenPlan[id] ?? ""}
+        setChosenPlan={(val) => setChatChosenPlan(prev => ({ ...prev, [id]: val }))}
+        onSend={(msg) => handleChatSend(id, msg, effPlanId!)}
+        onGenerate={() => handleChatGenerate(id, effPlanId!)}
+        busy={chatBusy[id] ?? false}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white/[0.02] via-background to-background min-h-screen pt-20 pb-24">
-      <div className="max-w-[56rem] mx-auto w-full px-4 md:px-12">
+      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12 grid grid-cols-1 lg:grid-cols-[1fr_380px] xl:grid-cols-[1fr_420px] gap-8 xl:gap-12 items-start">
         
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-2xl font-semibold text-primary/90 tracking-tight mb-2">候选清单</h1>
-            <p className="text-[13px] text-muted/60">
-              向决策引擎表达困惑或目标。引擎结合档案筛选路线，否决的题目绝不再推。
-            </p>
+        {/* Left Column (Main) */}
+        <div className="flex flex-col w-full min-w-0">
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <h1 className="text-[20px] font-semibold text-primary/90 tracking-tight mb-2">候选清单</h1>
+              <p className="text-[13px] text-white/50">
+                向决策引擎表达困惑或目标。引擎结合档案筛选路线，否决的题目绝不再推。
+              </p>
+            </div>
+            {profile !== null && (
+              <span className="px-3 py-1.5 bg-white/[0.03] border border-white/[0.06] rounded-full text-[12px] font-medium text-white/60 shadow-sm shrink-0 ml-4">
+                长期档案 {profile.items.length} 条
+              </span>
+            )}
           </div>
-          {profile !== null && (
-            <span className="px-3 py-1.5 bg-white/[0.03] border border-white/[0.06] rounded-full text-[12px] font-medium text-muted/80 shadow-sm">
-              长期档案 {profile.items.length} 条
-            </span>
+
+          <PromptInput 
+            plans={plans}
+            planChoice={planChoice}
+            setPlanChoice={setPlanChoice}
+            rawText={rawText}
+            setRawText={setRawText}
+            onSubmit={(e) => { e.preventDefault(); ask(rawText, null); }}
+            asking={asking}
+            bannedCount={fresh?.banned_titles?.length ?? 0}
+          />
+
+          {askError && (
+            <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]">
+              {askError}
+            </div>
+          )}
+
+          {verdictError && (
+            <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]">
+              <strong>裁定失败：</strong>{verdictError}
+              {freshPlanId !== null && (
+                <div className="mt-1 text-red-400/80">
+                  新计划已经建好了 (计划 #{freshPlanId})，落点已选中它，再点一次「确认归入」即可。
+                </div>
+              )}
+            </div>
+          )}
+
+          {fresh?.clarify && (
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-6 mb-8">
+              <div className="flex gap-3">
+                <div className="text-[14px] font-medium text-amber-500/90 mt-0.5 shrink-0">AI 追问槽：</div>
+                <div className="text-[14px] text-amber-400/90 leading-relaxed">{fresh.clarify.question}</div>
+              </div>
+              <div className="text-[12px] text-amber-500/60 mt-2 mb-5">
+                关于你的一件事，一句话就能答。答完再问一轮，排序会贴得更准；问过的事它不会再问第二遍。
+              </div>
+              <form
+                onSubmit={(e) => { e.preventDefault(); ask(rawText, clarifyAnswer); }}
+                className="flex items-center gap-3"
+              >
+                <input
+                  value={clarifyAnswer}
+                  onChange={(e) => setClarifyAnswer(e.target.value)}
+                  placeholder="一句话回答，例如：每周大概 5 小时"
+                  className="flex-1 bg-black/40 border border-amber-500/20 rounded-xl px-4 py-2.5 text-[13px] text-primary/90 focus:border-amber-500/40 outline-none"
+                  disabled={asking}
+                />
+                <button
+                  type="submit"
+                  disabled={asking || !clarifyAnswer.trim()}
+                  className="px-5 py-2.5 bg-amber-500/20 text-amber-500 hover:bg-amber-500/30 rounded-xl text-[13px] font-medium transition-colors disabled:opacity-50"
+                >
+                  {asking ? "再问一轮中…" : "带着回答再问一轮"}
+                </button>
+              </form>
+            </div>
+          )}
+
+          {rows && rows.length > 0 && (
+            <div className="mt-4">
+              <div className="flex items-end justify-between mb-5">
+                <h2 className="text-[14px] font-medium text-primary/80">
+                  {isPath 
+                    ? `这一轮它给的是一条路（含 ${rows[0]?.steps.length ?? 0} 个先后步骤）`
+                    : `推荐候选清单（${rows.length} 条，待裁定 ${pendingCount} 条）`}
+                </h2>
+                <span className="text-[11px] text-white/40">
+                  {isPath ? "整条采纳或整条否决；步骤的去留在出蓝图时定" : "采纳将新建阶段，否决将永久拉黑"}
+                </span>
+              </div>
+              
+              <div className="flex flex-col">
+                {rows.map((row, index) => {
+                  const isBigCard = row.isRecommended || isPath || index === 0;
+                  return (
+                    <CandidateCard
+                      key={row.id}
+                      row={row}
+                      plans={plans}
+                      notes={notes}
+                      isDecided={row.status !== "proposed"}
+                      verdicting={verdicting}
+                      rejectingId={rejectingId}
+                      setRejectingId={setRejectingId}
+                      rejectReason={rejectReason}
+                      setRejectReason={setRejectReason}
+                      adoptingId={adoptingId}
+                      setAdoptingId={setAdoptingId}
+                      onVerdict={onVerdict}
+                      onAdoptIntoNewPlan={onAdoptIntoNewPlan}
+                      chattingId={chattingId}
+                      setChattingId={openChat}
+                      renderChatBox={() => null} /* not used anymore */
+                      isBigCard={isBigCard}
+                    />
+                  );
+                })}
+              </div>
+            </div>
           )}
         </div>
 
-        <PromptInput 
-          plans={plans}
-          planChoice={planChoice}
-          setPlanChoice={setPlanChoice}
-          rawText={rawText}
-          setRawText={setRawText}
-          onSubmit={(e) => { e.preventDefault(); ask(rawText, null); }}
-          asking={asking}
-          bannedCount={fresh?.banned_titles?.length ?? 0}
-        />
+        {/* Right Column (ChatBox/Blueprint) */}
+        <div className="sticky top-24 hidden lg:flex flex-col h-[calc(100vh-8rem)] w-full">
+          {renderRightPanel()}
+        </div>
 
-        {askError && (
-          <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]">
-            {askError}
-          </div>
-        )}
+        {/* Mobile Right Panel fallback if they scroll down */}
+        <div className="lg:hidden mt-12 w-full">
+          {chattingId !== null && renderRightPanel()}
+        </div>
 
-        {verdictError && (
-          <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]">
-            <strong>裁定失败：</strong>{verdictError}
-            {freshPlanId !== null && (
-              <div className="mt-1 text-red-400/80">
-                新计划已经建好了 (计划 #{freshPlanId})，落点已选中它，再点一次「确认归入」即可。
-              </div>
-            )}
-          </div>
-        )}
-
-        {fresh?.clarify && (
-          <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-5 mb-8">
-            <div className="flex gap-3">
-              <div className="text-[14px] font-medium text-amber-500/90 mt-0.5 shrink-0">AI 追问槽：</div>
-              <div className="text-[14px] text-amber-400/90">{fresh.clarify.question}</div>
-            </div>
-            <div className="text-[12px] text-amber-500/60 mt-2 mb-4">
-              关于你的一件事，一句话就能答。答完再问一轮，排序会贴得更准；问过的事它不会再问第二遍。
-            </div>
-            <form
-              onSubmit={(e) => { e.preventDefault(); ask(rawText, clarifyAnswer); }}
-              className="flex items-center gap-3"
-            >
-              <input
-                value={clarifyAnswer}
-                onChange={(e) => setClarifyAnswer(e.target.value)}
-                placeholder="一句话回答，例如：每周大概 5 小时"
-                className="flex-1 bg-black/40 border border-amber-500/20 rounded-xl px-4 py-2 text-[13px] text-primary/90 focus:border-amber-500/40 outline-none"
-                disabled={asking}
-              />
-              <button
-                type="submit"
-                disabled={asking || !clarifyAnswer.trim()}
-                className="px-5 py-2 bg-amber-500/20 text-amber-500 hover:bg-amber-500/30 rounded-xl text-[13px] font-medium transition-colors disabled:opacity-50"
-              >
-                {asking ? "再问一轮中…" : "带着回答再问一轮"}
-              </button>
-            </form>
-          </div>
-        )}
-
-        {rows && rows.length > 0 && (
-          <div className="mt-12">
-            <div className="flex items-end justify-between mb-6">
-              <h2 className="text-[16px] font-medium text-primary/80">
-                {isPath 
-                  ? `这一轮它给的是一条路（1 张卡，含 ${rows[0]?.steps.length ?? 0} 个先后步骤）`
-                  : `推荐候选清单（${rows.length} 条，待裁定 ${pendingCount} 条）`}
-              </h2>
-              <span className="text-[12px] text-muted/50">
-                {isPath ? "整条采纳或整条否决；步骤的去留在出蓝图时定" : "采纳将新建阶段，否决将永久拉黑"}
-              </span>
-            </div>
-            
-            <div className="flex flex-col gap-6">
-              {rows.map((row) => (
-                <CandidateCard
-                  key={row.id}
-                  row={row}
-                  plans={plans}
-                  notes={notes}
-                  isDecided={row.status !== "proposed"}
-                  verdicting={verdicting}
-                  rejectingId={rejectingId}
-                  setRejectingId={setRejectingId}
-                  rejectReason={rejectReason}
-                  setRejectReason={setRejectReason}
-                  adoptingId={adoptingId}
-                  setAdoptingId={setAdoptingId}
-                  onVerdict={onVerdict}
-                  onAdoptIntoNewPlan={onAdoptIntoNewPlan}
-                  chattingId={chattingId}
-                  setChattingId={openChat}
-                  renderChatBox={(id) => {
-                    const r = getRow(id);
-                    const effPlanId = r ? (landingPlans[r.id] ?? r.landingPlanId ?? r.planId) : null;
-                    return (
-                      <ChatBox
-                        view={chatViews[id] ?? null}
-                        effectivePlanId={effPlanId}
-                        plans={plans}
-                        chosenPlan={chatChosenPlan[id] ?? ""}
-                        setChosenPlan={(val) => setChatChosenPlan(prev => ({ ...prev, [id]: val }))}
-                        onSend={(msg) => handleChatSend(id, msg, effPlanId!)}
-                        onGenerate={() => handleChatGenerate(id, effPlanId!)}
-                        busy={chatBusy[id] ?? false}
-                      />
-                    );
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
