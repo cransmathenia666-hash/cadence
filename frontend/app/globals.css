@@ -48,11 +48,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-a {
+a:not(.dark *) {
   color: var(--primary);
   text-decoration: none;
 }
-a:hover {
+a:not(.dark *):hover {
   text-decoration: underline;
 }
 
@@ -133,27 +133,27 @@ a:hover {
 }
 
 /* Typography & Titles */
-h1 {
+h1:not(.dark *) {
   font-size: 22px;
   font-weight: 700;
   color: var(--text-main);
   margin-bottom: 8px;
 }
 
-h2 {
+h2:not(.dark *) {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-main);
   margin-bottom: 12px;
 }
 
-h3 {
+h3:not(.dark *) {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-main);
 }
 
-h4 {
+h4:not(.dark *) {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
@@ -162,11 +162,11 @@ h4 {
   margin-bottom: 8px;
 }
 
-p {
+p:not(.dark *) {
   margin-bottom: 8px;
 }
 
-small {
+small:not(.dark *) {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -220,7 +220,7 @@ textarea:not(.dark *) {
   resize: vertical;
 }
 
-label {
+label:not(.dark *) {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-main);
@@ -392,25 +392,25 @@ button.ghost:hover:not(:disabled) {
 }
 
 /* Tables */
-table {
+table:not(.dark *) {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
 }
 
-th, td {
+th:not(.dark *), td:not(.dark *) {
   padding: 10px 12px;
   text-align: left;
   border-bottom: 1px solid var(--border);
 }
 
-th {
+th:not(.dark *) {
   font-weight: 600;
   color: var(--text-muted);
   background: var(--bg-subtle);
 }
 
-tr:hover td {
+tr:not(.dark *):hover td {
   background: #fafafa;
 }
 

@@ -146,10 +146,11 @@ body {
 
 .card-border-gradient {
   position: relative;
-  border-radius: 12px;
+  border-radius: 16px;
   background: linear-gradient(#121214, #121214) padding-box,
               linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.02) 100%) border-box;
   border: 1px solid transparent;
+  box-shadow: 0 0 1px 1px rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 .btn-primary {
@@ -163,6 +164,10 @@ body {
   border-color: rgba(255,255,255,0.15);
   box-shadow: 0 0 12px -2px rgba(255,255,255,0.1), inset 0 1px 0 rgba(255,255,255,0.1);
 }
+.btn-primary:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06);
+}
 
 .btn-ghost {
   color: #a1a1aa;
@@ -175,6 +180,11 @@ body {
 
 .input-glow {
   transition: all 0.3s ease;
+}
+/* 悬停反馈：输入与下拉的边框微微亮起 */
+.dark .input-glow:hover,
+.dark [data-slot="select-trigger"]:hover {
+  border-color: rgba(255, 255, 255, 0.14);
 }
 .input-glow:focus-within {
   box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 20px -5px rgba(255,255,255,0.04);
