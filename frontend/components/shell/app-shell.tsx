@@ -20,7 +20,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         selectedPlanId={selectedPlanId}
         onSelect={setSelectedPlanId}
       />
-      <main className="flex-1 flex flex-col relative h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white/[0.02] via-background to-background">
+      <main className="flex-1 flex flex-col relative h-full overflow-y-auto bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white/[0.02] via-background to-background">
         {children}
       </main>
     </div>

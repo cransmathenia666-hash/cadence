@@ -1,0 +1,30 @@
+# /candidates 重构笔记
+
+## 改了什么
+1. **目录结构升级**：将原 `app/candidates/page.tsx` 移至 `app/(app)/candidates/page.tsx`（迁入带导航外壳的 App Shell）。
+2. **组件拆分**：提取了 `PromptInput`（提需求区域）、`CandidateCard`（候选卡片）、`ChatBox`（对话与蓝图生成区域）至 `components/candidates/` 下，保持主页状态管理整洁。
+3. **视觉全面焕新**：遵循 `style-dna.md` 规范。
+   - 整体走深色质感，背景分层采用浮起（`shadow-card-glow`, `bg-surface2/80`）。
+   - 移除生硬线框，使用 `rounded-2xl`（肥圆角）和极淡的描边（`border-white/[0.04]` 等）。
+   - 纯白仅用于主 CTA（"发送对话"等）和高亮语义。
+   - 对话气泡（用户发言纯白胶囊，AI 发言深色融合背景带 `Play` 图标），对齐 workbench 的高级对话体验。
+   - 状态徽章改造：用绿点/琥珀点 + 小文字，废弃冗长色块。
+
+## 行为对照表
+| 原行为 | 现实现 | 检查结果 |
+| --- | --- | --- |
+| getProfile 读档案 | `useEffect` 初始化拉取，渲染为右上角 `长期档案 x 条` 胶囊 | 通/保留 |
+| rawText 提交 findCandidates | `PromptInput` 组件内的表单与按钮处理 | 通/保留 |
+| 追问槽 (clarify) 回答拼回原问题 | 原样保留 `clarifyAnswer` 状态，并随同 `rawText` 发起 `ask` | 通/保留 |
+| listCandidates 展示 | 兼容了 `proposed`/`accepted`/`rejected` 等所有状态徽章并由 `CandidateCard` 渲染 | 通/保留 |
+| 逐条 verdictCandidate 否决 | 选否决后内联出现必填 input 框，输入理由提交后落库 | 通/保留 |
+| 采纳双模式 (挂计划/就地新建) | `CandidateCard` 内置「选现有计划 / 新建一个计划」切换卡片 | 通/保留 |
+| 采纳落点记忆 (landingPlans) | 原样保留，在展开 ChatBox 前有效关联目标计划 | 通/保留 |
+| 对话式规划 (chattingId / getPlanChat) | 采纳后自动关联展开 `ChatBox`，加载历史对话记录 | 通/保留 |
+| sayPlanChat 发言六轮上限提示 | 保留右上角 `${turns_used}/${max_turns} 轮` 的 UI 提示 | 通/保留 |
+| generateBlueprint 生成蓝图 | UI 提供专门高亮 CTA，一键触发 `generateBlueprint` 并显示「待批蓝图」链接 | 通/保留 |
+| 全部加载态、错误态、空态 | `PromptInput` 及 `CandidatesPage` 中充分兼容并使用规范样式提示 | 通/保留 |
+
+## 遗留 TODO
+- 纯视觉与体验层面的精调（如果用户在实际操作中觉得需要更高密度的排版）。
+- `ChatBox` 底稿与 AI 的多轮交互由于不再是纯文本形式，如果 AI 返回格式复杂，可能需要进一步定制化解析。
