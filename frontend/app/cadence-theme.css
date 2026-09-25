@@ -4,6 +4,11 @@
    色值只准出现在本文件，组件里禁止硬编码颜色。 */
 @import "tailwindcss";
 @import "./ui-foundry-tailwind.css";
+/* 库自带组件样式（bu-* 专属盘已圈进 .bu-scope；动效配方零色值）。必须在下面 @theme 之前导入。 */
+@import "../styles/bu-theme.css";
+@import "../styles/stagger-list.css";
+@import "../styles/skeleton-pulse.css";
+@import "../styles/press-feedback.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
 

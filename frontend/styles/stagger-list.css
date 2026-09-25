@@ -1,0 +1,27 @@
+/* stagger-list — 原创 CSS 配方。容器加 .uf-stagger，直接子项按 nth-child 依次延迟（覆盖前 12 项）。 */
+.uf-stagger > * {
+  animation: uf-stagger-in var(--duration-base) var(--ease-standard) both;
+}
+.uf-stagger > *:nth-child(1)  { animation-delay: calc(0 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(2)  { animation-delay: calc(1 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(3)  { animation-delay: calc(2 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(4)  { animation-delay: calc(3 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(5)  { animation-delay: calc(4 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(6)  { animation-delay: calc(5 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(7)  { animation-delay: calc(6 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(8)  { animation-delay: calc(7 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(9)  { animation-delay: calc(8 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(10) { animation-delay: calc(9 * var(--uf-stagger-step, 40ms)); }
+.uf-stagger > *:nth-child(n + 11) { animation-delay: calc(10 * var(--uf-stagger-step, 40ms)); }
+
+@keyframes uf-stagger-in {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+.uf-stagger-fast { --uf-stagger-step: 20ms; }
+.uf-stagger-slow { --uf-stagger-step: 80ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .uf-stagger > * { animation: none; opacity: 1; transform: none; }
+}

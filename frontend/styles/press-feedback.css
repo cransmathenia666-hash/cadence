@@ -1,0 +1,25 @@
+/* press-feedback — 原创 CSS 配方。可点击元素的即时视觉响应（触屏优先）。 */
+.uf-pressable {
+  transition:
+    transform var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.uf-pressable:active { transform: scale(0.97); }
+.uf-pressable[aria-disabled="true"], .uf-pressable:disabled { transform: none; }
+
+/* 轻微下沉（用于卡片、大块可点区域） */
+.uf-pressable-soft:active { transform: scale(0.995) translate3d(0, 1px, 0); }
+
+/* 抬起（用于悬浮可点卡片，桌面 hover 才生效） */
+@media (hover: hover) {
+  .uf-pressable-lift:hover { transform: translate3d(0, -2px, 0); box-shadow: var(--shadow-md); }
+}
+.uf-pressable-lift:active { transform: translate3d(0, 0, 0) scale(0.99); box-shadow: var(--shadow-sm); }
+
+@media (prefers-reduced-motion: reduce) {
+  .uf-pressable, .uf-pressable-soft, .uf-pressable-lift { transition: none; }
+  .uf-pressable:active, .uf-pressable-soft:active, .uf-pressable-lift:hover, .uf-pressable-lift:active { transform: none; }
+}
