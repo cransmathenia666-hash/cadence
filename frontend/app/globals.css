@@ -1,3 +1,5 @@
+/* 旧A档外壳样式整体降入 base 层：让位给 Tailwind 工具类与 cadence-theme（2026-09-25 比赛冲刺，逐页重做期间两套并存） */
+@layer base {
 /* Cadence Design Baseline (Clean, restrained, clear typographic hierarchy) */
 
 :root {
@@ -189,12 +191,12 @@ small {
 }
 
 /* Form Controls */
-input[type="text"],
-input[type="password"],
-input[type="number"],
-input[type="date"],
+input:not(.dark *)[type="text"],
+input:not(.dark *)[type="password"],
+input:not(.dark *)[type="number"],
+input:not(.dark *)[type="date"],
 select,
-textarea {
+textarea:not(.dark *) {
   font-family: inherit;
   font-size: 13px;
   padding: 6px 10px;
@@ -206,14 +208,14 @@ textarea {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-input:focus,
+input:not(.dark *):focus,
 select:focus,
-textarea:focus {
+textarea:not(.dark *):focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 2px var(--primary-light);
 }
 
-textarea {
+textarea:not(.dark *) {
   line-height: 1.5;
   resize: vertical;
 }
@@ -227,7 +229,7 @@ label {
 }
 
 /* Buttons */
-button, .btn {
+button:not(.dark *):not(.dark *), .btn {
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -245,35 +247,35 @@ button, .btn {
   text-decoration: none;
 }
 
-button:hover:not(:disabled), .btn:hover:not(:disabled) {
+button:not(.dark *):hover:not(:disabled), .btn:hover:not(:disabled) {
   background: var(--bg-subtle);
   border-color: #94a3b8;
   text-decoration: none;
 }
 
-button:disabled, .btn:disabled {
+button:not(.dark *):disabled, .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-button.primary, .btn.primary {
+button:not(.dark *).primary, .btn.primary {
   background: var(--primary);
   color: #fff;
   border-color: var(--primary);
 }
 
-button.primary:hover:not(:disabled), .btn.primary:hover:not(:disabled) {
+button:not(.dark *).primary:hover:not(:disabled), .btn.primary:hover:not(:disabled) {
   background: var(--primary-hover);
   border-color: var(--primary-hover);
 }
 
-button.danger, .btn.danger {
+button:not(.dark *).danger, .btn.danger {
   color: var(--danger);
   border-color: #fca5a5;
   background: #fff;
 }
 
-button.danger:hover:not(:disabled), .btn.danger:hover:not(:disabled) {
+button:not(.dark *).danger:hover:not(:disabled), .btn.danger:hover:not(:disabled) {
   background: var(--danger-bg);
   border-color: var(--danger);
 }
@@ -433,7 +435,7 @@ tr:hover td {
 }
 
 /* Details summary styling */
-details {
+details:not(.dark *) {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 14px;
@@ -441,11 +443,11 @@ details {
   background: var(--bg-card);
 }
 
-details[open] {
+details:not(.dark *)[open] {
   padding-bottom: 14px;
 }
 
-details summary {
+details:not(.dark *) summary {
   cursor: pointer;
   font-weight: 600;
   color: var(--text-main);
@@ -453,7 +455,7 @@ details summary {
   font-size: 13px;
 }
 
-details summary:hover {
+details:not(.dark *) summary:hover {
   color: var(--primary);
 }
 
@@ -580,4 +582,5 @@ details summary:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
 }

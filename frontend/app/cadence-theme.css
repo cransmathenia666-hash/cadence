@@ -1,0 +1,198 @@
+/* cadence 唯一颜色与动效令牌来源（由 round3 样张定稿语言生成）。
+   前两行是 Tailwind 4 入口与「工具类名 → 变量名」映射，本身不含色值；
+   库自带的 ui-foundry-tokens.css（浅色盘+暗色盘两套）已退出导入——
+   色值只准出现在本文件，组件里禁止硬编码颜色。 */
+@import "tailwindcss";
+@import "./ui-foundry-tailwind.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --color-surface: #0a0a0c;
+  --color-surface2: #121214;
+  --shadow-glow: 0 0 20px -5px rgba(255, 255, 255, 0.1);
+  --shadow-card-glow: 0 0 1px 1px rgba(255, 255, 255, 0.05), 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* round3 定稿深色值：同时命中 :root 与 .dark 作用域——组件库自带的 .dark 暗色盘（蓝 accent）
+   会在挂了 dark 类的子树里反超 :root，必须同作用域压回去。utilities 经 var() 实时解析。 */
+html:root,
+.dark {
+  --background: #040405;
+  --foreground: #e4e4e7;
+  --card: #0a0a0c;
+  --card-foreground: #e4e4e7;
+  --popover: #121214;
+  --popover-foreground: #e4e4e7;
+  --border: #27272a;
+  --input: #27272a;
+  --ring: #3f3f46;
+  --primary: #e4e4e7;
+  --primary-foreground: #040405;
+  --secondary: #121214;
+  --secondary-foreground: #e4e4e7;
+  --accent: #1a1a1e;
+  --accent-foreground: #e4e4e7;
+  --muted: #a1a1aa;
+  --muted-foreground: #a1a1aa;
+  --destructive: #7f1d1d;
+  --destructive-foreground: #fecaca;
+  --success: oklch(0.68 0.14 152);
+  --success-foreground: oklch(0.16 0.02 152);
+  --warning: oklch(0.78 0.14 75);
+  --warning-foreground: oklch(0.2 0.03 75);
+  --status-idle: var(--muted-foreground);
+  --status-running: var(--primary);
+  --status-success: var(--success);
+  --status-error: var(--destructive);
+  --status-cancelled: var(--muted-foreground);
+  --status-warning: var(--warning);
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+  --radius: 0.75rem;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --duration-instant: 80ms;
+  --duration-fast: 140ms;
+  --duration-base: 220ms;
+  --duration-slow: 360ms;
+  --duration-deliberate: 520ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.5), 0 1px 2px -1px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5), 0 2px 6px -2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.6), 0 4px 12px -4px rgb(0 0 0 / 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:root,
+  .dark {
+    --duration-instant: 1ms;
+    --duration-fast: 1ms;
+    --duration-base: 1ms;
+    --duration-slow: 1ms;
+    --duration-deliberate: 1ms;
+  }
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-primary);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 隐藏旧版 header 和重置 container */
+.app-header {
+  display: none !important;
+}
+
+.container {
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  height: 100vh;
+}
+
+.glass-header {
+  background: rgba(4, 4, 5, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0) 0,
+      rgba(255, 255, 255, 0.02) 20%,
+      rgba(255, 255, 255, 0.06) 60%,
+      rgba(255, 255, 255, 0)
+  );
+  animation: shimmer 3s infinite;
+}
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+
+.card-border-gradient {
+  position: relative;
+  border-radius: 12px;
+  background: linear-gradient(#121214, #121214) padding-box,
+              linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.02) 100%) border-box;
+  border: 1px solid transparent;
+}
+
+.btn-primary {
+  background: linear-gradient(180deg, #33333b 0%, #27272a 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
+  transition: all 0.2s ease;
+}
+.btn-primary:hover {
+  background: linear-gradient(180deg, #3f3f46 0%, #27272a 100%);
+  border-color: rgba(255,255,255,0.15);
+  box-shadow: 0 0 12px -2px rgba(255,255,255,0.1), inset 0 1px 0 rgba(255,255,255,0.1);
+}
+
+.btn-ghost {
+  color: #a1a1aa;
+  transition: all 0.2s ease;
+}
+.btn-ghost:hover {
+  color: #e4e4e7;
+  background: rgba(255,255,255,0.05);
+}
+
+.input-glow {
+  transition: all 0.3s ease;
+}
+.input-glow:focus-within {
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 20px -5px rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.15);
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+*:focus-visible {
+  outline: none;
+}
+
+button:focus-visible,
+summary:focus-visible {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15), 0 0 12px rgba(255, 255, 255, 0.05);
+}
+
+.btn-primary:focus-visible {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1), 0 0 0 1px rgba(255, 255, 255, 0.2), 0 0 16px rgba(255, 255, 255, 0.1);
+}
+
+textarea:focus-visible {
+  box-shadow: none;
+}
