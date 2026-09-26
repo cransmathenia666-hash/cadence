@@ -149,7 +149,7 @@ export function ChatFlow({
         if (msg.role === "user") {
           return (
             <div key={idx} className="flex justify-end w-full">
-              <div className="max-w-[80%] bg-surface2/80 border border-white/[0.06] rounded-2xl rounded-tr-sm px-5 py-3.5 text-[15px] leading-relaxed text-primary shadow-sm backdrop-blur-sm">
+              <div className="max-w-[80%] bg-white rounded-full px-5 py-3 text-[15px] leading-relaxed text-black shadow-[0_4px_24px_rgba(255,255,255,0.07)]">
                 {msg.content}
               </div>
             </div>

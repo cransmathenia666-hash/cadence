@@ -1,5 +1,5 @@
-import { FormEvent } from "react";
-import { Loader2, ArrowUp, Sparkles } from "lucide-react";
+import { FormEvent, KeyboardEvent } from "react";
+import { Loader2, ArrowUp } from "lucide-react";
 
 export function PromptInput({
   plans,
@@ -20,66 +20,68 @@ export function PromptInput({
   asking: boolean;
   bannedCount: number;
 }) {
-  return (
-    <div className="mb-6 mt-2 relative w-full">
-      <form onSubmit={onSubmit} className="relative group/prompt bg-surface2/60 rounded-[24px] shadow-[0_8px_32px_rgba(0,0,0,0.2)] border border-white/[0.04] p-1.5 flex flex-col md:flex-row items-center transition-all focus-within:border-white/[0.15] focus-within:bg-surface2/80">
-        <div className="shrink-0 relative w-full md:w-auto border-b border-white/[0.04] md:border-b-0 md:border-r md:border-white/[0.08] mr-2">
-          <select
-            value={planChoice}
-            onChange={(e) => setPlanChoice(e.target.value)}
-            className="w-full md:w-auto appearance-none bg-transparent border-none text-[13px] text-white/60 pl-4 pr-10 py-3 outline-none cursor-pointer hover:text-primary transition-colors focus:ring-0"
-            disabled={asking}
-          >
-            <option value="" className="bg-surface2 text-primary">新方向 (不从属现有计划)</option>
-            {plans.map((item) => (
-              <option key={item.id} value={item.id} className="bg-surface2 text-primary">
-                #{item.id} {item.goal}
-              </option>
-            ))}
-          </select>
-          <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none opacity-40">
-            <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
-              <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </div>
-        </div>
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!asking && rawText.trim() !== "") {
+        onSubmit(e as unknown as FormEvent<HTMLFormElement>);
+      }
+    }
+  };
 
-        <textarea
-          id="raw"
-          value={rawText}
-          onChange={(e) => {
-            setRawText(e.target.value);
-            e.target.style.height = "";
-            e.target.style.height = `${e.target.scrollHeight}px`;
-          }}
+  return (
+    <form 
+      onSubmit={onSubmit} 
+      className="w-full bg-[#141416] border border-white/[0.06] rounded-2xl flex flex-col focus-within:border-white/[0.15] transition-colors p-3 shadow-lg"
+    >
+      <textarea
+        value={rawText}
+        onChange={(e) => {
+          setRawText(e.target.value);
+          e.target.style.height = "auto";
+          e.target.style.height = `${e.target.scrollHeight}px`;
+        }}
+        onKeyDown={handleKeyDown}
+        disabled={asking}
+        className="w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none text-[15px] text-primary placeholder-white/40 py-2 px-1 min-h-[56px] max-h-[240px] leading-relaxed"
+        rows={1}
+        placeholder="处境与困惑，例如：不知道该学什么..."
+        required
+      />
+      
+      <div className="flex items-center justify-between mt-2 px-1">
+        <select
+          value={planChoice}
+          onChange={(e) => setPlanChoice(e.target.value)}
+          className="appearance-none bg-white/[0.04] hover:bg-white/[0.08] text-white/70 text-[12px] px-4 py-1.5 rounded-full border border-white/[0.04] outline-none cursor-pointer transition-colors"
           disabled={asking}
-          className="flex-1 w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none text-[15px] text-primary placeholder-white/30 py-3 md:py-3.5 px-3 max-h-[160px] min-h-[48px] overflow-hidden leading-relaxed disabled:opacity-50"
-          rows={1}
-          placeholder="处境与困惑，例如：不知道该学什么..."
-          required
-        />
+        >
+          <option value="" className="bg-[#141416] text-primary">新方向 (不从属现有计划)</option>
+          {plans.map((item) => (
+            <option key={item.id} value={item.id} className="bg-[#141416] text-primary">
+              #{item.id} {item.goal}
+            </option>
+          ))}
+        </select>
         
-        <div className="shrink-0 p-1 w-full md:w-auto flex justify-end">
+        <div className="flex items-center gap-4">
+          {bannedCount > 0 && (
+            <span className="text-[11px] text-white/30 hidden md:inline-block tracking-wide">
+              已避开 {bannedCount} 条禁区
+            </span>
+          )}
+          <span className="text-[11px] text-white/30 hidden md:inline-block tracking-wide mr-1">
+            Enter 发送
+          </span>
           <button
             type="submit"
             disabled={asking || rawText.trim() === ""}
-            className="p-3 bg-white text-black rounded-full hover:bg-gray-200 transition-colors shadow-sm disabled:opacity-50 disabled:bg-white/10 disabled:text-white/40"
+            className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:bg-white/90 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40 transition-colors shrink-0"
           >
-            {asking ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <ArrowUp className="w-5 h-5" />
-            )}
+            {asking ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" />}
           </button>
         </div>
-      </form>
-      <div className="flex justify-between items-center mt-3 px-3">
-        <span className="text-[11px] text-white/[0.35] tracking-wide">
-          {bannedCount > 0 
-            ? `已自动排除 ${bannedCount} 条历史否决项`
-            : "将根据个人档案自动避开历史否决禁区"}
-        </span>
       </div>
-    </div>
+    </form>
   );
 }

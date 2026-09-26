@@ -173,6 +173,10 @@ export default function CandidatesPage() {
       setRejectingId(null);
       setAdoptingId(null);
       setStored(await listCandidates());
+      // 采纳成功即点亮右栏进入规划对话
+      if (accepted) {
+        await openChat(candidateId);
+      }
     } catch (cause) {
       setVerdictError(messageOf(cause, "裁定候选失败"));
     } finally {
@@ -222,11 +226,20 @@ export default function CandidatesPage() {
   function renderRightPanel() {
     if (chattingId === null) {
       return (
-        <div className="flex-1 flex flex-col items-center justify-center border border-white/[0.04] bg-surface2/30 rounded-3xl p-8 text-center shadow-sm">
-          <div className="text-[13px] text-white/[0.35] font-medium tracking-wide">
-            采纳候选后开始规划
-          </div>
-        </div>
+        <ChatBox
+          view={null}
+          effectivePlanId={null}
+          plans={plans}
+          chosenPlan={""}
+          setChosenPlan={() => {}}
+          onSend={async () => {}}
+          onGenerate={async () => {}}
+          busy={asking}
+          clarifyData={fresh?.clarify}
+          onClarifySubmit={(e) => { e.preventDefault(); ask(rawText, clarifyAnswer); }}
+          clarifyAnswer={clarifyAnswer}
+          setClarifyAnswer={setClarifyAnswer}
+        />
       );
     }
     const id = chattingId;
@@ -248,34 +261,35 @@ export default function CandidatesPage() {
 
   return (
     <div className="flex flex-col h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white/[0.02] via-background to-background min-h-screen pt-20 pb-24">
-      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12 grid grid-cols-1 lg:grid-cols-[1fr_380px] xl:grid-cols-[1fr_420px] gap-8 xl:gap-12 items-start">
+      
+      {/* Full width Prompt Input Row */}
+      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12 mb-10 mt-4">
+        <PromptInput 
+          plans={plans}
+          planChoice={planChoice}
+          setPlanChoice={setPlanChoice}
+          rawText={rawText}
+          setRawText={setRawText}
+          onSubmit={(e) => { e.preventDefault(); ask(rawText, null); }}
+          asking={asking}
+          bannedCount={fresh?.banned_titles?.length ?? 0}
+        />
+      </div>
+
+      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12 grid grid-cols-1 lg:grid-cols-[1fr_400px] xl:grid-cols-[1fr_440px] gap-10 xl:gap-14 items-start">
         
         {/* Left Column (Main) */}
         <div className="flex flex-col w-full min-w-0">
           <div className="flex items-center justify-between mb-8">
-            <div>
-              <h1 className="text-[20px] font-semibold text-primary/90 tracking-tight mb-2">候选清单</h1>
-              <p className="text-[13px] text-white/50">
-                向决策引擎表达困惑或目标。引擎结合档案筛选路线，否决的题目绝不再推。
-              </p>
+            <div className="flex items-center gap-4">
+              <h1 className="text-[20px] font-semibold text-primary/90 tracking-tight">候选清单</h1>
+              {profile !== null && (
+                <span className="px-3 py-1 bg-white/[0.03] border border-white/[0.06] rounded-full text-[11px] font-medium text-white/60 shadow-sm shrink-0">
+                  长期档案 {profile.items.length} 条
+                </span>
+              )}
             </div>
-            {profile !== null && (
-              <span className="px-3 py-1.5 bg-white/[0.03] border border-white/[0.06] rounded-full text-[12px] font-medium text-white/60 shadow-sm shrink-0 ml-4">
-                长期档案 {profile.items.length} 条
-              </span>
-            )}
           </div>
-
-          <PromptInput 
-            plans={plans}
-            planChoice={planChoice}
-            setPlanChoice={setPlanChoice}
-            rawText={rawText}
-            setRawText={setRawText}
-            onSubmit={(e) => { e.preventDefault(); ask(rawText, null); }}
-            asking={asking}
-            bannedCount={fresh?.banned_titles?.length ?? 0}
-          />
 
           {askError && (
             <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]">
@@ -294,78 +308,47 @@ export default function CandidatesPage() {
             </div>
           )}
 
-          {fresh?.clarify && (
-            <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-6 mb-8">
-              <div className="flex gap-3">
-                <div className="text-[14px] font-medium text-amber-500/90 mt-0.5 shrink-0">AI 追问槽：</div>
-                <div className="text-[14px] text-amber-400/90 leading-relaxed">{fresh.clarify.question}</div>
-              </div>
-              <div className="text-[12px] text-amber-500/60 mt-2 mb-5">
-                关于你的一件事，一句话就能答。答完再问一轮，排序会贴得更准；问过的事它不会再问第二遍。
-              </div>
-              <form
-                onSubmit={(e) => { e.preventDefault(); ask(rawText, clarifyAnswer); }}
-                className="flex items-center gap-3"
-              >
-                <input
-                  value={clarifyAnswer}
-                  onChange={(e) => setClarifyAnswer(e.target.value)}
-                  placeholder="一句话回答，例如：每周大概 5 小时"
-                  className="flex-1 bg-black/40 border border-amber-500/20 rounded-xl px-4 py-2.5 text-[13px] text-primary/90 focus:border-amber-500/40 outline-none"
-                  disabled={asking}
-                />
-                <button
-                  type="submit"
-                  disabled={asking || !clarifyAnswer.trim()}
-                  className="px-5 py-2.5 bg-amber-500/20 text-amber-500 hover:bg-amber-500/30 rounded-xl text-[13px] font-medium transition-colors disabled:opacity-50"
-                >
-                  {asking ? "再问一轮中…" : "带着回答再问一轮"}
-                </button>
-              </form>
-            </div>
-          )}
-
-          {rows && rows.length > 0 && (
-            <div className="mt-4">
+          {rows && rows.length > 0 ? (
+            <div className="mt-2">
               <div className="flex items-end justify-between mb-5">
                 <h2 className="text-[14px] font-medium text-primary/80">
                   {isPath 
-                    ? `这一轮它给的是一条路（含 ${rows[0]?.steps.length ?? 0} 个先后步骤）`
-                    : `推荐候选清单（${rows.length} 条，待裁定 ${pendingCount} 条）`}
+                    ? `一条完整路径（含 ${rows[0]?.steps.length ?? 0} 个步骤）`
+                    : `推荐候选（${rows.length} 条，待裁定 ${pendingCount} 条）`}
                 </h2>
                 <span className="text-[11px] text-white/40">
-                  {isPath ? "整条采纳或整条否决；步骤的去留在出蓝图时定" : "采纳将新建阶段，否决将永久拉黑"}
+                  {isPath ? "整条采纳或否决，去留在生成蓝图时调整" : "采纳将新建阶段，否决将永久拉黑"}
                 </span>
               </div>
               
-              <div className="flex flex-col">
-                {rows.map((row, index) => {
-                  const isBigCard = row.isRecommended || isPath || index === 0;
-                  return (
-                    <CandidateCard
-                      key={row.id}
-                      row={row}
-                      plans={plans}
-                      notes={notes}
-                      isDecided={row.status !== "proposed"}
-                      verdicting={verdicting}
-                      rejectingId={rejectingId}
-                      setRejectingId={setRejectingId}
-                      rejectReason={rejectReason}
-                      setRejectReason={setRejectReason}
-                      adoptingId={adoptingId}
-                      setAdoptingId={setAdoptingId}
-                      onVerdict={onVerdict}
-                      onAdoptIntoNewPlan={onAdoptIntoNewPlan}
-                      chattingId={chattingId}
-                      setChattingId={openChat}
-                      renderChatBox={() => null} /* not used anymore */
-                      isBigCard={isBigCard}
-                    />
-                  );
-                })}
+              <div className="flex flex-col gap-1">
+                {rows.map((row) => (
+                  <CandidateCard
+                    key={row.id}
+                    row={row}
+                    plans={plans}
+                    notes={notes}
+                    isDecided={row.status !== "proposed"}
+                    verdicting={verdicting}
+                    rejectingId={rejectingId}
+                    setRejectingId={setRejectingId}
+                    rejectReason={rejectReason}
+                    setRejectReason={setRejectReason}
+                    adoptingId={adoptingId}
+                    setAdoptingId={setAdoptingId}
+                    onVerdict={onVerdict}
+                    onAdoptIntoNewPlan={onAdoptIntoNewPlan}
+                  />
+                ))}
               </div>
             </div>
+          ) : (
+            !asking && !askError && (
+              <div className="flex flex-col items-center justify-center py-20 text-center border border-white/[0.04] rounded-2xl bg-surface2/30">
+                <div className="text-[14px] text-white/60 mb-2 font-medium">输入你的需求，或等待引擎推荐</div>
+                <div className="text-[12px] text-white/40">候选清单将展示在此处</div>
+              </div>
+            )
           )}
         </div>
 
@@ -375,8 +358,8 @@ export default function CandidatesPage() {
         </div>
 
         {/* Mobile Right Panel fallback if they scroll down */}
-        <div className="lg:hidden mt-12 w-full">
-          {chattingId !== null && renderRightPanel()}
+        <div className="lg:hidden mt-12 w-full h-[600px]">
+          {renderRightPanel()}
         </div>
 
       </div>
