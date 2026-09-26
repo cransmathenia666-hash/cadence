@@ -897,6 +897,33 @@ def test_clarify_answer_keeps_the_original_direction(conn, monkeypatch):
     assert advisor.pending_clarify(conn, None) is None  # 这条追问已标成已答
 
 
+def test_prompt_layers_keep_contract_and_voice_separate(conn):
+    """提示词四层拆分（2026-09-26 语气整改）：契约与纪律的关键句都在，语气段也在。
+
+    层一（人设语气）/ 层二（数据）/ 层三（纪律）/ 层四（输出契约）——语气以后随便改，
+    这几句契约措辞（与 advisor 校验咬合）不许被顺手动掉。
+    """
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    seed_answered_clarify(conn, "你现在每周能稳定投入几小时？", "每周大概 5 小时")
+    transport = ScriptedTransport(four([axis]))
+
+    advisor.find_candidates(conn, "学英语口语和阅读", transport=transport)
+
+    prompt = prompt_of(transport)
+    # 层四契约：这几句与校验咬合，措辞冻结
+    assert "第一硬约束" in prompt
+    assert "只输出一个 JSON 对象" in prompt
+    assert "一字不差" in prompt
+    assert "clarify" in prompt
+    # 层三纪律：追问禁区与原话回应
+    assert "已答过的追问" in prompt and "依据不足" in prompt
+    # 层一人设与语气段：人设句在 system 消息里（prompt_of 只取用户消息，所以单独看）
+    system_msg = transport.seen[0]["payload"]["messages"][0]["content"]
+    assert "懂行又关心他的朋友" in system_msg
+    assert "推荐理由怎么写" in prompt and "3–5 句" in prompt
+
+
 # ---------- 路径形状（T34：SPEC 决策 41） ----------
 #
 # 用户说清一个方向时，「找」给的应该是一条路（一个方向 + 它的几个先后步骤），而不是五个方向：
