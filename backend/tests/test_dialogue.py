@@ -1123,37 +1123,59 @@ def test_a_reply_can_carry_questions_and_they_survive_the_view(conn):
 
 
 def test_questions_get_normalized_before_landing(conn):
-    """清形状：自由填写题的 multiple 没有意义，强制归成 false；description 空白归 None。"""
+    """清形状（能清就清、不烧重说）：单选项降级成自由填写、multiple 归 false、空白 description 归 None。"""
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    questions = [{"title": "卡在哪一步？", "options": [], "multiple": True,
+    questions = [{"title": "卡在哪一步？", "options": ["就一个"], "multiple": True,
                   "allow_custom": True, "description": "  "}]
     transport = ScriptedTransport(envelope("说说现状", questions=questions))
 
     done = dialogue.say(conn, plan_id, "我好像卡住了", transport=transport)
 
+    assert done["calls"] == 1  # 形状毛病当场清掉，没有烧重说
+    assert done["questions"][0]["options"] == []
     assert done["questions"][0]["multiple"] is False
     assert done["questions"][0]["description"] is None
 
 
-def test_bad_questions_are_unqualified_and_retried(conn):
-    """只有一个选项的「选择题」判不合格、带原因重说一次；重说合格才收下。"""
+def test_messy_questions_get_cleaned_not_retried(conn):
+    """空白选项去掉、重复选项去重、超员截断、空标题整问丢弃——全都不判不合格。"""
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    bad = [{"title": "先做哪个？", "options": ["补基础"], "multiple": False}]
-    good = [{"title": "先做哪个？", "options": ["补基础", "做项目"], "multiple": False}]
-    transport = ScriptedTransport(envelope("先回我", questions=bad), envelope("先回我", questions=good))
+    questions = [
+        {"title": "先做哪个？",
+         "options": ["补基础", " 补基础 ", "", "做项目", "复盘", "加班", "换方向"],
+         "multiple": False},
+        {"title": "   ", "options": ["甲", "乙"]},
+    ]
+    transport = ScriptedTransport(envelope("先回我", questions=questions))
 
     done = dialogue.say(conn, plan_id, "怎么走", transport=transport)
 
-    assert done["calls"] == 2
+    assert done["calls"] == 1
+    # 去重去空白后剩 5 个，截到 4 个上限
     assert done["questions"] == [
-        {"title": "先做哪个？", "description": None, "options": ["补基础", "做项目"],
-         "multiple": False, "allow_custom": True},
+        {"title": "先做哪个？", "description": None,
+         "options": ["补基础", "做项目", "复盘", "加班"], "multiple": False,
+         "allow_custom": True},
     ]
-    assert "questions 不合格" in facts_of(transport)  # 重说时带了原因
+
+
+def test_all_empty_titles_lands_no_questions(conn):
+    """题目全是空白的 → 一问都不剩，当没问过收下，回话本体照常落库。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    questions = [{"title": "  ", "options": ["甲", "乙"]}]
+    transport = ScriptedTransport(envelope("没问成", questions=questions))
+
+    done = dialogue.say(conn, plan_id, "怎么走", transport=transport)
+
+    assert done["calls"] == 1
+    assert done["questions"] is None
+    assert done["reply"] == "没问成"
 
 
 def test_a_reply_without_questions_stays_question_free(conn):

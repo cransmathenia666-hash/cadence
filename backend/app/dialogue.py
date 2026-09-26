@@ -186,7 +186,8 @@ CONTRACT_PROMPT = (
     '[{"title": "问题一句话", "options": ["选项甲", "选项乙"], "multiple": false, '
     '"allow_custom": true}]。每一问都必须给 2–4 个选项——不给选项的开放式问题（「你怎么想的」'
     "「卡在哪」）一律写在 reply 里，别放进 questions；最多 3 问；multiple=true 表示可多选。"
-    "不需要他拍板就整个别出现这个字段——别为问而问。\n"
+    "不需要他拍板就整个别出现这个字段——别为问而问。"
+    "给不出合格的 questions 就整个别带，散文回话永远合法，别为凑形状把这一轮烧光。\n"
     "- suggestion：**一轮最多一条**，只在「改哪里、改成什么、为什么」都说得具体时才提；"
     "拿不准就在 reply 里先问一句（要点选的就做成 questions 问答卡）、suggestion 给 null。"
     "只给点了名的节点编号——"
@@ -239,11 +240,12 @@ class Question(BaseModel):
     """一个要点选（或填写）的问题：界面把它渲染成问答卡。
 
     `options` 为空就是自由填写题（界面给输入框）；给选项时 2–4 个、可多选由 `multiple` 说。
+    放宽到 8 个是为了把「选项给多了」留给 `_clean_questions` 截断，而不是烧一次重说。
     """
 
     title: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=200)
-    options: list[str] = Field(default_factory=list, max_length=MAX_QUESTION_OPTIONS)
+    options: list[str] = Field(default_factory=list, max_length=8)
     multiple: bool = False
     allow_custom: bool = True
 
@@ -271,35 +273,38 @@ def _details(error: ValidationError) -> str:
 def _clean_questions(
     questions: list[Question] | None,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """把模型给的问题数组清成要落库的形状；有毛病就给不合格原因。
-
-    空标题、空白选项、只有一个选项的「选择题」（不如直接问）都拦下；
-    没有选项的问题强制当自由填写题（multiple 对它没有意义）。
+    """把模型给的问题数组清成要落库的形状。**能清就清、清完收下**（2026-09-26 真机教训）：
+    空白选项去掉、重复选项去重、选项剩一个的降级成自由填写题、空标题的整问丢弃——
+    这些都不值得烧一次「带原因重说」的模型调用；真正致命的毛病只剩「题目全空」。
     """
     if not questions:
         return None, None
     cleaned: list[dict[str, Any]] = []
-    for index, question in enumerate(questions, start=1):
+    for question in questions:
         title = question.title.strip()
         if not title:
-            return None, f"第 {index} 问的 title 是空的"
-        options = [option.strip() for option in question.options]
-        if any(not option for option in options):
-            return None, f"第 {index} 问有空白的选项"
+            continue  # 这问没法显示，整问丢弃
+        options: list[str] = []
+        for option in question.options:
+            text = option.strip()
+            if text and text not in options:
+                options.append(text)
+        if len(options) > MAX_QUESTION_OPTIONS:
+            options = options[:MAX_QUESTION_OPTIONS]
+        # 只剩一个选项的「选择题」没有选的意义，降级成自由填写
         if len(options) == 1:
-            return None, f"第 {index} 问只给了一个选项——要么给 2–4 个，要么别给 options"
-        if len(set(options)) != len(options):
-            return None, f"第 {index} 问的选项有重复"
+            options = []
         cleaned.append(
             {
                 "title": title,
                 "description": (question.description or "").strip() or None,
                 "options": options,
-                "multiple": bool(options) and question.multiple,
+                # 只剩一个选项的「选择题」没有选的意义，降级成自由填写
+                "multiple": len(options) >= 2 and question.multiple,
                 "allow_custom": question.allow_custom,
             }
         )
-    return cleaned, None
+    return (cleaned or None), None
 
 
 def _check_reply(
