@@ -22,12 +22,21 @@ export function HoverSelect({
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [up, setUp] = useState(false);
   const closeTimer = useRef<number | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
 
   const openNow = () => {
     if (closeTimer.current !== null) {
       window.clearTimeout(closeTimer.current);
       closeTimer.current = null;
+    }
+    // 翻转检测：下方空间放不下面板时向上弹（靠近视口底部的行）
+    if (wrapRef.current) {
+      const r = wrapRef.current.getBoundingClientRect();
+      const below = window.innerHeight - r.bottom;
+      const estimated = Math.min(320, options.length * 42 + 20);
+      setUp(below < estimated + 12 && r.top > below);
     }
     setOpen(true);
   };
@@ -41,6 +50,7 @@ export function HoverSelect({
 
   return (
     <div
+      ref={wrapRef}
       className={`relative ${className}`}
       onMouseEnter={openNow}
       onMouseLeave={scheduleClose}
@@ -60,11 +70,11 @@ export function HoverSelect({
       <AnimatePresence>
         {open && (
           <motion.div
-            initial={{ opacity: 0, y: -6, scale: 0.97 }}
+            initial={{ opacity: 0, y: up ? 6 : -6, scale: 0.97 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -6, scale: 0.97 }}
+            exit={{ opacity: 0, y: up ? 6 : -6, scale: 0.97 }}
             transition={{ type: "spring", stiffness: 500, damping: 34 }}
-            className="absolute left-0 top-full mt-2 min-w-full w-max max-w-[420px] z-50 bg-[#141416] border border-white/[0.08] rounded-2xl p-1.5 shadow-[0_16px_48px_rgba(0,0,0,0.6)]"
+            className={`absolute left-0 min-w-full w-max max-w-[420px] z-50 bg-[#141416] border border-white/[0.08] rounded-2xl p-1.5 shadow-[0_16px_48px_rgba(0,0,0,0.6)] ${up ? "bottom-full mb-2" : "top-full mt-2"}`}
             onClick={(e) => e.stopPropagation()}
           >
             {options.map((opt) => {
