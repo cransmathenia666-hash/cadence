@@ -23,6 +23,7 @@ export function CandidateCard({
   setAdoptingId,
   onVerdict,
   onAdoptIntoNewPlan,
+  setChattingId,
 }: {
   row: {
     id: number;
@@ -162,8 +163,18 @@ export function CandidateCard({
             {/* Actions / Verdicts */}
             <div className="pl-8">
               {isDecided ? (
-                <div className="text-[12px] text-white/50 bg-white/[0.02] p-3 rounded-xl border border-white/[0.04] inline-block">
-                  {notes[row.id] ?? "该候选已有最终结论"}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="text-[12px] text-white/50 bg-white/[0.02] p-3 rounded-xl border border-white/[0.04] inline-block">
+                    {notes[row.id] ?? "该候选已有最终结论"}
+                  </div>
+                  {row.status === "accepted" && (
+                    <button
+                      onClick={() => setChattingId(row.id)}
+                      className="px-4 py-2 rounded-full border border-white/[0.12] text-[13px] text-white/80 hover:border-white/[0.3] hover:text-white transition-colors"
+                    >
+                      进入规划对话
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-col gap-3">

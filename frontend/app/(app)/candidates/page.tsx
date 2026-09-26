@@ -276,7 +276,7 @@ export default function CandidatesPage() {
         />
       </div>
 
-      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12 grid grid-cols-1 lg:grid-cols-[1fr_400px] xl:grid-cols-[1fr_440px] gap-10 xl:gap-14 items-start">
+      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12 grid grid-cols-1 lg:grid-cols-[440px_1fr] xl:grid-cols-[480px_1fr] gap-8 xl:gap-10 items-start">
         
         {/* Left Column (Main) */}
         <div className="flex flex-col w-full min-w-0">
@@ -338,6 +338,7 @@ export default function CandidatesPage() {
                     setAdoptingId={setAdoptingId}
                     onVerdict={onVerdict}
                     onAdoptIntoNewPlan={onAdoptIntoNewPlan}
+                    setChattingId={openChat}
                   />
                 ))}
               </div>
