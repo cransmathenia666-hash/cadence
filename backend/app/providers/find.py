@@ -52,6 +52,10 @@ class Brief:
     max_steps: int = 8
     # 已否决过的标题（归一化前），prompt 里要明确列出来当禁区
     banned_titles: list[str] = field(default_factory=list)
+    # 已经答过的追问（「我问…」→「我答…」），由 advisor 按计划归属取好。2026-09-26 走查
+    # 整改：已答清单原来只埋在反馈流水里，会被字符上限从最旧挤掉，也压不过「缺信息就追问」
+    # 的主指令——追问重复就是这么来的。现在单独成段、当禁区用，并在验收里拦下重问。
+    clarified_lines: list[str] = field(default_factory=list)
 
 
 class Source(Protocol):
@@ -80,7 +84,11 @@ class RouteOnlySource:
 
     def build_messages(self, brief: Brief) -> list[dict[str, str]]:
         lines = [
-            "我不知道该学什么，请你按我的长期档案给我一份候选清单。",
+            "下面给你我的档案和这次的问题。**这次的问题是第一位的**：候选必须全部围绕它——"
+            "档案是你判断「这些方向对我有没有用、多深合适」的依据，不是选题范围。",
+            "",
+            "【这次的问题】每一条候选都必须能直接回应它：",
+            brief.raw_text.strip(),
             "",
             "【我的长期档案】方括号里是类别，开头的 #数字 是这条档案的 id（id 只能从这里选）：",
         ]
@@ -89,8 +97,7 @@ class RouteOnlySource:
         if brief.plan_context_lines:
             lines += [
                 "",
-                "【这一轮针对的计划】候选要服务这个计划；与它无关但更值得做的事，也可以给，"
-                "但在 `why` 里说清与这个计划的关系：",
+                "【这一轮针对的计划】这是这次问题的背景，候选要贴得上它：",
             ]
             lines += [f"- {line}" for line in brief.plan_context_lines]
 
@@ -117,9 +124,21 @@ class RouteOnlySource:
                 "行尾写着「我问→我答」的，是我已经答过的事实——**别再问第二遍**。",
             ]
 
+        if brief.clarified_lines:
+            lines += [
+                "",
+                "【已答过的追问——禁区】下面是我已经答过的追问和我的原话回答，它们是已知事实："
+                "答案直接拿来用，同一件事**换说法也不许再问第二遍**：",
+            ]
+            lines += [f"- {line}" for line in brief.clarified_lines]
+
         lines += [
             "",
             "【硬性要求】",
+            "- **本次原话是第一硬约束**：每条候选都必须直接回应【这次的问题】，"
+            "`why` 里要能看出它怎么回应（用上原话里的词）；"
+            "跟这次问题无关的方向，哪怕档案显示它再值，也不许混进清单——"
+            "想推别的方向，等我自己开一轮「不知道学什么」再说。",
             "- 先自己判断这一轮给的是哪种**形状**，只能选一种，写进 `shape`：",
             "  · `directions`（默认）：几条**互相竞争**的方向，每条都能单独采纳或否决。"
             "我的困惑是「不知道往哪走」时用它。",
@@ -149,7 +168,9 @@ class RouteOnlySource:
             "`missing` 必须点名其中一类（"
             + " / ".join(brief.clarify_keys)
             + "），不许写空泛的话——"
-            "像「你想学什么」这种把问题抛回给我的追问会被判为不合格。",
+            "像「你想学什么」这种把问题抛回给我的追问会被判为不合格；"
+            "已经问过、我也答过的事（见【已答过的追问——禁区】）换说法再问同样被判为不合格，"
+            "把我答的内容当已知用。",
             "- **追问只问「关于我的一件事」**：档案里缺的那类事实，一句话就能答完"
             "（例如「你现在每周能稳定投入几小时」）。**不许问「这条路怎么走」**"
             "（先学哪个 / 怎么排顺序 / 用什么节奏 / 想先交出什么）——那是采纳之后的规划对话该问的，"
@@ -172,7 +193,11 @@ class RouteOnlySource:
             ]
             lines += [f"- {title}" for title in brief.banned_titles]
 
-        lines += ["", "【这次的问题】", brief.raw_text.strip()]
+        lines += [
+            "",
+            "【最后核对】每条候选都必须能直接回应【这次的问题】——回应不上来的方向，"
+            "一条都不要给；宁可少给，不许拿无关的凑数。",
+        ]
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "\n".join(lines)},

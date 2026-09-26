@@ -774,6 +774,77 @@ def test_answered_clarify_is_composed_and_remembered(conn):
     assert "别再问第二遍" in prompt_of(transport)
 
 
+# ---------- 已答追问的禁区与重问拦截（2026-09-26 走查整改） ----------
+#
+# 走查抓到的问题：答过「手大概多久恢复」，下一轮它换个说法又绕回手。根因是已答清单只
+# 埋在反馈流水里、没进输出契约。改后：已答清单单独成段当禁区，重问（逐字 / 近逐字）在校验里硬拦。
+
+
+def seed_answered_clarify(conn, question: str, answer: str, plan_id: int | None = None) -> None:
+    """造一轮「问过且已答」的追问，作为下一轮的背景。"""
+    request_id = advisor.record_request(conn, "search", "随便一轮「找」", plan_id)
+    advisor.record_clarify(conn, request_id, {"question": question, "missing": "当前状态"})
+    advisor.mark_clarify_answered(conn, request_id, answer)
+
+
+def test_answered_clarify_gets_its_own_forbidden_zone(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    seed_answered_clarify(conn, "你的手大概多久能恢复？", "医生说两周左右")
+    transport = ScriptedTransport(four([axis]))
+
+    advisor.find_candidates(conn, "手受伤恢复期间能学点什么", transport=transport)
+
+    prompt = prompt_of(transport)
+    assert "已答过的追问" in prompt and "医生说两周左右" in prompt
+    # 这次的问题提到最前：档案是依据，不是选题范围
+    assert prompt.index("【这次的问题】") < prompt.index("【我的长期档案】")
+    assert "无关" in prompt and "第一硬约束" in prompt
+    assert "与它无关但更值得做的事" not in prompt  # 旧的「无关也可以给」口子已收
+
+
+def test_reasking_an_answered_clarify_is_rejected(conn):
+    """逐字 / 近逐字的重问被判不合格，重试理由里带上我的原话回答。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    seed_answered_clarify(conn, "你现在每周能稳定投入几小时？", "每周大概 5 小时")
+    transport = ScriptedTransport(
+        four([axis], clarify={"question": "你现在每周能稳定投入几小时呢？", "missing": "当前状态"}),
+        four([axis]),
+    )
+
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+
+    assert result["attempts"] == 2 and result["clarify"] is None
+    retry = transport.seen[1]["payload"]["messages"][-1]["content"]
+    assert "我已经答过" in retry and "每周大概 5 小时" in retry
+
+
+def test_a_new_clarify_on_another_fact_is_still_fine(conn):
+    """禁区拦的是重问，不是追问本身：换一件关于我的事实照常合格。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    seed_answered_clarify(conn, "你现在每周能稳定投入几小时？", "每周大概 5 小时")
+    transport = ScriptedTransport(
+        four([axis], clarify={"question": "你现在用什么设备写代码？", "missing": "生活记录"})
+    )
+
+    result = advisor.find_candidates(conn, "我不知道该学什么", transport=transport)
+
+    assert result["attempts"] == 1
+    assert result["clarify"]["question"] == "你现在用什么设备写代码？"
+
+
+def test_answered_clarifies_stay_in_their_own_plan_scope(conn):
+    """禁区按计划归属取（与 pending_clarify 同一把尺）：只问没答的不算，别计划的也不串台。"""
+    seed_answered_clarify(conn, "新方向这边答过的事", "答了")
+    seed_answered_clarify(conn, "计划这边没答的事", "")  # 只问没答 → 不进禁区
+    seed_answered_clarify(conn, "计划这边答过的事", "答了", plan_id=7)
+
+    assert advisor._answered_clarifies(conn, None) == [("新方向这边答过的事", "答了")]
+    assert advisor._answered_clarifies(conn, 7) == [("计划这边答过的事", "答了")]
+
+
 def test_answer_without_a_pending_clarify_is_kept_as_supplement(conn, monkeypatch):
     """没有待答的追问（页面刷新过）时不吞掉那句话——缀在 raw_text 后面照常发出去。"""
     make_provider(conn)

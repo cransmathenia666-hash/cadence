@@ -226,6 +226,34 @@ def mark_clarify_answered(conn: sqlite3.Connection, request_id: int, answer: str
     conn.commit()
 
 
+# 已答追问单独进 prompt 的上限（条）。2026-09-26 走查抓到「答过的换个说法又问」：
+# 已答清单原来只埋在反馈流水里，会被字符上限从最旧挤掉，也压不过「缺信息就追问」的主指令。
+# 现在按计划归属单独取一份（与 `pending_clarify` 同一把尺）进 prompt 当禁区，并在验收里
+# 拦下逐字 / 近逐字的重问；换了说法的主题级重问没有便宜的中文判据，硬做会误伤正当追问，
+# 靠禁区段压 + 真机走查兜。
+ANSWERED_CLARIFIES = 5
+
+
+def _answered_clarifies(conn: sqlite3.Connection, plan_id: int | None) -> list[tuple[str, str]]:
+    """这一计划归属下**已经答过**的追问（问题, 回答），时间正序、最多最近几轮。
+
+    与 `pending_clarify` 同一把尺：只看同一个计划范围，两段「找」互不串台。只问没答的
+    不算——那类事实还不成立，下一轮它该继续问，不该被当成已答禁区。
+    """
+    rows = conn.execute(
+        "SELECT clarify FROM learning_request"
+        " WHERE kind = 'search' AND plan_id IS ? AND clarify IS NOT NULL"
+        " ORDER BY id DESC LIMIT ?",
+        (plan_id, ANSWERED_CLARIFIES),
+    ).fetchall()
+    pairs: list[tuple[str, str]] = []
+    for row in reversed(rows):  # 时间正序
+        stored = _stored_clarify(row["clarify"])
+        if stored is not None and stored["answer"]:
+            pairs.append((stored["question"], stored["answer"]))
+    return pairs
+
+
 def plan_context(conn: sqlite3.Connection, plan_id: int | None) -> dict[str, Any] | None:
     """这一轮「找」针对的计划：目标 + 当前阶段 + 还开着的任务。
 
@@ -717,11 +745,13 @@ def _brief(
     banned: list[str],
     feedback: list[str],
     context: dict[str, Any] | None = None,
+    clarified: list[tuple[str, str]] | None = None,
 ) -> Brief:
     """把档案与判据组装成来源层要的输入（见 `providers/find.Brief`）。
 
     组装留在 advisor 而不是来源层：档案长什么样、哪些类别空着、每档深度看哪几类、
-    这一轮针对哪个计划、最近表态过什么，这些都是「判」的知识；来源只管怎么把它讲给模型听。
+    这一轮针对哪个计划、最近表态过什么、哪些追问已经答过，这些都是「判」的知识；
+    来源只管怎么把它讲给模型听。
     """
     plan_lines: list[str] = []
     if context is not None:
@@ -743,6 +773,9 @@ def _brief(
         missing_labels=[PROFILE_CATEGORIES[key] for key in profile["missing_categories"]],
         plan_context_lines=plan_lines,
         feedback_lines=feedback,
+        clarified_lines=[
+            f"我问「{question}」→ 我答：{answer}" for question, answer in (clarified or [])
+        ],
         depth_guide_lines=[
             f"{QUESTIONS[key]}：主要看 "
             + "、".join(PROFILE_CATEGORIES[name] for name in JUDGE_SOURCES[key])
@@ -789,13 +822,14 @@ def find_candidates(
     allowed_ids = {item["id"] for item in profile["items"]}
     banned = _rejected_titles(conn)
     feedback = _feedback_block(conn)
+    answered = _answered_clarifies(conn, plan_id)
     messages = chosen_source.build_messages(
-        _brief(raw_text, profile, banned, feedback, context)
+        _brief(raw_text, profile, banned, feedback, context, clarified=answered)
     )
 
     operation = llm.Operation(conn, TASK_FIND, transport=transport)
     text = operation.chat(messages, provider_id=provider_id, model=model)
-    found, problem = _check_find(text, allowed_ids, banned)
+    found, problem = _check_find(text, allowed_ids, banned, answered_questions=answered)
 
     attempts = 1
     if problem is not None:
@@ -811,7 +845,7 @@ def find_candidates(
             },
         ]
         text = operation.chat(messages, provider_id=provider_id, model=model)
-        found, problem = _check_find(text, allowed_ids, banned)
+        found, problem = _check_find(text, allowed_ids, banned, answered_questions=answered)
         if problem is not None:
             raise AdvisorError(
                 f"模型连着 {attempts} 次都没给出合格的候选清单（{problem}）；"
@@ -846,15 +880,33 @@ def find_candidates(
     }
 
 
-def _clarify_problem(clarify: Clarify) -> str | None:
-    """追问槽位的验收（决策 35 ②，2026-09-20 T36 收紧）。
+_ANSWER_CLARIFY_PUNCT = "？?！!。．，,；;：:、~～·\"'“”‘’"
 
-    三条闸，各堵一种跑偏：
+
+def _question_key(text: str) -> str:
+    """追问比对用的归一化：按标题那套去空白转小写，再去掉标点。
+
+    去标点是为了拦「同一句话加个语气」的重问——「每周能投入几小时？」与
+    「每周能投入几小时呢？」只差一个问号的位置，闸眼要把它们看成同一句。
+    语气词（呢 / 吗 / 啊）刻意不去：那是正文用词，去了会把比对放宽到误伤别的问句。
+    """
+    return _normalize_title(text).translate(str.maketrans("", "", _ANSWER_CLARIFY_PUNCT))
+
+
+def _clarify_problem(
+    clarify: Clarify, answered: list[tuple[str, str]] = ()
+) -> str | None:
+    """追问槽位的验收（决策 35 ②，2026-09-20 T36 收紧，2026-09-26 加第④条闸）。
+
+    四条闸，各堵一种跑偏：
     ① `missing` 要点名哪一类档案信息——堵「你想学什么」这种把问题抛回给我的空泛追问；
     ② **一句话能答**——堵一次问好几件事、把追问写成一段话；
     ③ **不许问「这条路怎么走」**——先学哪个、按什么顺序、怎么排，那是采纳之后规划对话的活，
        在这里问等于让「找」替规划下结论。判据是明确的规划说法（`PLAN_TALK_MARKERS`），
        不是「先」「节奏」这类单独的词——「你平时的作息节奏」仍然是关于我的事实。
+    ④ **不许重问已经答过的事**（2026-09-26 走查整改）——逐字 / 近逐字在这里硬拦（判据：
+       去空白去标点归一化后相等，或一方是另一方长度 ≥6 的子串）；换了说法的主题级重问
+       没有便宜的中文判据，硬做会误伤正当追问，靠 prompt 的禁区段压 + 真机走查兜。
 
     刻意**不**要求被追问的那一类此刻真的空着：档案里有一条不等于它够用，
     模型想问细一点是正当的。
@@ -886,6 +938,19 @@ def _clarify_problem(clarify: Clarify) -> str | None:
             "那是采纳之后规划对话该问的（意向、节奏、取舍）。"
             "追问只问关于我的一件事：档案里缺的那类事实，一句话能答完"
         )
+
+    # ④ 已答禁区（2026-09-26）：把回答原文带进报错，重试那一轮模型能直接拿去当已知用。
+    new_q = _question_key(question)
+    for old_question, old_answer in answered:
+        old_q = _question_key(old_question)
+        if not old_q:
+            continue
+        shorter, longer = sorted((old_q, new_q), key=len)
+        if shorter == longer or (len(shorter) >= 6 and shorter in longer):
+            return (
+                f"这个问题我已经答过（我问过「{old_question}」→ 我答：{old_answer}）——"
+                "换说法也不许再问第二遍，把我答的内容当已知事实用，问别的"
+            )
     return None
 
 
@@ -930,11 +995,15 @@ def _shape_problem(found: FoundList) -> str | None:
 
 
 def _check_find(
-    text: str, allowed_ids: set[int], banned: list[str]
+    text: str,
+    allowed_ids: set[int],
+    banned: list[str],
+    answered_questions: list[tuple[str, str]] = (),
 ) -> tuple[FoundList | None, str | None]:
     """验收模型输出：返回（合格的清单, None）或（None, 不合格的原因）。
 
     同 `_check`，刻意不抛异常——不合格的原因要能喂回模型重试一次。
+    `answered_questions` 是已经答过的追问（问题, 回答），用来拦「换个说法再问一遍」。
     """
     data = extract_json(text)
     if data is None:
@@ -954,7 +1023,7 @@ def _check_find(
         return None, problem
 
     if found.clarify is not None:
-        problem = _clarify_problem(found.clarify)
+        problem = _clarify_problem(found.clarify, answered_questions)
         if problem is not None:
             return None, problem
 
