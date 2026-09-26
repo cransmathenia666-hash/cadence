@@ -1,6 +1,6 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-26（**方案 B 外壳 + 三页换皮**：工作台升级为应用外壳——`app/(app)/` 路由组 + `components/shell/`（WorkspaceProvider 共享计划上下文，5827e48）；侧栏七项导航+顶栏页名（7edabab）；/new、/candidates 深色重做入库（b0c26ac 等）；组件库降级为零件箱，风格标准=beui.dev/beautifului.dev 实测拆解的 `design-samples/style-dna.md` + `docs/前端页面重做模板.md`（每页重做 playbook）；用户报的两个后端 AI 行为问题（追问重复/无关提案）已写入其待办.md。此前 2026-09-25：比赛冲刺转向、旧原型删除、ui-foundry 地基入库）
+> 最近更新：2026-09-26（**方案 B 外壳 + 三页换皮**：工作台升级为应用外壳——`app/(app)/` 路由组 + `components/shell/`（WorkspaceProvider 共享计划上下文，5827e48）；侧栏七项导航+顶栏页名（7edabab）；/new、/candidates 深色重做入库（b0c26ac 等）；组件库降级为零件箱，风格标准=beui.dev/beautifului.dev 实测拆解的 `design-samples/style-dna.md` + `docs/前端页面重做模板.md`（每页重做 playbook）；用户报的两个后端 AI 行为问题已记入其待办.md。此前 2026-09-25：比赛冲刺转向、旧原型删除、ui-foundry 地基入库）
 > 仓库根目录：`D:\cadence`
 > 主工作树：`D:\cadence`｜**当前在分支 `feat/frontend-a-shell`**（`master` 刻意停在旧位置不追平）｜**远端**：`origin` = GitHub **公开**库 `cransmathenia666-hash/cadence`（2026-09-23 重写历史清掉私人物件后转公开，默认分支即此；重写前全量备份在 `D:\cadence-history-backup-20260923.bundle`）｜**未提交改动**：仅剩用户自己的两份 docs 笔记与仓库根目录 4 个来历不明散件（`index.html`、`screenshot*.png`——不是我产的，勿动勿提交）；`design-samples/`（样张循环工作区）已写进 `.gitignore` 只留本机
 > 其他工作树：无
