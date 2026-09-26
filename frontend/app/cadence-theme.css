@@ -195,6 +195,18 @@ details > summary::-webkit-details-marker {
   display: none;
 }
 
+/* 按钮弹簧质感：全站按钮统一微缩放反馈（beUI 手感） */
+.dark button:not(:disabled) {
+  transition-property: transform, background-color, border-color, color, box-shadow, opacity;
+  transition-duration: 180ms;
+}
+.dark button:hover:not(:disabled) {
+  transform: scale(1.02);
+}
+.dark button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
 *:focus-visible {
   outline: none;
 }

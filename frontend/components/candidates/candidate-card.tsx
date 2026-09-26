@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, X, ChevronDown } from "lucide-react";
 import { PathStep } from "@/lib/api";
+import { HoverSelect } from "@/components/ui/hover-select";
 
 const KIND_LABELS: Record<string, string> = {
   concept: "概念",
@@ -219,14 +220,16 @@ export function CandidateCard({
                       </div>
 
                       {adoptMode === "existing" ? (
-                        <select 
-                          value={adoptPlanChoice} 
-                          onChange={e => setAdoptPlanChoice(e.target.value)} 
-                          className="appearance-none bg-black/40 border border-white/[0.08] rounded-full px-4 py-2 text-[13px] text-primary/90 outline-none flex-1 min-w-[160px] cursor-pointer hover:border-white/[0.15]"
-                        >
-                          <option value="">选择现有计划...</option>
-                          {plans.map(p => <option key={p.id} value={p.id}>#{p.id} {p.goal}</option>)}
-                        </select>
+                        <HoverSelect
+                          value={adoptPlanChoice}
+                          onChange={setAdoptPlanChoice}
+                          placeholder="选择现有计划..."
+                          className="flex-1 min-w-[160px]"
+                          options={[
+                            { value: "", label: "选择现有计划..." },
+                            ...plans.map(p => ({ value: String(p.id), label: `#${p.id} ${p.goal}` })),
+                          ]}
+                        />
                       ) : (
                         <input 
                           value={newPlanGoal} 

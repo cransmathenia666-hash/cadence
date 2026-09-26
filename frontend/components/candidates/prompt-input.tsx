@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent } from "react";
 import { Loader2, ArrowUp } from "lucide-react";
+import { HoverSelect } from "@/components/ui/hover-select";
 
 export function PromptInput({
   plans,
@@ -49,20 +50,18 @@ export function PromptInput({
         required
       />
       
-      <div className="flex items-center justify-between mt-2 px-1">
-        <select
+      <div className="flex items-center justify-between gap-3 mt-2 px-1">
+        <HoverSelect
           value={planChoice}
-          onChange={(e) => setPlanChoice(e.target.value)}
-          className="appearance-none bg-white/[0.04] hover:bg-white/[0.08] text-white/70 text-[12px] px-4 py-1.5 rounded-full border border-white/[0.04] outline-none cursor-pointer transition-colors"
+          onChange={setPlanChoice}
           disabled={asking}
-        >
-          <option value="" className="bg-[#141416] text-primary">新方向 (不从属现有计划)</option>
-          {plans.map((item) => (
-            <option key={item.id} value={item.id} className="bg-[#141416] text-primary">
-              #{item.id} {item.goal}
-            </option>
-          ))}
-        </select>
+          placeholder="新方向 (不从属现有计划)"
+          className="min-w-[220px]"
+          options={[
+            { value: "", label: "新方向 (不从属现有计划)" },
+            ...plans.map((item) => ({ value: String(item.id), label: `#${item.id} ${item.goal}` })),
+          ]}
+        />
         
         <div className="flex items-center gap-4">
           {bannedCount > 0 && (

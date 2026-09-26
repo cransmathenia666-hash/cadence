@@ -1,6 +1,7 @@
 import { useRef, useState, KeyboardEvent, FormEvent } from "react";
 import { Loader2, ArrowUp, Check, Play, CornerDownRight } from "lucide-react";
 import { PlanChatView, ChatMessage, FindResult } from "@/lib/api";
+import { HoverSelect } from "@/components/ui/hover-select";
 
 function ChatMessageView({ item }: { item: ChatMessage }) {
   const isUser = item.role === "user";
@@ -162,18 +163,16 @@ export function ChatBox({
           <div className="text-[13px] text-amber-500/90 font-medium">
             该候选为「新方向」，请先指定注入的计划：
           </div>
-          <select
+          <HoverSelect
             value={chosenPlan}
-            onChange={(e) => setChosenPlan(e.target.value)}
-            className="w-full max-w-sm appearance-none bg-black/40 border border-white/[0.08] rounded-xl px-4 py-2.5 text-[13px] text-primary/90 hover:border-white/[0.15] outline-none cursor-pointer"
-          >
-            <option value="">请选择目标计划…</option>
-            {plans.map((item) => (
-              <option key={item.id} value={item.id}>
-                #{item.id} {item.goal}
-              </option>
-            ))}
-          </select>
+            onChange={setChosenPlan}
+            placeholder="请选择目标计划…"
+            className="max-w-sm w-full"
+            options={[
+              { value: "", label: "请选择目标计划…" },
+              ...plans.map((item) => ({ value: String(item.id), label: `#${item.id} ${item.goal}` })),
+            ]}
+          />
         </div>
       )}
 
