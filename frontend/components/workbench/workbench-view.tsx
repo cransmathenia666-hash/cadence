@@ -144,7 +144,7 @@ export function WorkbenchChat() {
                 </span>
               </div>
               <div className="pl-10 flex flex-col gap-2.5">
-                <AgentProgress label="在读计划、报告和档案" />
+                <AgentProgress label="think" />
                 <ThinkingShimmer className="text-[13px] text-muted/60">
                   正在整理思路…
                 </ThinkingShimmer>
