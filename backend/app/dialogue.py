@@ -307,8 +307,20 @@ def _clean_questions(
     return (cleaned or None), None
 
 
+# 「他这一句要的是选项拍板」的话术标记（2026-09-26 真机教训：光靠提示词压不住，
+# 他明确要选项而模型只给散文甲乙丙时，验收层直接判不合格带原因重说）。
+OPTION_REQUEST_MARKS = (
+    "给我几个选项", "给我选项", "给我几个方案", "让我选", "我来拍板", "帮我选",
+    "出选择题", "做选择题", "二选一", "三选一", "挑一个", "选一个", "选哪条", "选哪个",
+)
+
+
+def _wants_option_card(message: str) -> bool:
+    return any(mark in str(message or "") for mark in OPTION_REQUEST_MARKS)
+
+
 def _check_reply(
-    conn: sqlite3.Connection, plan_id: int, text: str
+    conn: sqlite3.Connection, plan_id: int, text: str, user_message: str = ""
 ) -> tuple[Any, ...]:
     """验收这一轮：给出（人话，要落库的建议 payload 或 None，不合格原因或 None，
     结构化追问或 None）。
@@ -316,7 +328,8 @@ def _check_reply(
     三件事一起判——输出是不是信封、人话有没有、建议（如果有）站不站得住。建议里
     「点名的节点不存在 / 不属于这个计划 / 改前＝改后 / 名字撞车」这类**批不了**的毛病
     也在这里拦下：宁可不提，也不落一条等你点了「确认」才报错的提案（决策 39）。
-    追问（如果有）在这里清成落库形状——空标题、空白选项这类毛病同样宁可不问。
+    追问（如果有）在这里清成落库形状。他这一句明确要选项拍板（见 OPTION_REQUEST_MARKS）
+    而回话没带 questions 时，判不合格重说——这是硬闸，不指望模型自觉。
     """
     data = advisor.extract_json(text)
     if data is None:
@@ -334,6 +347,16 @@ def _check_reply(
     questions, question_problem = _clean_questions(reply.questions)
     if question_problem is not None:
         return None, None, f"questions 不合格（{question_problem}）"
+
+    if questions is None and _wants_option_card(user_message):
+        return (
+            None,
+            None,
+            "他这句话要的是**在选项里拍板**——把你要给的选项做成 questions 问答卡"
+            "（1 问、2–4 个选项、选项写短语），选项细节仍可写在 reply 里展开；"
+            "不要只给散文甲乙丙",
+            None,
+        )
 
     if reply.suggestion is None:
         return said, None, None, questions  # 没有建议就是纯聊天，什么都不落
@@ -532,7 +555,7 @@ def say(
             task=TASK_DIALOGUE,
             system_prompt=SYSTEM_PROMPT,
             history=_trim(messages_of(conn, plan_id)),
-            check_final=lambda raw: _check_reply(conn, plan_id, raw),
+            check_final=lambda raw: _check_reply(conn, plan_id, raw, user_message=text),
             prose_fallback=_prose_reply,
             # 记忆库自它上次读之后变过 → 这一轮开头多一行提醒（走查整改第 3 条）。
             # 没有变化、或这段对话从没读过记忆，就是 None（不硬塞噪音）。

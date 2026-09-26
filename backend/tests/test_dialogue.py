@@ -1189,3 +1189,29 @@ def test_a_reply_without_questions_stays_question_free(conn):
 
     assert done["questions"] is None
     assert dialogue.view(conn, plan_id)["messages"][1]["questions"] is None
+
+
+def test_option_request_without_questions_is_sent_back_once(conn):
+    """硬闸：他明说要选项拍板而回话没带 questions → 判不合格重说；重说带了才收下。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    no_q = {"reply": "三条路：①收尾 ②开二版 ③补基础", "suggestion": None}
+    with_q = {
+        "reply": "三条路，选一条",
+        "suggestion": None,
+        "questions": [{"title": "下一步先走哪条", "options": ["收尾 #33", "开第二版", "纯补基础"]}],
+    }
+    transport = ScriptedTransport(
+        json.dumps(no_q, ensure_ascii=False), json.dumps(with_q, ensure_ascii=False)
+    )
+
+    done = dialogue.say(conn, plan_id, "下一步怎么走？给我几个选项，我来拍板", transport=transport)
+
+    assert done["calls"] == 2
+    assert done["questions"][0]["options"] == ["收尾 #33", "开第二版", "纯补基础"]
+    assert "拍板" in facts_of(transport)  # 重说原因讲清了要什么
+    # 同样不带 questions 的回话，普通消息不触发重说
+    transport2 = ScriptedTransport(json.dumps(no_q, ensure_ascii=False))
+    done2 = dialogue.say(conn, plan_id, "随便聊聊近况", transport=transport2)
+    assert done2["calls"] == 1 and done2["questions"] is None
