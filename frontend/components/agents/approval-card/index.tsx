@@ -92,7 +92,7 @@ function QuestionOptions({
   const custom = answer.custom ?? "";
 
   return (
-    <div className="mt-3">
+    <div className="mt-2">
       {question.options?.length ? (
         question.multiple ? (
           <div className="grid gap-0.5">
@@ -110,7 +110,7 @@ function QuestionOptions({
                       : answer.selected.filter((value) => value !== option.value),
                   })
                 }
-                className="min-h-9 rounded-lg px-1.5 py-1 transition-colors hover:bg-white/[0.04]"
+                className="min-h-8 rounded-lg px-1 py-0.5 transition-colors hover:bg-white/[0.04]"
               />
             ))}
           </div>
@@ -129,7 +129,7 @@ function QuestionOptions({
                 value={option.value}
                 label={option.label}
                 disabled={disabled || option.disabled}
-                className="min-h-9 w-full rounded-lg px-1.5 py-1 transition-colors hover:bg-white/[0.04]"
+                className="min-h-8 w-full rounded-lg px-1 py-0.5 transition-colors hover:bg-white/[0.04]"
               />
             ))}
           </RadioGroup>
@@ -147,10 +147,10 @@ function QuestionOptions({
               custom: value,
             })
           }
-          className={cn("p-0.5", question.options?.length && "mt-1.5")}
+          className={cn("p-0.5", question.options?.length && "mt-1")}
           classNames={{
             field:
-              "h-10 rounded-xl border-0 bg-background/70 focus-within:bg-background",
+              "h-9 rounded-xl border-0 bg-background/70 focus-within:bg-background",
             input: "px-3 text-sm",
           }}
         />
@@ -287,7 +287,7 @@ export function ApprovalCard({
       data-state={status}
       aria-busy={busy}
       className={cn(
-        "w-full overflow-hidden rounded-2xl bg-muted p-4 text-sm",
+        "w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[#131316] px-4 py-3 text-sm shadow-[0_8px_32px_rgba(0,0,0,0.45)]",
         className,
       )}
     >
@@ -316,7 +316,7 @@ export function ApprovalCard({
 
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-start gap-3">
-            <h3 className="min-w-0 flex-1 text-base font-medium leading-5 text-foreground">
+            <h3 className="min-w-0 flex-1 text-[15px] font-medium leading-5 text-foreground">
               <ActionSwapRollText value={titleKey}>
                 {displayTitle}
               </ActionSwapRollText>
@@ -360,7 +360,7 @@ export function ApprovalCard({
                   transition={{ duration: reduce ? 0 : 0.2, ease: EASE_OUT }}
                 >
                   {question.description ? (
-                    <p className="mt-1 leading-5 text-muted-foreground">
+                    <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
                       {question.description}
                     </p>
                   ) : null}
@@ -376,16 +376,16 @@ export function ApprovalCard({
             ) : (
               <div>
                 {description ? (
-                  <p className="mt-1 leading-5 text-muted-foreground">
+                  <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
                     {description}
                   </p>
                 ) : null}
-                {children ? <div className="mt-3">{children}</div> : null}
+                {children ? <div className="mt-2">{children}</div> : null}
               </div>
             )}
 
             {questionMode ? (
-              <div className="mt-4 flex items-center gap-3">
+              <div className="mt-3 flex items-center gap-3">
                 {multipleQuestions ? (
                   <>
                     <Button
@@ -464,7 +464,7 @@ export function ApprovalCard({
           </AgentDisclosure>
 
           {!interactive ? (
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="mt-1 text-[13px] text-muted-foreground">
               {result ?? statusLabel}
             </p>
           ) : null}

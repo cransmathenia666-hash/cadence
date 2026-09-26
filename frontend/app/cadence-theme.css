@@ -57,6 +57,7 @@ html:root,
   --radius-md: 0.5rem;
   --radius-lg: 0.625rem;
   --radius-xl: 0.875rem;
+  --radius-full: 9999px;
   --radius: 0.75rem;
   --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --duration-instant: 80ms;
@@ -223,3 +224,19 @@ summary:focus-visible {
 textarea:focus-visible {
   box-shadow: none;
 }
+
+/* memory surface controls: the route is intentionally more tactile than the legacy form screens. */
+.memory-page .card-border-gradient { border-radius: 12px; }
+.memory-page .memory-input {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.9);
+  outline: none;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+.memory-page .memory-input::placeholder { color: rgba(255, 255, 255, 0.28); }
+.memory-page .memory-input:hover { border-color: rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.055); }
+.memory-page .memory-input:focus { border-color: rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.06); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05); }
+.memory-page input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.5; }
+.memory-page details > summary { list-style: none; }
+.memory-page details > summary::-webkit-details-marker { display: none; }
