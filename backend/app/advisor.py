@@ -226,6 +226,24 @@ def mark_clarify_answered(conn: sqlite3.Connection, request_id: int, answer: str
     conn.commit()
 
 
+def compose_clarify_round(
+    conn: sqlite3.Connection, raw_text: str, answer: str, plan_id: int | None
+) -> str:
+    """回答追问的下一轮输入：**最初那句原话必须仍在场**，追问与回答缀在后面。
+
+    2026-09-26 走查抓到：原来只拼「追问问题 + 我的回答」，原话从第二轮追问起就从输入里
+    消失，模型只能拿档案里的旧主线当方向，产出一堆无关候选。现在原话打头，本轮回答的
+    追问紧随其后；更早的已答追问由 `_answered_clarifies` 的背景段补上。
+    """
+    answer = answer.strip()
+    asked = pending_clarify(conn, plan_id)
+    if asked is None:
+        # 没有待答的追问（页面刷新过、或已经答过一遍）：不吞掉你的话，缀在后面
+        return f"{raw_text}\n补充：{answer}"
+    mark_clarify_answered(conn, asked["request_id"], answer)
+    return f"{raw_text}\n【追问】{asked['question']}\n【我的回答】{answer}"
+
+
 # 已答追问单独进 prompt 的上限（条）。2026-09-26 走查抓到「答过的换个说法又问」：
 # 已答清单原来只埋在反馈流水里，会被字符上限从最旧挤掉，也压不过「缺信息就追问」的主指令。
 # 现在按计划归属单独取一份（与 `pending_clarify` 同一把尺）进 prompt 当禁区，并在验收里

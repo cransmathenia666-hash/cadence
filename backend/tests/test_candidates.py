@@ -864,6 +864,39 @@ def test_answer_without_a_pending_clarify_is_kept_as_supplement(conn, monkeypatc
     assert seen["raw_text"] == "原来那句困惑\n补充：每周 5 小时"
 
 
+def test_clarify_answer_keeps_the_original_direction(conn, monkeypatch):
+    """回答追问后的输入必须仍带着最初那句原话（2026-09-26 走查整改）。
+
+    原来只拼「追问问题 + 我的回答」，原话从第二轮追问起就从输入里消失，模型只能拿档案
+    旧主线当方向，产出一堆无关候选。现在原话打头，追问与回答缀在后面。
+    """
+    make_provider(conn)
+    add_profile(conn, "long_axis", "主线")
+    original = "我主要提高口语和阅读能力，英语零基础"
+    first_id = advisor.record_request(conn, "search", original)
+    advisor.record_clarify(
+        conn,
+        first_id,
+        {"question": "医生预计你的手多久能恢复到可以敲键盘？", "missing": "生活记录"},
+    )
+    seen: dict = {}
+
+    def fake_find(conn_, raw_text, **kwargs):
+        seen["raw_text"] = raw_text
+        raise advisor.AdvisorError("到这儿就够了")
+
+    monkeypatch.setattr(advisor, "find_candidates", fake_find)
+    with pytest.raises(HTTPException):
+        main.post_request(
+            RequestIn(kind="search", raw_text=original, clarify_answer="现在已经正常"),
+            conn,
+        )
+
+    assert seen["raw_text"].startswith(original)  # 原话在场，模型才有得直接回应
+    assert "医生预计" in seen["raw_text"] and "现在已经正常" in seen["raw_text"]
+    assert advisor.pending_clarify(conn, None) is None  # 这条追问已标成已答
+
+
 # ---------- 路径形状（T34：SPEC 决策 41） ----------
 #
 # 用户说清一个方向时，「找」给的应该是一条路（一个方向 + 它的几个先后步骤），而不是五个方向：

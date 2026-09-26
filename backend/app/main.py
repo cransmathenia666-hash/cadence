@@ -636,19 +636,15 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
     （`path`：1 条伞候选 + 2–8 个先后步骤）还是几个互相竞争的方向（`directions`）。
     `path` 时那一轮只落**一行**伞候选，步骤进它的 payload——步骤不单独裁定、不进禁区。
 
-    回答追问走 `clarify_answer`（T36）：后端把「原问题 + 你的回答」拼成这一轮的输入，
-    并把那条追问标成已答（进反馈流水，后续轮次不再重复问同一件事）。
+    回答追问走 `clarify_answer`（T36）：原话保留在输入最前，追问与回答缀在后面
+    （2026-09-26 走查整改——原来只拼「原问题 + 回答」，原话第二轮起就丢了），并把那条
+    追问标成已答（进反馈流水，后续轮次不再重复问同一件事）。
     """
     raw_text = payload.raw_text
     if payload.kind == "search" and str(payload.clarify_answer or "").strip():
-        answer = str(payload.clarify_answer).strip()
-        asked = advisor.pending_clarify(conn, payload.plan_id)
-        if asked is None:
-            # 没有待答的追问（页面刷新过、或已经答过一遍）：不吞掉你的话，缀在后面
-            raw_text = f"{raw_text}\n补充：{answer}"
-        else:
-            advisor.mark_clarify_answered(conn, asked["request_id"], answer)
-            raw_text = f"{asked['question']}\n我的回答：{answer}"
+        raw_text = advisor.compose_clarify_round(
+            conn, payload.raw_text, str(payload.clarify_answer), payload.plan_id
+        )
 
     request_id = advisor.record_request(conn, payload.kind, raw_text, payload.plan_id)
     try:

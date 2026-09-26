@@ -22,6 +22,12 @@ import {
 import { PromptInput } from "@/components/candidates/prompt-input";
 import { CandidateCard } from "@/components/candidates/candidate-card";
 import { ChatBox } from "@/components/candidates/chat-box";
+import {
+  getFindSession,
+  patchFindSession,
+  pushFindRound,
+  type FindRound,
+} from "@/components/candidates/find-session";
 
 function rowsFromFind(found: FindResult) {
   return found.candidates.map((item, index) => ({
@@ -64,16 +70,41 @@ function messageOf(cause: unknown, fallback: string): string {
 }
 
 export default function CandidatesPage() {
+  // 「找」的进行时状态以模块级会话为准（切页不丢，见 find-session.ts）；
+  // 这里只是它的镜像，挂载时取一次初值，之后每次变更双写。
+  const session = getFindSession();
   const [profile, setProfile] = useState<ProfileView | null>(null);
   const [plans, setPlans] = useState<PlanSummary[]>([]);
-  
+
   const [planChoice, setPlanChoice] = useState("");
-  const [rawText, setRawText] = useState("");
-  const [asking, setAsking] = useState(false);
-  const [fresh, setFresh] = useState<FindResult | null>(null);
-  const [stored, setStored] = useState<CandidateList | null>(null);
-  const [askError, setAskError] = useState<string | null>(null);
+  const [rawText, setRawTextState] = useState(session.rawText);
+  const [asking, setAskingState] = useState(session.asking);
+  const [askError, setAskErrorState] = useState<string | null>(session.error);
+  const [fresh, setFreshState] = useState<FindResult | null>(session.fresh);
+  const [stored, setStoredState] = useState<CandidateList | null>(session.stored);
+  const [history, setHistory] = useState<FindRound[]>(session.history);
   const [clarifyAnswer, setClarifyAnswer] = useState("");
+
+  const setRawText = (val: string) => {
+    setRawTextState(val);
+    patchFindSession({ rawText: val });
+  };
+  const setAsking = (val: boolean) => {
+    setAskingState(val);
+    patchFindSession({ asking: val });
+  };
+  const setAskError = (val: string | null) => {
+    setAskErrorState(val);
+    patchFindSession({ error: val });
+  };
+  const setFresh = (val: FindResult | null) => {
+    setFreshState(val);
+    patchFindSession({ fresh: val });
+  };
+  const setStored = (val: CandidateList | null) => {
+    setStoredState(val);
+    patchFindSession({ stored: val });
+  };
 
   const [verdicting, setVerdicting] = useState(false);
   const [verdictError, setVerdictError] = useState<string | null>(null);
@@ -114,15 +145,27 @@ export default function CandidatesPage() {
   }
 
   async function ask(text: string, clarAns: string | null) {
+    // 等待期间不清旧结果——最坏要等几分钟，界面不能变白（2026-09-26 走查）
+    const previousClarify = fresh?.clarify ?? null;
     setAsking(true);
     setAskError(null);
-    setFresh(null);
     try {
       const found = await findCandidates(
         text,
         planChoice === "" ? undefined : Number(planChoice),
         clarAns
       );
+      pushFindRound({
+        requestText: text,
+        clarifyAnswered:
+          clarAns && previousClarify
+            ? { question: previousClarify.question, answer: clarAns }
+            : null,
+        recommended: found.recommended_start ?? null,
+        count: found.candidates.length,
+        shape: found.shape,
+      });
+      setHistory([...getFindSession().history]);
       setFresh(found);
       setStored(null);
       setClarifyAnswer("");
@@ -305,6 +348,46 @@ export default function CandidatesPage() {
                   新计划已经建好了 (计划 #{freshPlanId})，落点已选中它，再点一次「确认归入」即可。
                 </div>
               )}
+            </div>
+          )}
+
+          {asking && (
+            <div className="shimmer bg-surface2/40 border border-white/[0.06] rounded-xl p-4 mb-6 text-[13px] text-white/60">
+              正在找候选…通常 20–30 秒，最坏几分钟。上一轮结果与已答的追问都还在下面，切走再回来也不会丢。
+            </div>
+          )}
+
+          {history.length > 0 && (
+            <div className="mb-8 flex flex-col gap-2">
+              <div className="text-[11px] uppercase tracking-widest font-semibold text-white/[0.35]">
+                历史轮次（新在上）
+              </div>
+              {history.map((round, index) => (
+                <div
+                  key={index}
+                  className="text-[12px] text-white/40 leading-relaxed border-l-2 border-white/[0.08] pl-3"
+                >
+                  第 {history.length - index} 轮 ·〈
+                  {round.requestText.slice(0, 36)}
+                  {round.requestText.length > 36 ? "…" : ""}〉
+                  {round.clarifyAnswered && (
+                    <>
+                      {" "}
+                      · 追问「{round.clarifyAnswered.question.slice(0, 22)}
+                      {round.clarifyAnswered.question.length > 22 ? "…" : ""}」答：
+                      {round.clarifyAnswered.answer.slice(0, 16)}
+                      {round.clarifyAnswered.answer.length > 16 ? "…" : ""}
+                    </>
+                  )}
+                  {round.recommended && (
+                    <>
+                      {" "}
+                      · 推荐「{round.recommended.slice(0, 18)}
+                      {round.recommended.length > 18 ? "…" : ""}」（{round.count} 条候选）
+                    </>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
