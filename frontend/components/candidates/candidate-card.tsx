@@ -50,6 +50,7 @@ export function CandidateCard({
   setAdoptingId: (id: number | null) => void;
   onVerdict: (id: number, accept: boolean, reason?: string, planId?: number) => void;
   onAdoptIntoNewPlan: (id: number, title: string, goal: string) => void;
+  setChattingId: (id: number | null) => void;
 }) {
   const isRowPath = row.shape === "path";
   const [expanded, setExpanded] = useState(row.isRecommended || isRowPath || row.status === "proposed");
