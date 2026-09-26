@@ -223,6 +223,7 @@ function QuestionCard({
         status={answered ? "answered" : "pending"}
         result={answered ? "已回答——回答在下面那句" : undefined}
         submitLabel="提交回答"
+        className="border border-white/[0.06] bg-[#131316] shadow-[0_8px_32px_rgba(0,0,0,0.45)]"
         onSubmit={(answers) => onAnswer(composeAnswer(questions, answers))}
       />
     </div>

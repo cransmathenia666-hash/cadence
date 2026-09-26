@@ -110,7 +110,7 @@ function QuestionOptions({
                       : answer.selected.filter((value) => value !== option.value),
                   })
                 }
-                className="min-h-9 rounded-lg px-1.5 py-1"
+                className="min-h-9 rounded-lg px-1.5 py-1 transition-colors hover:bg-white/[0.04]"
               />
             ))}
           </div>
@@ -129,7 +129,7 @@ function QuestionOptions({
                 value={option.value}
                 label={option.label}
                 disabled={disabled || option.disabled}
-                className="min-h-9 rounded-lg px-1.5 py-1"
+                className="min-h-9 w-full rounded-lg px-1.5 py-1 transition-colors hover:bg-white/[0.04]"
               />
             ))}
           </RadioGroup>
