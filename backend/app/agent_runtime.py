@@ -114,11 +114,14 @@ class Runbook:
 
 @dataclass
 class Outcome:
-    """跑成的那一轮：人话 + （最多）一条建议 + 现场。"""
+    """跑成的那一轮：人话 + （最多）一条建议 + 可选的结构化追问 + 现场。"""
 
     reply: str
     suggestion: dict[str, Any] | None
     runbook: Runbook
+    # 验收器带回的额外 payload（`dialogue._check_reply` 的问题数组，2026-09-26）。
+    # 旧的三元组调用方不带它，默认 None——循环这一侧只透传，不解释语义。
+    questions: list[dict[str, Any]] | None = None
 
 
 class ToolCall(BaseModel):
@@ -134,10 +137,11 @@ class ToolRequest(BaseModel):
     tool_calls: list[ToolCall] = Field(min_length=1)
 
 
-# 最终输出的验收器：接原始文本，给（人话，要落库的建议 payload 或 None，不合格原因或 None）。
-# 由调用方给（`dialogue._check_reply`）——信封里 `suggestion` 那一半的语义归它管，
-# 这个模块只管「循环怎么转、什么时候停」。
-FinalCheck = Callable[[str], tuple[str | None, dict[str, Any] | None, str | None]]
+# 最终输出的验收器：接原始文本，给（人话，要落库的建议 payload 或 None，不合格原因或 None，
+# 以及可选的结构化追问——第四位给不给都行，缺了当 None）。
+# 由调用方给（`dialogue._check_reply`）——信封里 `suggestion` 与 `questions` 那两半的语义
+# 归它管，这个模块只管「循环怎么转、什么时候停」。
+FinalCheck = Callable[[str], "tuple[Any, ...]"]
 
 # 散文兜底验收器：模型 slipped 成纯散文（不带 JSON 壳）时接原始文本、给那段人话；
 # 「这不是散文」就给 None。由调用方给（`dialogue._prose_reply`）。
@@ -209,7 +213,9 @@ def run(
 
         asked_for_tools = False
         if problem is None:
-            reply, payload, problem = check_final(raw)
+            result = check_final(raw)
+            reply, payload, problem = result[0], result[1], result[2]
+            questions = result[3] if len(result) > 3 else None
             if problem is None:
                 runbook.status = STATUS_OK
                 runbook.stop_reason = (
@@ -218,7 +224,9 @@ def run(
                 )
                 if reply is None:  # 理论上到不了：验收通过却没有拿到人话
                     raise AgentStop("内部状态异常：验收通过却没有拿到人话", runbook)
-                return Outcome(reply=reply, suggestion=payload, runbook=runbook)
+                return Outcome(
+                    reply=reply, suggestion=payload, runbook=runbook, questions=questions
+                )
 
         # 不合格（含 tool_calls 写成别的样子这种形状错）：先看散文兜底，再带原因重说一次。
         # 兜底**只在已经重试过一次之后**生效：第一次仍严格判不合格（严格才是常态，

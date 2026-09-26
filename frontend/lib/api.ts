@@ -1194,8 +1194,23 @@ export type AgentRun = {
   tools: AgentToolUse[];
 };
 
+/**
+ * 一轮回话里带出的结构化追问（2026-09-26，工作台问答卡）。
+ *
+ * `options` 为空 = 自由填写题（界面给输入框）；给选项时 2–4 个，`multiple` 表示可多选。
+ * 后端已清过形状：空标题 / 空白选项 / 只有一个选项的都到不了前端。
+ */
+export type DialogueQuestion = {
+  title: string;
+  description?: string | null;
+  options: string[];
+  multiple: boolean;
+  allow_custom: boolean;
+};
+
 /** 对话里的一条消息。 */
 export type DialogueMessage = {
+  id: number;
   role: string;
   content: string;
   created_at: string;
@@ -1203,6 +1218,8 @@ export type DialogueMessage = {
   suggestion: DialogueSuggestion | null;
   /** 这一轮的运行账（决策 40）；失败的那一轮挂在**你**那条消息上，其余在 `null`。 */
   run: AgentRun | null;
+  /** 助手这一轮的结构化追问（没问就是 `null`）——界面渲染成问答卡。 */
+  questions: DialogueQuestion[] | null;
 };
 
 export type PlanDialogueView = {
@@ -1226,6 +1243,8 @@ export type DialogueTurn = {
   plan_id: number;
   reply: string;
   suggestion: DialogueSuggestion | null;
+  /** 这一轮带出的结构化追问（没问就是 `null`）。 */
+  questions: DialogueQuestion[] | null;
   /** 建议落成的那条提案 id（没有建议时为 `null`）。 */
   proposal_id: number | null;
   turns_used: number;

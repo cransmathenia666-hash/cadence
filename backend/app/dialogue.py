@@ -23,7 +23,9 @@
   去卡，真正要防的是「代码写出死循环」——而这里每一次都由你手点一句才动一次，没有循环风险。
 
 **输出是信封**（T31 起）：`{"reply": "人话", "suggestion": null 或一条建议}`；要读资料时
-换成 `{"tool_calls": [{"name": ..., "args": {}}]}`。库里仍只存 `reply` 那一段人话——
+换成 `{"tool_calls": [{"name": ..., "args": {}}]}`。2026-09-26 起回话信封还可以带
+`questions`（结构化追问数组）：需要他拍板或补充事实时，把要问的做成问答卡而不是散文。
+库里仍只存 `reply` 那一段人话（追问另存 `plan_dialogue.questions` 一列）——
 历史拼回上下文与 6000 字符截断的口径一行不改。**回话出口另有一道兜底**（2026-09-21 走查
 整改第 2 条）：带原因重试一次之后**仍然是纯散文**的，就把那段散文当回话收下、建议记为空
 （「要读资料」与「建议」两处仍严格——它们要真去查表、真去落提案）。提示词因此拆成两段：
@@ -103,7 +105,7 @@ def messages_of(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
     """这段对话的全部消息。`id` 也要取——建议与提案就是靠它关联的（决策 39）。"""
     return list(
         conn.execute(
-            "SELECT id, role, content, created_at FROM plan_dialogue"
+            "SELECT id, role, content, questions, created_at FROM plan_dialogue"
             " WHERE plan_id = ? ORDER BY id",
             (plan_id,),
         ).fetchall()
@@ -119,15 +121,30 @@ def turns_used(conn: sqlite3.Connection, plan_id: int) -> int:
     return int(row["n"])
 
 
-def _record(conn: sqlite3.Connection, plan_id: int, role: str, content: str) -> int:
+def _record(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    role: str,
+    content: str,
+    questions: list[dict[str, Any]] | None = None,
+) -> int:
     """追加一句，返回它的行号。这张表是追加式日志、不经台账（同 learning_request 的先例）。
 
     返回行号是因为 `plan_change` 提案要记着「这条建议是从哪一句里冒出来的」
     （payload 里的 `dialogue_id`）——界面据此把确认条挂在那条消息下面。
+    助手这轮要是带了结构化追问（2026-09-26），随行存成 JSON——刷新页面之后
+    问答卡还要能渲染出来。
     """
     cursor = conn.execute(
-        "INSERT INTO plan_dialogue (plan_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-        (plan_id, role, content, now_iso()),
+        "INSERT INTO plan_dialogue (plan_id, role, content, questions, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (
+            plan_id,
+            role,
+            content,
+            None if questions is None else json.dumps(questions, ensure_ascii=False),
+            now_iso(),
+        ),
     )
     conn.commit()
     return int(cursor.lastrowid)
@@ -162,10 +179,16 @@ CONTRACT_PROMPT = (
     "【输出契约】每一轮你只输出一个 JSON 对象，两种形状选一种：\n"
     "① 要读资料：" '{"tool_calls": [{"name": "read_current_plan", "args": {}}]}'
     "——一次可以要好几样，能一次读完的别分几轮读；读不出结论就直说还缺什么，不要猜。\n"
-    "② 直接回话：" '{"reply": "你要说的话", "suggestion": null 或一条建议}'
+    "② 直接回话：" '{"reply": "你要说的话", "suggestion": null 或一条建议, "questions": 可选的问题数组}'
     "——不要解释、不要客套、不要 Markdown 代码块。\n"
+    "- questions（可选）：需要他**拍板或补充事实**时才带，把要问的做成他能点选的问答卡："
+    '[{"title": "问题一句话", "options": ["选项甲", "选项乙"], "multiple": false, '
+    '"allow_custom": true}]。最多 3 问；每问选项 2–4 个；要他自由发挥的那问就别给 '
+    "options（界面给输入框）；multiple=true 表示可多选。不需要问就整个别出现这个字段——"
+    "别为问而问。\n"
     "- suggestion：**一轮最多一条**，只在「改哪里、改成什么、为什么」都说得具体时才提；"
-    "拿不准就在 reply 里先问一句、suggestion 给 null。只给点了名的节点编号——"
+    "拿不准就在 reply 里先问一句（要点选的就做成 questions 问答卡）、suggestion 给 null。"
+    "只给点了名的节点编号——"
     "编号得是你从读到的资料里看到的 #号，不要自己编：\n"
     '   改节点 {"action": "update_node", "node_id": 12, "fields": {"due_date": "2026-10-08"}, '
     '"why": "为什么该这么改"}——fields 里只能出现 title / deliverable / due_date，只写要改的那几样；'
@@ -207,15 +230,34 @@ EXTRACT_SYSTEM_PROMPT = (
 
 # ---------- 看 / 聊 ----------
 
+MAX_QUESTIONS = 3
+MAX_QUESTION_OPTIONS = 4
+
+
+class Question(BaseModel):
+    """一个要点选（或填写）的问题：界面把它渲染成问答卡。
+
+    `options` 为空就是自由填写题（界面给输入框）；给选项时 2–4 个、可多选由 `multiple` 说。
+    """
+
+    title: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=200)
+    options: list[str] = Field(default_factory=list, max_length=MAX_QUESTION_OPTIONS)
+    multiple: bool = False
+    allow_custom: bool = True
+
+
 class Reply(BaseModel):
     """这一轮的回话：人话（存进库里）+ **最多一条**可执行建议（决策 39）。
 
     `suggestion` 是**单个对象或 null**、不是数组：「一轮最多一条」从形状上就成立，
-    不用靠字数限制去数。
+    不用靠字数限制去数。`questions`（2026-09-26）：要他拍板或补充事实时带上的
+    结构化追问，最多 3 问；不需要就整个不出现。
     """
 
     reply: str = Field(min_length=1)
     suggestion: plan_change.Suggestion | None = None
+    questions: list[Question] | None = Field(default=None, max_length=MAX_QUESTIONS)
 
 
 def _details(error: ValidationError) -> str:
@@ -225,14 +267,50 @@ def _details(error: ValidationError) -> str:
     )
 
 
+def _clean_questions(
+    questions: list[Question] | None,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """把模型给的问题数组清成要落库的形状；有毛病就给不合格原因。
+
+    空标题、空白选项、只有一个选项的「选择题」（不如直接问）都拦下；
+    没有选项的问题强制当自由填写题（multiple 对它没有意义）。
+    """
+    if not questions:
+        return None, None
+    cleaned: list[dict[str, Any]] = []
+    for index, question in enumerate(questions, start=1):
+        title = question.title.strip()
+        if not title:
+            return None, f"第 {index} 问的 title 是空的"
+        options = [option.strip() for option in question.options]
+        if any(not option for option in options):
+            return None, f"第 {index} 问有空白的选项"
+        if len(options) == 1:
+            return None, f"第 {index} 问只给了一个选项——要么给 2–4 个，要么别给 options"
+        if len(set(options)) != len(options):
+            return None, f"第 {index} 问的选项有重复"
+        cleaned.append(
+            {
+                "title": title,
+                "description": (question.description or "").strip() or None,
+                "options": options,
+                "multiple": bool(options) and question.multiple,
+                "allow_custom": question.allow_custom,
+            }
+        )
+    return cleaned, None
+
+
 def _check_reply(
     conn: sqlite3.Connection, plan_id: int, text: str
-) -> tuple[str | None, dict[str, Any] | None, str | None]:
-    """验收这一轮：给出（人话，要落库的建议 payload 或 None，不合格原因或 None）。
+) -> tuple[Any, ...]:
+    """验收这一轮：给出（人话，要落库的建议 payload 或 None，不合格原因或 None，
+    结构化追问或 None）。
 
     三件事一起判——输出是不是信封、人话有没有、建议（如果有）站不站得住。建议里
     「点名的节点不存在 / 不属于这个计划 / 改前＝改后 / 名字撞车」这类**批不了**的毛病
     也在这里拦下：宁可不提，也不落一条等你点了「确认」才报错的提案（决策 39）。
+    追问（如果有）在这里清成落库形状——空标题、空白选项这类毛病同样宁可不问。
     """
     data = advisor.extract_json(text)
     if data is None:
@@ -246,13 +324,18 @@ def _check_reply(
     said = reply.reply.strip()
     if not said:
         return None, None, "reply 是空的——这一轮等于一个字都没说"
+
+    questions, question_problem = _clean_questions(reply.questions)
+    if question_problem is not None:
+        return None, None, f"questions 不合格（{question_problem}）"
+
     if reply.suggestion is None:
-        return said, None, None  # 没有建议就是纯聊天，什么都不落
+        return said, None, None, questions  # 没有建议就是纯聊天，什么都不落
 
     payload, problem = plan_change.check(conn, plan_id, reply.suggestion)
     if problem is not None:
         return None, None, f"建议不合格（{problem}）"
-    return said, payload, None
+    return said, payload, None, questions
 
 
 def _prose_reply(text: str) -> str | None:
@@ -363,29 +446,46 @@ def _record_run(
     conn.commit()
 
 
+def _questions_of(row: sqlite3.Row) -> list[dict[str, Any]] | None:
+    """把一行消息里的追问 JSON 解回来。坏了就当没问过——不能让整个页面打不开。"""
+    raw = row["questions"] if "questions" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        questions = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(questions, list):
+        return None
+    return [question for question in questions if isinstance(question, dict)] or None
+
+
 def view(conn: sqlite3.Connection, plan_id: int) -> dict[str, Any]:
     """看这段对话：计划、历史、聊了几句、能不能提炼档案提案。
 
-    每条助手消息另带两个可选字段：`suggestion`（T31：它那一轮提的建议与那条提案，
-    `{proposal_id, summary, status}` 或 `None`）与 `run`（2026-09-20 决策 40：那一轮的
+    每条助手消息另带三个可选字段：`suggestion`（T31：它那一轮提的建议与那条提案，
+    `{proposal_id, summary, status}` 或 `None`）、`run`（2026-09-20 决策 40：那一轮的
     运行账——读了哪几样、调了几次模型、为什么停下；界面据此渲染「本轮依据」，
-    失败的运行挂在你那一句上）。
+    失败的运行挂在你那一句上）与 `questions`（2026-09-26：它那轮的结构化追问，
+    界面渲染成问答卡）。
     """
     plan_of(conn, plan_id)
     rows = messages_of(conn, plan_id)
     used = turns_used(conn, plan_id)
     landed = _suggestions(conn, plan_id)
     runs = _runs(conn, plan_id)
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        message = dict(row)
+        questions = _questions_of(row)
+        message.pop("questions", None)
+        message["questions"] = questions
+        message["suggestion"] = landed.get(int(row["id"]))
+        message["run"] = runs.get(int(row["id"]))
+        messages.append(message)
     return {
         "plan_id": plan_id,
-        "messages": [
-            {
-                **dict(row),
-                "suggestion": landed.get(int(row["id"])),
-                "run": runs.get(int(row["id"])),
-            }
-            for row in rows
-        ],
+        "messages": messages,
         "turns_used": used,
         "char_limit": DIALOGUE_CHAR_LIMIT,
         # 至少聊过一句才有东西可提炼（与「蓝图要先聊过一轮」同一条纪律）
@@ -452,7 +552,7 @@ def say(
         )
         raise
 
-    reply_id = _record(conn, plan_id, "assistant", outcome.reply)
+    reply_id = _record(conn, plan_id, "assistant", outcome.reply, questions=outcome.questions)
     suggestion = _land_suggestion(conn, plan_id, reply_id, outcome.suggestion)
     _record_run(conn, plan_id, reply_id, outcome.runbook)
     run = outcome.runbook.as_dict()
@@ -460,6 +560,8 @@ def say(
         "plan_id": plan_id,
         "reply": outcome.reply,
         "suggestion": suggestion,
+        # 2026-09-26：这一轮带出的结构化追问（界面渲染成问答卡）；没问就是 null
+        "questions": outcome.questions,
         "proposal_id": None if suggestion is None else int(suggestion["proposal_id"]),
         "turns_used": turns_used(conn, plan_id),
         "calls": outcome.runbook.model_calls,

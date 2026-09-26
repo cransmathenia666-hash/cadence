@@ -81,6 +81,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 没有这一列就算不出「这个计划里刚删过一条记忆」——记忆变化摘要要靠它。
     # 可空：加列之前删掉的那些没有归属。
     ("memory_deletion", "plan_id", "INTEGER"),
+    # 2026-09-26（工作台问答卡）：计划对话助手这轮带出的结构化追问（JSON 数组）。
+    # 可空：不问就不存；历史消息刷新后还要能渲染成问答卡，所以必须落库。
+    ("plan_dialogue", "questions", "TEXT"),
 )
 
 

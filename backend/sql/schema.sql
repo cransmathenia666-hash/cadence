@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS plan_dialogue (
   plan_id    INTEGER NOT NULL,
   role       TEXT    NOT NULL,   -- user / assistant
   content    TEXT    NOT NULL,   -- 用户原话；助手那侧存它的原话（人话，不是 JSON）
+  questions  TEXT,               -- 助手这轮带出的结构化追问（JSON 数组，界面渲染成问答卡）；可空
   created_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_dialogue_thread ON plan_dialogue (plan_id, id);

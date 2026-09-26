@@ -1,6 +1,19 @@
-import { PlanDialogueView, decideProposal, ApiError } from "@/lib/api";
+import {
+  PlanDialogueView,
+  DialogueQuestion,
+  decideProposal,
+  ApiError,
+} from "@/lib/api";
 import { ChevronRight, Check, Database, GitPullRequest, Sparkles } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { MessageBubble, MessageBubbleContent } from "@/components/agents/message-bubble";
+import { StreamingResponse } from "@/components/agents/streaming-response";
+import {
+  ApprovalCard,
+  type ApprovalCardAnswers,
+  type ApprovalCardQuestion,
+} from "@/components/agents/approval-card";
+import { cn } from "@/lib/utils";
 
 function SuggestionCard({
   suggestion,
@@ -32,7 +45,7 @@ function SuggestionCard({
   const isPending = suggestion.status === "pending";
 
   return (
-    <div className="card-border-gradient p-5 shadow-card-glow relative overflow-hidden group/card mt-4">
+    <div className="card-border-gradient p-5 shadow-card-glow relative overflow-hidden group/card mt-2">
       {isPending && (
         <div className="shimmer absolute inset-0 pointer-events-none opacity-40"></div>
       )}
@@ -112,16 +125,124 @@ function SuggestionCard({
   );
 }
 
+// 回话的流式展开：一轮回执到了以后按段逐步放出，放完落成「已完成」。
+// 历史消息不走动画——只有这一轮刚到的回话才 animate。
+function ReplyStream({ content, animate }: { content: string; animate: boolean }) {
+  const paragraphs = useMemo(
+    () => content.split("\n\n").filter((part) => part.trim().length > 0),
+    [content],
+  );
+  const [shown, setShown] = useState(0);
+
+  useEffect(() => {
+    if (!animate) return;
+    const timer = window.setInterval(() => {
+      setShown((current) => {
+        if (current >= paragraphs.length) {
+          window.clearInterval(timer);
+          return current;
+        }
+        return current + 1;
+      });
+    }, 280);
+    return () => window.clearInterval(timer);
+  }, [animate, paragraphs]);
+
+  const visible = animate ? shown : paragraphs.length;
+  const done = visible >= paragraphs.length;
+
+  return (
+    <StreamingResponse
+      status={done ? "complete" : "streaming"}
+      copyText={content}
+      announce={false}
+      showActions={false}
+      contentClassName="text-[15px] leading-[1.7] [&_p]:text-primary/80"
+    >
+      {paragraphs.slice(0, visible).map((paragraph, index) => (
+        <p key={index}>{paragraph}</p>
+      ))}
+    </StreamingResponse>
+  );
+}
+
+// 把问答卡的作答拼成下一句话发出去：每问一行问题 + 一行回答。
+function composeAnswer(
+  questions: DialogueQuestion[],
+  answers: ApprovalCardAnswers,
+): string {
+  return questions
+    .map((question, index) => {
+      const answer = answers[`q-${index}`] ?? { selected: [], custom: "" };
+      const chosen = answer.selected.join("、");
+      const custom = (answer.custom ?? "").trim();
+      const body = [chosen, custom].filter(Boolean).join("；");
+      return `${question.title}\n答：${body || "（这题先跳过）"}`;
+    })
+    .join("\n");
+}
+
+function AssistantHeader() {
+  return (
+    <div className="flex items-center gap-3 mb-1">
+      <div className="w-7 h-7 rounded-full bg-white/[0.08] border border-white/10 flex items-center justify-center shadow-[0_0_16px_rgba(255,255,255,0.12)] backdrop-blur-sm">
+        <Sparkles className="w-4 h-4 text-white/90" />
+      </div>
+      <span className="text-[14px] font-semibold text-primary/90 tracking-wide">
+        cadence
+      </span>
+    </div>
+  );
+}
+
+// cadence 这轮问出的结构化追问 → 问答卡。回答过（后面跟着你的消息）就收成已答状态。
+function QuestionCard({
+  questions,
+  answered,
+  onAnswer,
+}: {
+  questions: DialogueQuestion[];
+  answered: boolean;
+  onAnswer: (text: string) => void;
+}) {
+  const items: ApprovalCardQuestion[] = questions.map((question, index) => ({
+    id: `q-${index}`,
+    title: question.title,
+    description: question.description ?? undefined,
+    options: question.options.map((option) => ({ value: option, label: option })),
+    multiple: question.multiple,
+    allowCustom: question.allow_custom !== false,
+    customPlaceholder: "还有别的想法…写在这里",
+  }));
+
+  return (
+    <div className={cn("mt-2 w-full max-w-[520px]", "pl-10")}>
+      <ApprovalCard
+        title="cadence 想先问清楚"
+        questions={items}
+        status={answered ? "answered" : "pending"}
+        result={answered ? "已回答——回答在下面那句" : undefined}
+        submitLabel="提交回答"
+        onSubmit={(answers) => onAnswer(composeAnswer(questions, answers))}
+      />
+    </div>
+  );
+}
+
 export function ChatFlow({
   dialogue,
+  animateId,
   onRefresh,
+  onAnswer,
 }: {
   dialogue: PlanDialogueView | null;
+  animateId: number | null;
   onRefresh: () => void;
+  onAnswer: (text: string) => void;
 }) {
   if (!dialogue || dialogue.messages.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center h-full">
+      <div className="flex-1 flex flex-col items-center justify-center h-full py-24">
         <div className="text-muted/50 mb-4 flex items-center gap-2 text-sm">
           <Sparkles className="w-4 h-4" />
           <span>没有任何对话记录</span>
@@ -146,33 +267,42 @@ export function ChatFlow({
       </div>
 
       {dialogue.messages.map((msg, idx) => {
+        // 这条之前已经有过你说的话 → 问答卡已经答过了（回答就是那句消息）
+        const answered =
+          msg.questions !== null &&
+          dialogue.messages.slice(idx + 1).some((later) => later.role === "user");
+
         if (msg.role === "user") {
           return (
-            <div key={idx} className="flex justify-end w-full">
-              <div className="max-w-[80%] bg-white rounded-full px-5 py-3 text-[15px] leading-relaxed text-black shadow-[0_4px_24px_rgba(255,255,255,0.07)]">
-                {msg.content}
-              </div>
+            <div
+              key={msg.id}
+              data-slot="message"
+              data-from="user"
+              className="flex justify-end w-full"
+            >
+              <MessageBubble variant="solid" align="end" className="max-w-[80%]">
+                <MessageBubbleContent
+                  data-slot="message-content"
+                  className="rounded-full px-5 py-3 text-[15px] leading-relaxed shadow-[0_4px_24px_rgba(255,255,255,0.07)]"
+                >
+                  {msg.content}
+                </MessageBubbleContent>
+              </MessageBubble>
             </div>
           );
         }
 
         return (
-          <div key={idx} className="flex flex-col gap-3 w-full max-w-[90%]">
-            <div className="flex items-center gap-3 mb-1">
-              <div className="w-7 h-7 rounded-full bg-white/[0.08] border border-white/10 flex items-center justify-center shadow-[0_0_16px_rgba(255,255,255,0.12)] backdrop-blur-sm">
-                <Sparkles className="w-4 h-4 text-white/90" />
-              </div>
-              <span className="text-[14px] font-semibold text-primary/90 tracking-wide">
-                cadence
-              </span>
-            </div>
+          <div
+            key={msg.id}
+            data-slot="message"
+            data-from="assistant"
+            className="flex flex-col gap-2 w-full max-w-[92%]"
+          >
+            <AssistantHeader />
 
-            <div className="text-[15px] leading-[1.7] text-muted/90 pl-10 space-y-4">
-              {msg.content.split("\n\n").map((p, i) => (
-                <p key={i} className="text-primary/80">
-                  {p}
-                </p>
-              ))}
+            <div className="pl-10" data-slot="message-content">
+              <ReplyStream content={msg.content} animate={msg.id === animateId} />
             </div>
 
             {msg.run && (
@@ -207,6 +337,14 @@ export function ChatFlow({
                   onDecided={onRefresh}
                 />
               </div>
+            )}
+
+            {msg.questions && msg.questions.length > 0 && (
+              <QuestionCard
+                questions={msg.questions}
+                answered={answered}
+                onAnswer={onAnswer}
+              />
             )}
           </div>
         );

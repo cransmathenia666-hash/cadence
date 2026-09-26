@@ -40,12 +40,12 @@ export type {
 const EMPTY_ANSWER: ApprovalCardAnswer = { selected: [], custom: "" };
 
 function getStatusLabel(status: ApprovalCardStatus) {
-  if (status === "submitting") return "Submitting";
-  if (status === "approved") return "Approved";
-  if (status === "rejected") return "Rejected";
-  if (status === "changes-requested") return "Changes requested";
-  if (status === "answered") return "Response submitted";
-  return "Input required";
+  if (status === "submitting") return "提交中";
+  if (status === "approved") return "已批准";
+  if (status === "rejected") return "已驳回";
+  if (status === "changes-requested") return "要求修改";
+  if (status === "answered") return "已回答";
+  return "等你输入";
 }
 
 function getStatusClass(status: ApprovalCardStatus) {

@@ -94,9 +94,12 @@ def extraction(*items: dict) -> str:
     return json.dumps({"items": list(items)}, ensure_ascii=False)
 
 
-def envelope(reply: str = "嗯", suggestion: dict | None = None) -> str:
-    """模型的输出信封（T31 起）：人话 + 最多一条建议。"""
-    return json.dumps({"reply": reply, "suggestion": suggestion}, ensure_ascii=False)
+def envelope(reply: str = "嗯", suggestion: dict | None = None, questions: list | None = None) -> str:
+    """模型的输出信封（T31 起）：人话 + 最多一条建议；2026-09-26 起还可带结构化追问。"""
+    payload: dict = {"reply": reply, "suggestion": suggestion}
+    if questions is not None:
+        payload["questions"] = questions
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def ask(*names: str, **args) -> str:
@@ -1086,3 +1089,81 @@ def test_the_lineage_is_truncated_from_the_earliest(conn):
 
     assert "AAA" in facts  # 最新那一大段留着（它才是「我刚说的」）
     assert "我每周大概能投入 6 小时" not in facts  # 更早的那些被截掉
+
+
+# ---------- 结构化追问（2026-09-26：工作台问答卡） ----------
+
+def test_a_reply_can_carry_questions_and_they_survive_the_view(conn):
+    """回话信封可以带结构化追问：回执与 view 都要带出来，库里存的仍是人话。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    questions = [
+        {"title": "先集中哪个？", "options": ["补基础", "直接做项目"], "multiple": False,
+         "allow_custom": True},
+        {"title": "每周能投几小时？", "options": [], "multiple": False, "allow_custom": True},
+    ]
+    transport = ScriptedTransport(envelope("先回我这两个问题", questions=questions))
+
+    done = dialogue.say(conn, plan_id, "接下来怎么走", transport=transport)
+
+    assert done["questions"] == [
+        {"title": "先集中哪个？", "description": None, "options": ["补基础", "直接做项目"],
+         "multiple": False, "allow_custom": True},
+        {"title": "每周能投几小时？", "description": None, "options": [],
+         "multiple": False, "allow_custom": True},
+    ]
+    rows = dialogue.messages_of(conn, plan_id)
+    assert rows[1]["content"] == "先回我这两个问题"  # 库里存的仍是人话，不是 JSON 壳
+    view = dialogue.view(conn, plan_id)
+    carried = view["messages"][1]["questions"]
+    assert carried is not None and len(carried) == 2
+    assert carried[0]["title"] == "先集中哪个？"
+    assert carried[1]["options"] == []  # 没有选项 = 自由填写题
+
+
+def test_questions_get_normalized_before_landing(conn):
+    """清形状：自由填写题的 multiple 没有意义，强制归成 false；description 空白归 None。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    questions = [{"title": "卡在哪一步？", "options": [], "multiple": True,
+                  "allow_custom": True, "description": "  "}]
+    transport = ScriptedTransport(envelope("说说现状", questions=questions))
+
+    done = dialogue.say(conn, plan_id, "我好像卡住了", transport=transport)
+
+    assert done["questions"][0]["multiple"] is False
+    assert done["questions"][0]["description"] is None
+
+
+def test_bad_questions_are_unqualified_and_retried(conn):
+    """只有一个选项的「选择题」判不合格、带原因重说一次；重说合格才收下。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    bad = [{"title": "先做哪个？", "options": ["补基础"], "multiple": False}]
+    good = [{"title": "先做哪个？", "options": ["补基础", "做项目"], "multiple": False}]
+    transport = ScriptedTransport(envelope("先回我", questions=bad), envelope("先回我", questions=good))
+
+    done = dialogue.say(conn, plan_id, "怎么走", transport=transport)
+
+    assert done["calls"] == 2
+    assert done["questions"] == [
+        {"title": "先做哪个？", "description": None, "options": ["补基础", "做项目"],
+         "multiple": False, "allow_custom": True},
+    ]
+    assert "questions 不合格" in facts_of(transport)  # 重说时带了原因
+
+
+def test_a_reply_without_questions_stays_question_free(conn):
+    """不问就不带：questions 是 None，老形状的输出一个字段都没多。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(envelope("继续就行"))
+
+    done = dialogue.say(conn, plan_id, "接着聊", transport=transport)
+
+    assert done["questions"] is None
+    assert dialogue.view(conn, plan_id)["messages"][1]["questions"] is None
