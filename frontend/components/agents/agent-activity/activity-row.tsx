@@ -192,7 +192,7 @@ function ToolRow({ item }: { item: AgentActivityTool }) {
       {typeof item.additions === "number" || typeof item.deletions === "number" ? (
         <span className="flex shrink-0 items-center gap-2 font-mono tabular-nums">
           {typeof item.additions === "number" ? (
-            <span className="text-emerald-500">+{item.additions}</span>
+            <span className="text-green">+{item.additions}</span>
           ) : null}
           {typeof item.deletions === "number" ? (
             <span className="text-rose-500">−{item.deletions}</span>

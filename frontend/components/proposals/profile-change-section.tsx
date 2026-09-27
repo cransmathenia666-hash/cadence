@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react";
 import { type ProfileChangePayload, type Proposal } from "@/lib/api";
 import { CATEGORY_LABELS } from "./types";
 
@@ -20,10 +21,13 @@ export function ProfileChangeSection({ proposal }: { proposal: Proposal }) {
       </div>
 
       {payload.why && (
-        <div className="text-[12px] text-white/40">
-          <span className="text-white/30">提炼依据：</span>
-          {payload.why}
-        </div>
+        <details className="group cursor-pointer">
+          <summary className="inline-flex items-center gap-1.5 text-[12px] text-white/50 hover:text-white/60 transition-colors select-none">
+            <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+            提炼依据
+          </summary>
+          <div className="mt-1.5 text-[12px] text-white/50">{payload.why}</div>
+        </details>
       )}
     </div>
   );

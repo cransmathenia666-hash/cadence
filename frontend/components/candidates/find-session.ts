@@ -20,6 +20,11 @@ export type FindRound = {
   recommended: string | null;
   count: number;
   shape: string;
+  /**
+   * 那一轮「找」落库的回执 id（FindResult.request_id）。有它才能调 listCandidates
+   * 把那一轮的候选摆回左栏回看；功能上线前存的老轮次没有这个字段，保持纯文字不可点。
+   */
+  requestId: number | null;
 };
 
 type FindSession = {

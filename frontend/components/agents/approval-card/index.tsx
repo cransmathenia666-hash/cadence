@@ -50,7 +50,7 @@ function getStatusLabel(status: ApprovalCardStatus) {
 
 function getStatusClass(status: ApprovalCardStatus) {
   if (status === "approved" || status === "answered") {
-    return "text-emerald-600 dark:text-emerald-400";
+    return "text-green";
   }
   if (status === "rejected") return "text-rose-600 dark:text-rose-400";
   if (status === "changes-requested") {
@@ -67,7 +67,7 @@ function getStatusBadgeClass(status: ApprovalCardStatus) {
     return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400";
   }
   if (status === "approved" || status === "answered") {
-    return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
+    return "border-green/25 bg-green/10 text-green";
   }
   return "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400";
 }

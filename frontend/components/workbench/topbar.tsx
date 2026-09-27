@@ -30,11 +30,14 @@ export function Topbar({ planName }: { planName?: string }) {
         </span>
         {displayTitle && (
           <>
-            <span className="text-white/20 mx-1">/</span>
+            <span className="text-white/50 mx-1">/</span>
             <span className="text-muted/80">{displayTitle}</span>
           </>
         )}
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)] mt-1 animate-pulse"></span>
+        <span
+          aria-hidden="true"
+          className="w-1.5 h-1.5 rounded-full bg-white/25 mt-1"
+        ></span>
       </div>
     </header>
   );

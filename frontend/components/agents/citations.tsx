@@ -19,6 +19,8 @@ export interface CitationItem {
   title: ReactNode;
   domain?: ReactNode;
   url?: string;
+  /** 本地资料没有 favicon 可取，给一枚语义图标替代 Globe2。 */
+  icon?: ReactNode;
 }
 
 export interface CitationsProps {
@@ -142,7 +144,16 @@ function CitationRow({
 }) {
   const content = (
     <>
-      <CitationFavicon url={citation.url} />
+      {citation.icon ? (
+        <span
+          aria-hidden="true"
+          className="grid size-5 shrink-0 place-items-center text-muted-foreground [&_svg]:size-3.5"
+        >
+          {citation.icon}
+        </span>
+      ) : (
+        <CitationFavicon url={citation.url} />
+      )}
       <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="truncate text-sm font-medium text-foreground/80 transition-colors group-hover/citation:text-foreground">
           {citation.title}
@@ -164,7 +175,7 @@ function CitationRow({
     </>
   );
   const className =
-    "group/citation flex items-center gap-2 rounded-md px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring";
+    "group/citation flex items-center gap-2 rounded-md px-1.5 py-1 outline-none transition-colors hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-ring";
   const id = citationTargetId(idPrefix, citation.id);
 
   return citation.url ? (

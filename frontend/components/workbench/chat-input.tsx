@@ -1,20 +1,30 @@
 "use client";
+// 形态参考 ui.halaska.com 的 Prompt input：输入区在上、工具栏行在下、键盘提示在框外下方。
+// 文案与发送都归上层管（问答卡的回答走同一条 send 路）。
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { ArrowUp, Loader2 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { SPRING_SWAP } from "@/lib/ease";
+import { cn } from "@/lib/utils";
 
-import { useRef, type KeyboardEvent } from "react";
-import { Paperclip, ArrowUp, Loader2 } from "lucide-react";
-
-// 纯输入框：文案与发送都归上层管（问答卡的回答走同一条 send 路）。
 export function ChatInput({
   value,
   onChange,
   onSend,
   sending,
+  toolbar,
+  note,
 }: {
   value: string;
   onChange: (text: string) => void;
   onSend: (text: string) => void;
   sending: boolean;
+  /** 工具栏行左侧插槽（提炼档案提案入口）。 */
+  toolbar?: ReactNode;
+  /** 输入框上方的回执行（提炼结果、错误等）。 */
+  note?: ReactNode;
 }) {
+  const reduce = useReducedMotion() ?? false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSend = () => {
@@ -26,6 +36,7 @@ export function ChatInput({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -33,20 +44,18 @@ export function ChatInput({
   };
 
   return (
-    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-4 px-4 md:px-12 z-20 pointer-events-none">
-      <div className="max-w-[56rem] mx-auto pointer-events-auto">
-        <div
-          className={`relative group input-glow bg-[#0a0a0c]/80 backdrop-blur-md rounded-2xl border ${
-            sending ? "border-white/10" : "border-white/[0.06]"
-          } flex items-end p-1.5 transition-all`}
-        >
-          <button
-            className="p-2 text-muted/40 hover:text-white/80 transition-colors shrink-0 mb-0.5 rounded-xl disabled:opacity-50"
-            disabled={sending}
-          >
-            <Paperclip className="w-5 h-5" />
-          </button>
+    <div className="absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-3 px-4 md:px-12 pointer-events-none">
+      <div className="w-full pointer-events-auto">
+        {note ? <div className="mb-1.5 px-1">{note}</div> : null}
 
+        <div
+          className={cn(
+            "relative rounded-[20px] border bg-[#0a0a0c]/85 backdrop-blur-md p-2 transition-colors",
+            sending
+              ? "border-white/10"
+              : "border-white/[0.06] focus-within:border-white/15",
+          )}
+        >
           <textarea
             ref={textareaRef}
             value={value}
@@ -57,28 +66,45 @@ export function ChatInput({
             }}
             onKeyDown={handleKeyDown}
             disabled={sending}
-            className="w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none text-[14px] text-primary placeholder-muted/30 py-2.5 max-h-[200px] min-h-[44px] overflow-hidden leading-relaxed disabled:opacity-50"
+            className="block w-full resize-none border-none bg-transparent px-2 py-1.5 text-[14px] leading-6 text-primary placeholder-muted/35 outline-none focus:ring-0 max-h-[160px] overflow-hidden disabled:opacity-50"
             rows={1}
-            placeholder={sending ? "cadence 正在思考..." : "回复 cadence..."}
-          ></textarea>
+            placeholder={
+              sending ? "cadence 正在思考..." : "回复 cadence..."
+            }
+          />
 
-          <button
-            onClick={handleSend}
-            disabled={!value.trim() || sending}
-            className="p-2 bg-white text-black rounded-xl hover:bg-gray-200 transition-colors shrink-0 mb-0.5 shadow-sm disabled:opacity-50 disabled:bg-gray-700 disabled:text-gray-400"
-          >
-            {sending ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <ArrowUp className="w-5 h-5" />
-            )}
-          </button>
+          <div className="mt-0.5 flex min-h-8 items-center gap-1">
+            {toolbar}
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!value.trim() || sending}
+              aria-label={sending ? "发送中" : "发送"}
+              className="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-white text-black transition-colors hover:bg-white/85 disabled:bg-white/15 disabled:text-white/45 disabled:opacity-100"
+            >
+              <AnimatePresence initial={false} mode="popLayout">
+                <motion.span
+                  key={sending ? "busy" : "send"}
+                  initial={reduce ? { opacity: 1 } : { opacity: 0, y: 3, scale: 0.8 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={reduce ? { opacity: 0 } : { opacity: 0, y: -3, scale: 0.8 }}
+                  transition={reduce ? { duration: 0 } : SPRING_SWAP}
+                  className="grid place-items-center"
+                >
+                  {sending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <ArrowUp className="size-4" />
+                  )}
+                </motion.span>
+              </AnimatePresence>
+            </button>
+          </div>
         </div>
-        <div className="text-center mt-2.5">
-          <p className="text-[11px] text-muted/30 font-medium tracking-wide">
-            cadence 可能会在执行前要求确认。Shift + Enter 换行
-          </p>
-        </div>
+
+        <p className="mt-1.5 hidden select-none text-center text-[11px] text-muted/40 sm:block">
+          按 Enter 键发送，按 Shift+Enter 键换行
+        </p>
       </div>
     </div>
   );

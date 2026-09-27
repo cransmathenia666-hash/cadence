@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react";
 import { type Proposal } from "@/lib/api";
 import { type MemoryChangePayload } from "./types";
 
@@ -54,7 +55,7 @@ export function MemoryChangeSection({ proposal }: { proposal: Proposal }) {
       {isSupersede ? (
         <div className="space-y-1.5 pl-3 border-l-2 border-purple-500/30">
           {payload.target_content && (
-            <div className="text-[13px] text-white/40 line-through">
+            <div className="text-[13px] text-white/50 line-through">
               原记忆：{payload.target_content}
             </div>
           )}
@@ -73,7 +74,7 @@ export function MemoryChangeSection({ proposal }: { proposal: Proposal }) {
       )}
 
       {/* 事实时间 / 复核时间 / 来源 */}
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-white/40 pt-1">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-white/50 pt-1">
         {payload.fact_time && (
           <div>
             事实时间：<span className="text-white/60">{payload.fact_time}</span>
@@ -92,10 +93,13 @@ export function MemoryChangeSection({ proposal }: { proposal: Proposal }) {
       </div>
 
       {payload.reason && (
-        <div className="text-[12px] text-white/40">
-          <span className="text-white/30">提炼理由：</span>
-          {payload.reason}
-        </div>
+        <details className="group cursor-pointer">
+          <summary className="inline-flex items-center gap-1.5 text-[12px] text-white/50 hover:text-white/60 transition-colors select-none">
+            <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+            提炼依据
+          </summary>
+          <div className="mt-1.5 text-[12px] text-white/50">{payload.reason}</div>
+        </details>
       )}
     </div>
   );

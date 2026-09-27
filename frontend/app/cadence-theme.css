@@ -47,6 +47,10 @@ html:root,
   --success-foreground: oklch(0.16 0.02 152);
   --warning: oklch(0.78 0.14 75);
   --warning-foreground: oklch(0.2 0.03 75);
+  /* 绿走语义令牌（绿=完成/来源）。bu-theme 的深色值锁在 .dark .bu-scope，全站没人挂 .bu-scope，
+     这里必须给根作用域一份同值，否则 text-green/bg-green 在库组件外全部解析失败。 */
+  --green: oklch(0.72 0.12 153.5);
+  --green-tint: oklch(0.72 0.12 153.5 / 0.12);
   --status-idle: var(--muted-foreground);
   --status-running: var(--primary);
   --status-success: var(--success);
@@ -234,9 +238,12 @@ textarea:focus-visible {
   outline: none;
   transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
-.memory-page .memory-input::placeholder { color: rgba(255, 255, 255, 0.28); }
+.memory-page .memory-input::placeholder { color: rgba(255, 255, 255, 0.42); }
 .memory-page .memory-input:hover { border-color: rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.055); }
 .memory-page .memory-input:focus { border-color: rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.06); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05); }
 .memory-page input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.5; }
 .memory-page details > summary { list-style: none; }
 .memory-page details > summary::-webkit-details-marker { display: none; }
+/* 记忆页的范围/类别选择器是工具栏，不再使用全站胶囊造型。 */
+.memory-page .relative > button { border-radius: 6px; }
+.memory-page .relative > div.absolute { border-radius: 10px; }

@@ -62,7 +62,7 @@ export function Sidebar({
       </div>
 
       <div className="px-5 mb-4 flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold text-muted/50 tracking-widest uppercase">
+        <h2 className="text-[11px] font-semibold text-muted/75 tracking-widest uppercase">
           Plans
         </h2>
         <Link
@@ -89,10 +89,12 @@ export function Sidebar({
 
           if (isSelected) {
             return (
-              <div
+              <button
+                type="button"
                 key={plan.id}
                 onClick={() => onSelect(plan.id)}
-                className="group relative bg-white/[0.03] rounded-lg p-3.5 cursor-pointer border border-white/[0.06] shadow-sm"
+                aria-current="true"
+                className="group relative w-full text-left bg-white/[0.03] rounded-lg p-3.5 cursor-pointer border border-white/[0.06] shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <div className="absolute left-0 top-3.5 bottom-3.5 w-[3px] bg-white rounded-r-full shadow-[0_0_12px_rgba(255,255,255,0.9)]"></div>
                 <h3 className="text-[13px] font-medium text-primary leading-snug mb-2.5 pr-1">
@@ -109,20 +111,21 @@ export function Sidebar({
                     ></div>
                   </div>
                 </div>
-              </div>
+              </button>
             );
           }
 
           return (
-            <div
+            <button
+              type="button"
               key={plan.id}
               onClick={() => onSelect(plan.id)}
-              className="group relative rounded-lg p-3.5 cursor-pointer hover:bg-white/[0.02] transition-colors border border-transparent"
+              className="group relative block w-full text-left rounded-lg p-3.5 cursor-pointer hover:bg-white/[0.02] transition-colors border border-transparent outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <h3
                 className={`text-[13px] font-medium transition-colors leading-snug line-clamp-2 ${
                   isWeak
-                    ? "text-muted/40 group-hover:text-muted/70"
+                    ? "text-muted/65 group-hover:text-muted/70"
                     : "text-muted/60 group-hover:text-muted/90"
                 }`}
               >
@@ -134,7 +137,7 @@ export function Sidebar({
                 </span>
                 {isDone && <CheckCircle2 className="w-3.5 h-3.5" />}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>

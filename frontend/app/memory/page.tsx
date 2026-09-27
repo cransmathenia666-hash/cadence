@@ -1,6 +1,23 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  Archive,
+  ArrowRight,
+  BrainCircuit,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Clock3,
+  FileClock,
+  Inbox,
+  Plus,
+  RefreshCw,
+  ScanSearch,
+  ShieldAlert,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import {
   ApiError,
@@ -28,6 +45,10 @@ import {
   type ProfileCategory,
   type PurgePreview,
 } from "@/lib/api";
+import { HoverSelect } from "@/components/ui/hover-select";
+import { WorkspaceProvider } from "@/components/shell/workspace-context";
+import { AppShell } from "@/components/shell/app-shell";
+import "../cadence-theme.css";
 
 const LOAD_FAILED = "取记忆时出了意外错误";
 const CATEGORY_KEYS = Object.keys(PROFILE_CATEGORIES) as ProfileCategory[];
@@ -61,14 +82,15 @@ function ReviewLine({ item }: { item: MemoryItem }) {
   const date = item.review_at.slice(0, 10);
   if (item.review_due) {
     return (
-      <div style={{ fontSize: "11px", color: "var(--danger)", marginTop: "4px" }}>
+      <div className="mt-1 inline-flex items-center gap-1.5 border-l border-amber-300/50 pl-2 text-[11px] text-amber-200/90">
+        <Clock3 className="size-3" />
         已到复核时间 · 不再当依据（原定 {date}）
       </div>
     );
   }
   return (
-    <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
-      下次复核：{date}
+    <div className="mt-1 inline-flex items-center gap-1.5 text-[11px] text-white/50">
+      <Clock3 className="size-3" />下次复核：{date}
     </div>
   );
 }
@@ -86,6 +108,8 @@ function ReviewLine({ item }: { item: MemoryItem }) {
  */
 export default function MemoryPage() {
   const [tab, setTab] = useState<Tab>("current");
+  const [memoryScope, setMemoryScope] = useState<MemoryScope>("global");
+  const [showComposer, setShowComposer] = useState(false);
   const [listing, setListing] = useState<MemoryListing | null>(null);
   const [inbox, setInbox] = useState<MemoryCandidate[]>([]);
   const [scans, setScans] = useState<MemoryScanRecord[]>([]);
@@ -200,482 +224,164 @@ export default function MemoryPage() {
   const dueItems = listing?.due ?? [];
 
   return (
-    <div>
-      <div className="flex-between" style={{ marginBottom: "16px" }}>
-        <div>
-          <h1>记忆</h1>
-          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
-            系统只把值得长期记住的东西提成候选，写不写进去由你点头；每条记忆都带来源原话，
-            可改、可作废、可彻底删除。
-          </p>
-        </div>
-        {listing && (
-          <span className="badge badge-in_progress">
-            全局 {listing.counts.global} 条 · 这个计划 {listing.counts.plan} 条 · 待复核{" "}
-            {listing.counts.due} 条 · 收件箱 {inbox.length} 条
-          </span>
-        )}
-      </div>
-
-      {loadError !== null && (
-        <div className="alert alert-danger" role="alert">
-          <strong>加载失败：</strong>
-          {loadError}
-        </div>
-      )}
-
-      {feedback !== null && (
-        <div className={`alert ${feedback.ok ? "alert-success" : "alert-danger"}`} role="status">
-          {feedback.text}
-        </div>
-      )}
-
-      {/* 扫描：它只产候选，不写记忆 */}
-      <div className="card" style={{ padding: "14px 18px" }}>
-        <div className="flex-between">
-          <div>
-            <h3 style={{ margin: 0 }}>扫描新经历</h3>
-            <small style={{ color: "var(--text-muted)" }}>
-              翻一遍计划对话、报告、提案裁定这些已经发生过的事，把值得长期记住的提成候选
-              ——它不会直接写进记忆。
-            </small>
-          </div>
-          <div className="flex-row gap-sm">
-            <button type="button" className="primary sm" disabled={pending} onClick={onScan}>
-              {pending ? "扫描中…" : "扫描新经历"}
-            </button>
-          </div>
-        </div>
-        {scans.length > 0 && (
-          <details style={{ marginTop: "10px", marginBottom: 0, fontSize: "12px" }}>
-            <summary style={{ color: "var(--text-muted)" }}>最近扫过几次</summary>
-            <ul style={{ margin: "8px 0 0", paddingLeft: "18px", color: "var(--text-muted)" }}>
-              {scans.map((row) => (
-                <li key={row.scan_id}>
-                  {row.created_at?.slice(0, 16)} · {row.trigger_label}
-                  {row.plan_id === null ? "（全局）" : `（计划 #${row.plan_id}）`} ·{" "}
-                  {row.status === "pending"
-                    ? "还没跑（计划收尾时登记的）"
-                    : row.status === "failed"
-                      ? `失败：${row.error ?? "原因不明"}`
-                      : `扫 ${row.scanned} 条 / 落 ${row.candidates} 条候选`}
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
-      </div>
-
-      {/* 计划筛选 */}
-      <div className="flex-row gap-sm" style={{ margin: "16px 0", alignItems: "center" }}>
-        <label htmlFor="memory-plan">看哪个计划的记忆：</label>
-        <select
-          id="memory-plan"
-          value={planId === null ? "" : String(planId)}
-          onChange={(event) => setPlanId(event.target.value === "" ? null : Number(event.target.value))}
-          style={{ minWidth: "240px" }}
-        >
-          <option value="">（不看计划内的，只看全局）</option>
-          {plans.map((item) => (
-            <option key={item.id} value={item.id}>
-              #{item.id}：{item.goal}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* 三个标签页 */}
-      <div className="flex-row gap-sm" style={{ marginBottom: "12px" }}>
-        {(
-          [
-            ["current", `当前记忆（${globalItems.length + planItems.length}）`],
-            ["inbox", `记忆收件箱（${inbox.length}）`],
-            ["due", `待复核（${dueItems.length}）`],
-          ] as [Tab, string][]
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            className={tab === key ? "primary sm" : "sm"}
-            onClick={() => setTab(key)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "current" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "20px" }}>
-          <div className="card" style={{ height: "fit-content" }}>
-            <h2>补一条记忆</h2>
-            <form
-              onSubmit={(event: FormEvent<HTMLFormElement>) => {
-                event.preventDefault();
-                run(async () => {
-                  const created = await createMemory({
-                    scope: newScope,
-                    content: newContent,
-                    planId: newScope === "plan" ? (planId ?? undefined) : undefined,
-                    category: newScope === "global" ? newCategory : undefined,
-                    kind: newScope === "plan" ? newKind : undefined,
-                    reviewAt: newReviewAt || undefined,
-                    reason: newReason || undefined,
-                  });
-                  setNewContent("");
-                  setNewReason("");
-                  return `已记下 #${created.id}（${created.scope_label}·${created.category_label ?? created.kind_label}）`;
-                });
-              }}
-              style={{ display: "flex", flexDirection: "column", gap: "10px" }}
-            >
-              <div>
-                <label htmlFor="new-scope">记在哪一级：</label>
-                <select
-                  id="new-scope"
-                  value={newScope}
-                  onChange={(event) => setNewScope(event.target.value as MemoryScope)}
-                  style={{ width: "100%" }}
-                >
-                  <option value="global">全局（跟所有计划都相关，比如「我晚上精力差」）</option>
-                  <option value="plan">只在某个计划里（比如「这个计划不碰新框架」）</option>
-                </select>
-              </div>
-              {newScope === "global" ? (
+    <WorkspaceProvider>
+      <AppShell>
+        <div className="memory-page dark min-h-full bg-transparent px-5 pb-16 pt-20 md:px-8 lg:px-12">
+          <div className="mx-auto w-full max-w-[1440px]">
+            <header className="mb-4 flex flex-wrap items-center justify-between gap-x-8 gap-y-3 border-b border-white/[0.1] pb-4">
+              <div className="flex items-center gap-3">
+                <BrainCircuit className="size-5 text-white/70" />
                 <div>
-                  <label htmlFor="new-category">类别：</label>
-                  <select
-                    id="new-category"
-                    value={newCategory}
-                    onChange={(event) => setNewCategory(event.target.value as ProfileCategory)}
-                    style={{ width: "100%" }}
-                  >
-                    {CATEGORY_KEYS.map((key) => (
-                      <option key={key} value={key}>
-                        {PROFILE_CATEGORIES[key]}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-baseline gap-3"><h1 className="text-2xl font-semibold tracking-[-0.035em] text-white">记忆</h1><span className="text-xs text-white/50">长期依据工作台</span></div>
+                  <p className="mt-0.5 text-xs text-white/50">可追溯、可复核、可撤回</p>
                 </div>
-              ) : (
-                <div>
-                  <label htmlFor="new-kind">这一条是什么：</label>
-                  <select
-                    id="new-kind"
-                    value={newKind}
-                    onChange={(event) => setNewKind(event.target.value)}
-                    style={{ width: "100%" }}
-                  >
-                    {KIND_KEYS.map((key) => (
-                      <option key={key} value={key}>
-                        {MEMORY_KINDS[key]}
-                      </option>
-                    ))}
-                  </select>
-                  {planId === null && (
-                    <small style={{ color: "var(--text-muted)" }}>
-                      上面还没选计划——先在页面中间挑一个计划，这条才知道记给谁。
-                    </small>
-                  )}
+              </div>
+              {listing && (
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-l border-white/[0.1] pl-5">
+                  <Metric label="全局" value={listing.counts.global} />
+                  <Metric label="计划内" value={listing.counts.plan} />
+                  <Metric label="待复核" value={listing.counts.due} accent="amber" />
+                  <Metric label="收件箱" value={inbox.length} />
                 </div>
               )}
-              <div>
-                <label htmlFor="new-content">记什么（一两句话）：</label>
-                <textarea
-                  id="new-content"
-                  value={newContent}
-                  onChange={(event) => setNewContent(event.target.value)}
-                  rows={3}
-                  placeholder="例如：我周二晚上固定有课，那天别排任务"
-                  required
-                  style={{ width: "100%" }}
-                />
+            </header>
+
+            {loadError !== null && (
+              <div className="mb-5 flex items-start gap-3 rounded-2xl border border-red-300/15 bg-red-400/10 px-4 py-3 text-sm text-red-200" role="alert">
+                <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+                <span><strong className="font-medium">加载失败：</strong>{loadError}</span>
               </div>
-              <div>
-                <label htmlFor="new-review">什么时候回头复核（可留空）：</label>
-                <input
-                  id="new-review"
-                  type="date"
-                  value={newReviewAt}
-                  onChange={(event) => setNewReviewAt(event.target.value)}
-                  style={{ width: "100%" }}
-                />
+            )}
+            {feedback !== null && (
+              <div className={`mb-5 flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm ${feedback.ok ? "border-green/20 bg-green/10 text-green" : "border-red-300/15 bg-red-400/10 text-red-200"}`} role="status">
+                {feedback.ok ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" /> : <ShieldAlert className="mt-0.5 size-4 shrink-0" />}
+                <span>{feedback.text}</span>
               </div>
-              <div>
-                <label htmlFor="new-reason">为什么记它（可留空）：</label>
-                <input
-                  id="new-reason"
-                  value={newReason}
-                  onChange={(event) => setNewReason(event.target.value)}
-                  style={{ width: "100%" }}
-                />
-              </div>
-              <div className="flex-between">
-                <small style={{ color: "var(--text-muted)" }}>你自己敲的这条不需要来源证据</small>
-                <button
-                  type="submit"
-                  className="primary"
-                  disabled={
-                    pending ||
-                    newContent.trim() === "" ||
-                    (newScope === "plan" && planId === null)
-                  }
-                >
-                  {pending ? "正在保存…" : "记下来"}
-                </button>
-              </div>
-            </form>
-          </div>
+            )}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-            <MemoryBlock
-              title="全局记忆"
-              hint="跟所有计划都相关的那些（档案里的一条就是这里的一条）"
-              items={globalItems}
-              pending={pending}
-              onEdit={(item) => {
-                setEditing(item);
-                setEditContent(item.content);
-                setEditReason("");
-                setVoiding(null);
-              }}
-              onVoid={(item) => {
-                setVoiding(item);
-                setVoidReason("");
-                setEditing(null);
-              }}
-              onPurge={(item) => {
-                setPurging({ item, preview: null });
-                setPurgeReason("");
-              }}
-            />
-            <MemoryBlock
-              title={planId === null ? "计划内记忆（还没选计划）" : `计划内记忆（#${planId}）`}
-              hint="只在这个计划里算数，别的计划读不到"
-              items={planItems}
-              pending={pending}
-              onEdit={(item) => {
-                setEditing(item);
-                setEditContent(item.content);
-                setEditReason("");
-                setVoiding(null);
-              }}
-              onVoid={(item) => {
-                setVoiding(item);
-                setVoidReason("");
-                setEditing(null);
-              }}
-              onPurge={(item) => {
-                setPurging({ item, preview: null });
-                setPurgeReason("");
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {tab === "inbox" && (
-        <div className="card" style={{ padding: "16px 18px" }}>
-          <div className="flex-between" style={{ marginBottom: "10px" }}>
-            <div>
-              <h2 style={{ margin: 0 }}>记忆收件箱</h2>
-              <small style={{ color: "var(--text-muted)" }}>
-                勾选的只能是「新增 + 你自己说过的」；取代、Agent 推断、彻底删除都要逐条看。
-              </small>
-            </div>
-            <button
-              type="button"
-              className="primary sm"
-              disabled={pending || selected.length === 0}
-              onClick={() =>
-                run(async () => {
-                  const result = await batchApproveMemories(selected, batchReason || undefined);
-                  setSelected([]);
-                  setBatchReason("");
-                  return (
-                    `批准 ${result.approved.length} 条` +
-                    (result.skipped.length > 0
-                      ? `，${result.skipped.length} 条不能批量（${result.skipped[0].why}）`
-                      : "")
-                  );
-                })
-              }
-            >
-              批量批准（{selected.length}）
-            </button>
-          </div>
-
-          {inbox.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
-              收件箱是空的。点「扫描新经历」看看有没有值得记下来的东西。
-            </p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {inbox.map((row) => (
-                <CandidateCard
-                  key={row.proposal_id}
-                  row={row}
-                  pending={pending}
-                  checked={selected.includes(row.proposal_id)}
-                  onToggle={() =>
-                    setSelected((was) =>
-                      was.includes(row.proposal_id)
-                        ? was.filter((id) => id !== row.proposal_id)
-                        : [...was, row.proposal_id],
-                    )
-                  }
-                  onApprove={() =>
-                    run(async () => {
-                      const result = await decideProposal(row.proposal_id, {
-                        approved: true,
-                        reason: "收件箱里批准的",
-                      });
-                      return `已批准提案 #${result.id}（${result.effect}）`;
-                    })
-                  }
-                  onReject={() =>
-                    run(async () => {
-                      await decideProposal(row.proposal_id, {
-                        approved: false,
-                        reason: "这条不用记",
-                      });
-                      return `已驳回提案 #${row.proposal_id}`;
-                    })
-                  }
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {tab === "due" && (
-        <div className="card" style={{ padding: "16px 18px" }}>
-          <h2>待复核</h2>
-          <p style={{ color: "var(--text-muted)", fontSize: "13px" }}>
-            到了复核时间的记忆默认已经不当依据（Agent 不会再拿它说话）。挨条过一遍：
-            还作数就把时间往后推，不再作数就作废。
-          </p>
-          {dueItems.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
-              现在没有需要复核的。
-            </p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {dueItems.map((item) => {
-                const rowKey = `${item.scope}-${item.id}`;
-                return (
-                <div
-                  key={rowKey}
-                  style={{
-                    border: "1px solid var(--border)",
-                    borderRadius: "var(--radius-sm)",
-                    padding: "10px 12px",
-                    background: "var(--bg-subtle)",
-                  }}
-                >
-                  <div className="flex-between">
-                    <div style={{ fontSize: "13px", flex: 1 }}>
-                      {item.content}
-                      <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
-                        #{item.id} · {item.scope_label}
-                        {item.plan_id === null ? "" : `·计划 #${item.plan_id}`} ·{" "}
-                        {item.category_label ?? item.kind_label} · {item.source_kind_label}
-                      </div>
-                      <ReviewLine item={item} />
-                    </div>
-                    <div className="flex-row gap-sm" style={{ marginLeft: "12px" }}>
-                      <button
-                        type="button"
-                        className="sm ghost"
-                        disabled={pending}
-                        onClick={() => {
-                          setRenewOpen(renewOpen === rowKey ? null : rowKey);
-                          setRenewDate(defaultReviewDate());
-                        }}
-                      >
-                        还作数
-                      </button>
-                      <button
-                        type="button"
-                        className="sm ghost danger"
-                        disabled={pending}
-                        onClick={() =>
-                          run(async () => {
-                            await reviewMemory({
-                              memoryId: item.id,
-                              scope: item.scope,
-                              decision: "void",
-                              reason: "复核后确认不再作数",
-                            });
-                            return `#${item.id} 已作废`;
-                          })
-                        }
-                      >
-                        不再作数
-                      </button>
-                      <button
-                        type="button"
-                        className="sm ghost danger"
-                        disabled={pending}
-                        onClick={() => {
-                          setPurging({ item, preview: null });
-                          setPurgeReason("");
-                        }}
-                      >
-                        彻底删除
-                      </button>
-                    </div>
-                  </div>
-
-                  {renewOpen === rowKey && (
-                    <div
-                      className="flex-row gap-sm"
-                      style={{ marginTop: "10px", alignItems: "center", flexWrap: "wrap" }}
-                    >
-                      <label htmlFor={`renew-${rowKey}`} style={{ fontSize: "12px" }}>
-                        下次复核放到哪天：
-                      </label>
-                      <input
-                        id={`renew-${rowKey}`}
-                        type="date"
-                        value={renewDate}
-                        onChange={(event) => setRenewDate(event.target.value)}
-                      />
-                      <button
-                        type="button"
-                        className="primary sm"
-                        disabled={pending || renewDate === ""}
-                        onClick={() =>
-                          run(async () => {
-                            const result = await reviewMemory({
-                              memoryId: item.id,
-                              scope: item.scope,
-                              decision: "renew",
-                              reviewAt: renewDate,
-                              reason: `复核过了，还作数，下次复核放到 ${renewDate}`,
-                            });
-                            setRenewOpen(null);
-                            return `#${item.id} 的复核时间推到了 ${result.memory?.review_at?.slice(0, 10) ?? renewDate}`;
-                          })
-                        }
-                      >
-                        确认
-                      </button>
-                      <button type="button" className="sm" onClick={() => setRenewOpen(null)}>
-                        取消
-                      </button>
-                      <small style={{ color: "var(--text-muted)" }}>
-                        留空不行；填哪天都可以（默认往后推 {REVIEW_DAYS} 天）
-                      </small>
-                    </div>
-                  )}
+            <section className="memory-command-bar mb-6 border-y border-white/[0.08] py-3">
+              <div className="grid items-center gap-3 md:grid-cols-[minmax(0,1fr)_minmax(260px,auto)_auto]">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06] text-white/60"><ScanSearch className="size-4" /></div>
+                  <div className="min-w-0"><div className="flex items-center gap-2"><h2 className="text-sm font-medium text-white">扫描新经历</h2><span className="text-[10px] uppercase tracking-[0.16em] text-white/50">只产候选</span></div><p className="mt-0.5 truncate text-xs text-white/50">翻过计划对话、报告和裁定，找出值得长期记住的内容。</p></div>
                 </div>
-                );
-              })}
+                <div className="truncate text-xs text-white/50 md:text-right">
+                  {scans[0] ? <><span className="text-white/65">最近 {scans[0].created_at?.slice(0, 16)}</span> · {scans[0].status === "failed" ? "扫描失败" : scans[0].status === "pending" ? "等待处理" : `落 ${scans[0].candidates} 条候选`}</> : "还没有扫描记录"}
+                </div>
+                <button type="button" disabled={pending} onClick={onScan} className="btn-primary inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-md px-3.5 text-xs font-medium text-white disabled:opacity-40"><RefreshCw className={`size-3.5 ${pending ? "animate-spin" : ""}`} />{pending ? "扫描中…" : "扫描"}</button>
+              </div>
+              {scans.length > 0 && (
+                <details className="mt-2 border-t border-white/[0.06] pt-2">
+                  <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] text-white/50 hover:text-white/70"><FileClock className="size-3" />查看扫描记录<ChevronDown className="size-3" /></summary>
+                  <div className="mt-2 grid gap-x-5 gap-y-1.5 md:grid-cols-2">
+                    {scans.map((row) => <div key={row.scan_id} className="border-l border-white/[0.08] pl-2 text-[11px] text-white/50"><span className="text-white/65">{row.created_at?.slice(0, 16)}</span> · {row.trigger_label}{row.plan_id === null ? "（全局）" : `（计划 #${row.plan_id}）`} · {row.status === "pending" ? "还没跑" : row.status === "failed" ? `失败：${row.error ?? "原因不明"}` : `扫 ${row.scanned} 条 / 落 ${row.candidates} 条候选`}</div>)}
+                  </div>
+                </details>
+              )}
+            </section>
+
+            <div className="mb-5 flex flex-col gap-4 border-b border-white/[0.08] pb-4 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-wrap items-center gap-3">
+                <label htmlFor="memory-plan" className="text-xs font-medium text-white/50">工作范围</label>
+                <HoverSelect
+                  value={planId === null ? "" : String(planId)}
+                  onChange={(value) => setPlanId(value === "" ? null : Number(value))}
+                  options={[{ value: "", label: "全局记忆（不限定计划）" }, ...plans.map((item) => ({ value: String(item.id), label: `#${item.id}：${item.goal}` }))]}
+                  className="w-[min(100%,360px)]"
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-x-1 gap-y-2" role="tablist" aria-label="记忆工作流">
+                {([
+                  ["inbox", "待确认候选", inbox.length],
+                  ["current", "当前依据", globalItems.length + planItems.length],
+                  ["due", "待复核", dueItems.length],
+                ] as [Tab, string, number][]).map(([key, label, count], index) => (
+                  <div key={key} className="flex items-center">
+                    {index > 0 && <ArrowRight className="mx-1.5 size-3 text-white/50" />}
+                    <button type="button" role="tab" aria-selected={tab === key} onClick={() => setTab(key)} className={`px-2 py-1.5 text-xs transition-colors ${tab === key ? "text-white" : "text-white/50 hover:text-white/75"}`}>
+                    {label}<span className={`ml-1.5 ${tab === key ? "text-white/80" : "text-white/50"}`}>{count}</span>
+                  </button>
+                  </div>
+                ))}
+              </div>
             </div>
-          )}
-        </div>
-      )}
+
+            {tab === "current" && (
+              <section className="memory-ledger">
+                <div className="flex flex-col gap-3 border-b border-white/[0.1] pb-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="flex items-baseline gap-3"><p className="text-[10px] uppercase tracking-[0.18em] text-white/50">当前可用依据</p><h2 className="text-base font-medium tracking-tight text-white">已经确认、现在会影响判断</h2></div>
+                    <p className="mt-1 text-xs text-white/50">修改、作废和删除都会留下可追溯记录。</p>
+                  </div>
+                  <button type="button" onClick={() => setShowComposer((open) => !open)} className="inline-flex h-8 shrink-0 items-center gap-2 border border-white/[0.12] px-3 text-xs text-white/70 hover:border-white/30 hover:text-white"><Plus className="size-3.5" />{showComposer ? "收起手工录入" : "手工补一条"}</button>
+                </div>
+
+                {showComposer && (
+                  <section className="border-b border-white/[0.1] py-5">
+                    <div className="mb-4 flex items-start gap-3"><Plus className="mt-1 size-4 text-white/50" /><div><h3 className="text-base font-medium text-white">手工补一条记忆</h3><p className="mt-1 text-xs text-white/50">你确认过的事实，会成为 Agent 可以引用的上下文。</p></div></div>
+                    <form onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); run(async () => { const created = await createMemory({ scope: newScope, content: newContent, planId: newScope === "plan" ? (planId ?? undefined) : undefined, category: newScope === "global" ? newCategory : undefined, kind: newScope === "plan" ? newKind : undefined, reviewAt: newReviewAt || undefined, reason: newReason || undefined }); setNewContent(""); setNewReason(""); setShowComposer(false); return `已记下 #${created.id}（${created.scope_label}·${created.category_label ?? created.kind_label}）`; }); }} className="grid gap-4 lg:grid-cols-[minmax(280px,1fr)_220px_220px_auto] lg:items-end">
+                      <Field label="记什么（一两句话）" htmlFor="new-content"><textarea id="new-content" value={newContent} onChange={(event) => setNewContent(event.target.value)} rows={2} placeholder="例如：我周二晚上固定有课，那天别排任务" required className="memory-input min-h-16 w-full resize-y rounded-lg px-3.5 py-2.5 text-sm leading-5" /></Field>
+                      <Field label="记在哪一级" htmlFor="new-scope"><HoverSelect value={newScope} onChange={(value) => setNewScope(value as MemoryScope)} options={[{ value: "global", label: "全局 · 所有计划都相关" }, { value: "plan", label: "计划内 · 当前计划" }]} /></Field>
+                      {newScope === "global" ? <Field label="类别" htmlFor="new-category"><HoverSelect value={newCategory} onChange={(value) => setNewCategory(value as ProfileCategory)} options={CATEGORY_KEYS.map((key) => ({ value: key, label: PROFILE_CATEGORIES[key] }))} /></Field> : <Field label="这一条是什么" htmlFor="new-kind"><HoverSelect value={newKind} onChange={setNewKind} options={KIND_KEYS.map((key) => ({ value: key, label: MEMORY_KINDS[key] }))} /></Field>}
+                      <button type="submit" disabled={pending || newContent.trim() === "" || (newScope === "plan" && planId === null)} className="btn-primary inline-flex h-9 items-center justify-center gap-2 rounded-md px-4 text-xs font-medium text-white disabled:opacity-35"><Check className="size-3.5" />{pending ? "保存中…" : "记下来"}</button>
+                      <div className="lg:col-span-full grid gap-4 sm:grid-cols-2 lg:max-w-[460px]"><Field label="什么时候复核（可留空）" htmlFor="new-review"><input id="new-review" type="date" value={newReviewAt} onChange={(event) => setNewReviewAt(event.target.value)} className="memory-input w-full rounded-lg px-3.5 py-2.5 text-sm" /></Field><Field label="为什么记它（可留空）" htmlFor="new-reason"><input id="new-reason" value={newReason} onChange={(event) => setNewReason(event.target.value)} className="memory-input w-full rounded-lg px-3.5 py-2.5 text-sm" /></Field></div>
+                    </form>
+                  </section>
+                )}
+
+                <div className="flex flex-wrap items-center gap-1 border-b border-white/[0.06] py-3" role="tablist" aria-label="记忆适用范围">
+                  <button type="button" role="tab" aria-selected={memoryScope === "global"} aria-controls="memory-scope-panel" onClick={() => setMemoryScope("global")} className={`px-2 py-1 text-sm transition-colors ${memoryScope === "global" ? "text-white" : "text-white/50 hover:text-white/75"}`}>全局记忆 <span className="ml-1 text-xs text-white/50">{globalItems.length}</span></button>
+                  <span className="px-1 text-white/50">/</span>
+                  <button type="button" role="tab" aria-selected={memoryScope === "plan"} aria-controls="memory-scope-panel" onClick={() => setMemoryScope("plan")} className={`px-2 py-1 text-sm transition-colors ${memoryScope === "plan" ? "text-white" : "text-white/50 hover:text-white/75"}`}>计划内记忆 <span className="ml-1 text-xs text-white/50">{planItems.length}</span></button>
+                </div>
+
+                <div id="memory-scope-panel" role="tabpanel" className="min-w-0">
+                  <MemoryBlock key={memoryScope} title={memoryScope === "global" ? "全局记忆" : planId === null ? "计划内记忆" : `计划内记忆 · #${planId}`} hint={memoryScope === "global" ? "跟所有计划都相关" : planId === null ? "在上方选择计划后显示" : "只在这个计划里算数"} items={memoryScope === "global" ? globalItems : planItems} pending={pending} onEdit={(item) => { setEditing(item); setEditContent(item.content); setEditReason(""); setVoiding(null); }} onVoid={(item) => { setVoiding(item); setVoidReason(""); setEditing(null); }} onPurge={(item) => { setPurging({ item, preview: null }); setPurgeReason(""); }} />
+                </div>
+
+              </section>
+            )}
+
+            {tab === "inbox" && (
+              <section className="memory-workspace border-t border-white/[0.1] pt-4">
+                <div className="mb-4 flex flex-col gap-3 border-b border-white/[0.08] pb-3 md:flex-row md:items-center md:justify-between">
+                  <div><div className="mb-1 flex items-center gap-2 text-white/50"><Inbox className="size-3.5" /><span className="text-[10px] uppercase tracking-[0.16em]">候选队列</span></div><div className="flex items-baseline gap-3"><h2 className="text-base font-medium text-white">记忆收件箱</h2><p className="text-xs text-white/50">候选先在这里确认，再进入当前依据。</p></div></div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center"><input aria-label="批量批准理由" value={batchReason} onChange={(event) => setBatchReason(event.target.value)} placeholder="批量批准理由（可留空）" className="memory-input h-8 rounded-md px-3 text-xs sm:w-56" /><button type="button" disabled={pending || selected.length === 0} onClick={() => run(async () => { const result = await batchApproveMemories(selected, batchReason || undefined); setSelected([]); setBatchReason(""); return `批准 ${result.approved.length} 条` + (result.skipped.length > 0 ? `，${result.skipped.length} 条不能批量（${result.skipped[0].why}）` : ""); })} className="btn-primary inline-flex h-8 items-center justify-center gap-2 rounded-md px-3.5 text-xs font-medium text-white disabled:opacity-35"><CheckCircle2 className="size-3.5" />批准（{selected.length}）</button></div>
+                </div>
+                {inbox.length === 0 ? <EmptyState icon={<Inbox className="size-5" />} title="收件箱是空的" text="点上方「扫描新经历」，看看有没有值得记下来的内容。" /> : <div className="divide-y divide-white/[0.06]">{inbox.map((row) => <CandidateCard key={row.proposal_id} row={row} pending={pending} checked={selected.includes(row.proposal_id)} onToggle={() => setSelected((was) => was.includes(row.proposal_id) ? was.filter((id) => id !== row.proposal_id) : [...was, row.proposal_id])} onApprove={() => run(async () => { const result = await decideProposal(row.proposal_id, { approved: true, reason: "收件箱里批准的" }); return `已批准提案 #${result.id}（${result.effect}）`; })} onReject={() => run(async () => { await decideProposal(row.proposal_id, { approved: false, reason: "这条不用记" }); return `已驳回提案 #${row.proposal_id}`; })} />)}</div>}
+              </section>
+            )}
+
+            {tab === "due" && (
+              <section className="memory-workspace border-t border-white/[0.1] pt-4">
+                <div className="mb-4 flex items-start gap-3 border-b border-white/[0.08] pb-3">
+                  <Clock3 className="mt-0.5 size-4 shrink-0 text-amber-200/80" />
+                  <div><h2 className="text-base font-medium text-white">待复核</h2><p className="mt-1 text-xs leading-5 text-white/50">到期的记忆暂不参与判断；确认仍然有效就推迟日期，不再有效就作废。</p></div>
+                </div>
+                {dueItems.length === 0 ? <EmptyState icon={<Clock3 className="size-5" />} title="现在没有需要复核的记忆" text="有记忆到期时，会在这里出现。" /> : (
+                  <div className="divide-y divide-white/[0.06]">
+                    {dueItems.map((item) => {
+                      const rowKey = `${item.scope}-${item.id}`;
+                      return (
+                        <div key={rowKey} className="grid gap-3 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-6">
+                          <div className="min-w-0">
+                            <p className="text-sm leading-5 text-white/85">{item.content}</p>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-white/50"><span>#{item.id}</span><span>·</span><span>{item.scope_label}</span>{item.plan_id !== null && <><span>·</span><span>计划 #{item.plan_id}</span></>}<span>·</span><span>{item.category_label ?? item.kind_label}</span><span>·</span><span>{item.source_kind_label}</span></div>
+                            <ReviewLine item={item} />
+                          </div>
+                          <div className="flex shrink-0 items-start gap-1.5">
+                            <button type="button" disabled={pending} onClick={() => { setRenewOpen(renewOpen === rowKey ? null : rowKey); setRenewDate(defaultReviewDate()); }} className="inline-flex h-7 items-center gap-1 border border-white/[0.12] px-2.5 text-xs text-white/70 hover:border-white/25 hover:bg-white/[0.05] disabled:opacity-35"><RefreshCw className="size-3" />还作数</button>
+                            <button type="button" disabled={pending} onClick={() => run(async () => { await reviewMemory({ memoryId: item.id, scope: item.scope, decision: "void", reason: "复核后确认不再作数" }); return `#${item.id} 已作废`; })} className="inline-flex h-7 items-center gap-1 border border-red-300/[0.12] px-2.5 text-xs text-red-200/70 hover:border-red-300/30 hover:bg-red-400/[0.06] disabled:opacity-35"><X className="size-3" />不再作数</button>
+                            <button type="button" disabled={pending} onClick={() => { setPurging({ item, preview: null }); setPurgeReason(""); }} className="inline-flex h-7 items-center gap-1 border border-red-300/[0.1] px-2.5 text-xs text-red-200/55 hover:border-red-300/25 hover:bg-red-400/[0.06] disabled:opacity-35"><Trash2 className="size-3" />删除</button>
+                          </div>
+                          {renewOpen === rowKey && <div className="col-span-full flex flex-wrap items-center gap-2 border-l border-amber-300/35 pl-3 pt-1"><label htmlFor={`renew-${rowKey}`} className="text-xs text-amber-100/75">下次复核：</label><input id={`renew-${rowKey}`} type="date" value={renewDate} onChange={(event) => setRenewDate(event.target.value)} className="memory-input h-8 rounded-md px-3 text-xs" /><button type="button" disabled={pending || renewDate === ""} onClick={() => run(async () => { const result = await reviewMemory({ memoryId: item.id, scope: item.scope, decision: "renew", reviewAt: renewDate, reason: `复核过了，还作数，下次复核放到 ${renewDate}` }); setRenewOpen(null); return `#${item.id} 的复核时间推到了 ${result.memory?.review_at?.slice(0, 10) ?? renewDate}`; })} className="btn-primary h-8 rounded-md px-3 text-xs text-white disabled:opacity-35">确认</button><button type="button" onClick={() => setRenewOpen(null)} className="h-8 px-2 text-xs text-white/55 hover:text-white">取消</button><span className="text-[11px] text-white/50">默认往后推 {REVIEW_DAYS} 天，也可以自己改日期</span></div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            )}
 
       {/* 改 */}
       {editing !== null && (
@@ -689,18 +395,18 @@ export default function MemoryPage() {
             value={editContent}
             onChange={(event) => setEditContent(event.target.value)}
             rows={3}
-            style={{ width: "100%" }}
+            className="memory-input mt-2 min-h-24 w-full resize-y rounded-2xl px-3.5 py-3 text-sm leading-5"
           />
-          <label style={{ fontSize: "12px" }}>为什么改（必填）</label>
+          <label className="mt-4 block text-xs text-white/55">为什么改（必填）</label>
           <input
             value={editReason}
             onChange={(event) => setEditReason(event.target.value)}
-            style={{ width: "100%" }}
+            className="memory-input mt-2 h-10 w-full rounded-xl px-3.5 text-sm"
           />
-          <div className="flex-row gap-sm" style={{ marginTop: "10px" }}>
+          <div className="mt-5 flex gap-2">
             <button
               type="button"
-              className="primary sm"
+              className="btn-primary inline-flex h-9 items-center rounded-md px-4 text-xs text-white disabled:opacity-35"
               disabled={pending || editReason.trim() === "" || editContent.trim() === ""}
               onClick={() =>
                 run(async () => {
@@ -717,7 +423,7 @@ export default function MemoryPage() {
             >
               保存替换
             </button>
-            <button type="button" className="sm" onClick={() => setEditing(null)}>
+            <button type="button" className="inline-flex h-9 items-center rounded-md border border-white/[0.1] px-4 text-xs text-white/55 hover:bg-white/[0.07]" onClick={() => setEditing(null)}>
               取消
             </button>
           </div>
@@ -728,20 +434,20 @@ export default function MemoryPage() {
       {voiding !== null && (
         <Modal onClose={() => setVoiding(null)}>
           <h2>作废这条记忆</h2>
-          <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          <p className="text-xs leading-5 text-white/50">
             作废之后它不再参与判断，旧值仍留在台账里（要连正文一起抹掉，用「彻底删除」）。
           </p>
-          <div style={{ fontSize: "13px" }}>「{voiding.content}」</div>
-          <label style={{ fontSize: "12px" }}>为什么作废（必填）</label>
+          <div className="mt-3 rounded-2xl bg-red-400/[0.06] px-3.5 py-3 text-sm leading-5 text-white/75">「{voiding.content}」</div>
+          <label className="mt-4 block text-xs text-white/55">为什么作废（必填）</label>
           <input
             value={voidReason}
             onChange={(event) => setVoidReason(event.target.value)}
-            style={{ width: "100%" }}
+            className="memory-input mt-2 h-10 w-full rounded-xl px-3.5 text-sm"
           />
-          <div className="flex-row gap-sm" style={{ marginTop: "10px" }}>
+          <div className="mt-5 flex gap-2">
             <button
               type="button"
-              className="danger sm"
+              className="inline-flex h-9 items-center rounded-md bg-red-400/15 px-4 text-xs text-red-100 hover:bg-red-400/25 disabled:opacity-35"
               disabled={pending || voidReason.trim() === ""}
               onClick={() =>
                 run(async () => {
@@ -757,7 +463,7 @@ export default function MemoryPage() {
             >
               确认作废
             </button>
-            <button type="button" className="sm" onClick={() => setVoiding(null)}>
+            <button type="button" className="inline-flex h-9 items-center rounded-md border border-white/[0.1] px-4 text-xs text-white/55 hover:bg-white/[0.07]" onClick={() => setVoiding(null)}>
               取消
             </button>
           </div>
@@ -768,15 +474,15 @@ export default function MemoryPage() {
       {purging !== null && (
         <Modal onClose={() => setPurging({ item: purging.item, preview: null })}>
           <h2>彻底删除（不可恢复）</h2>
-          <div style={{ fontSize: "13px" }}>「{purging.item.content}」</div>
+          <div className="mt-3 rounded-2xl bg-red-400/[0.06] px-3.5 py-3 text-sm leading-5 text-white/75">「{purging.item.content}」</div>
           {purging.preview === null ? (
-            <div style={{ marginTop: "10px" }}>
-              <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+            <div className="mt-4">
+              <p className="text-xs leading-5 text-white/50">
                 先看一遍会影响哪些地方——这一步不会动任何数据。
               </p>
               <button
                 type="button"
-                className="sm"
+                className="inline-flex h-9 items-center rounded-md border border-white/[0.1] px-4 text-xs text-white/70 hover:bg-white/[0.07]"
                 disabled={pending}
                 onClick={() =>
                   run(async () => {
@@ -790,13 +496,13 @@ export default function MemoryPage() {
               </button>
             </div>
           ) : (
-            <div style={{ marginTop: "10px" }}>
-              <p style={{ fontSize: "12px" }}>
+            <div className="mt-4">
+              <p className="text-xs leading-5 text-white/55">
                 删除会清掉：这条记忆的正文、引用它的候选里的内容、来源证据摘录，以及来源里
                 引用的那句原话（换成「
                 已按用户要求删除」）。只剩一条不含内容的删除墓碑。
               </p>
-              <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+              <p className="mt-3 text-xs leading-5 text-white/50">
                 现在找到的副本（{purging.preview.copies.length} 处）：
                 {purging.preview.copies.length === 0
                   ? "（没有别的副本）"
@@ -804,16 +510,16 @@ export default function MemoryPage() {
                       .map((copy) => `${copy.table}.${copy.column}#${copy.id}`)
                       .join("、")}
               </p>
-              <label style={{ fontSize: "12px" }}>为什么删（可留空）</label>
+              <label className="mt-4 block text-xs text-white/55">为什么删（可留空）</label>
               <input
                 value={purgeReason}
                 onChange={(event) => setPurgeReason(event.target.value)}
-                style={{ width: "100%" }}
+                className="memory-input mt-2 h-10 w-full rounded-xl px-3.5 text-sm"
               />
-              <div className="flex-row gap-sm" style={{ marginTop: "10px" }}>
+              <div className="mt-5 flex gap-2">
                 <button
                   type="button"
-                  className="danger sm"
+                  className="inline-flex h-9 items-center rounded-md bg-red-400/15 px-4 text-xs text-red-100 hover:bg-red-400/25 disabled:opacity-35"
                   disabled={pending}
                   onClick={() =>
                     run(async () => {
@@ -836,12 +542,12 @@ export default function MemoryPage() {
                 </button>
                 <button
                   type="button"
-                  className="sm"
+                  className="inline-flex h-9 items-center rounded-md border border-white/[0.1] px-4 text-xs text-white/55 hover:bg-white/[0.07]"
                   onClick={() => setPurging({ item: purging.item, preview: null })}
                 >
                   返回
                 </button>
-                <button type="button" className="sm" onClick={() => setPurging(null)}>
+                <button type="button" className="inline-flex h-9 items-center rounded-md border border-white/[0.1] px-4 text-xs text-white/55 hover:bg-white/[0.07]" onClick={() => setPurging(null)}>
                   取消
                 </button>
               </div>
@@ -849,11 +555,27 @@ export default function MemoryPage() {
           )}
         </Modal>
       )}
-    </div>
+            </div>
+          </div>
+        </AppShell>
+      </WorkspaceProvider>
   );
 }
 
 /** 一段记忆列表（全局一段、计划内一段，同一个渲染）。 */
+function Metric({ label, value, accent = "white" }: { label: string; value: number; accent?: "white" | "amber" }) {
+  const color = accent === "amber" ? "text-amber-200" : "text-white";
+  return <div><div className="text-[10px] uppercase tracking-[0.16em] text-white/50">{label}</div><div className={`mt-0.5 text-lg font-medium tracking-tight ${color}`}>{value}</div></div>;
+}
+
+function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
+  return <div className="space-y-2"><label htmlFor={htmlFor} className="block text-[11px] font-medium text-white/50">{label}</label>{children}</div>;
+}
+
+function EmptyState({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
+  return <div className="flex min-h-44 flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.1] bg-white/[0.015] px-6 text-center"><div className="mb-3 flex size-10 items-center justify-center rounded-2xl bg-white/[0.06] text-white/55">{icon}</div><p className="text-sm text-white/75">{title}</p><p className="mt-1 text-xs text-white/50">{text}</p></div>;
+}
+
 function MemoryBlock({
   title,
   hint,
@@ -871,82 +593,56 @@ function MemoryBlock({
   onVoid: (item: MemoryItem) => void;
   onPurge: (item: MemoryItem) => void;
 }) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const groups = items.reduce<[string, MemoryItem[]][]>((result, item) => {
+    const label = item.category_label ?? item.kind_label ?? "未分类";
+    const group = result.find(([name]) => name === label);
+    if (group) group[1].push(item);
+    else result.push([label, [item]]);
+    return result;
+  }, []);
+
   return (
-    <div className="card" style={{ margin: 0, padding: "16px 18px" }}>
-      <div className="flex-between" style={{ marginBottom: "10px" }}>
-        <h3 style={{ margin: 0 }}>{title}</h3>
-        <small style={{ color: "var(--text-muted)" }}>{hint}</small>
+    <section className="min-w-0 pt-4">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h3 className="text-base font-medium text-white/85">{title}</h3>
+        <span className="text-xs text-white/50">{hint}</span>
       </div>
       {items.length === 0 ? (
-        <p style={{ color: "var(--text-muted)", fontSize: "12px", margin: 0 }}>一条都没有。</p>
+        <EmptyState icon={<Archive className="size-5" />} title="一条都没有" text="批准候选或手工补充后，会显示在这里。" />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-          {items.map((item) => (
-            <div
-              key={`${item.scope}-${item.id}`}
-              style={{
-                background: "var(--bg-subtle)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-sm)",
-                padding: "10px 12px",
-              }}
-            >
-              <div className="flex-between" style={{ alignItems: "flex-start" }}>
-                <div style={{ fontSize: "13px", lineHeight: 1.5, flex: 1 }}>
-                  {item.content}
-                </div>
-                <div className="flex-row gap-sm" style={{ marginLeft: "12px" }}>
-                  <button type="button" className="sm ghost" disabled={pending} onClick={() => onEdit(item)}>
-                    改
-                  </button>
-                  <button
-                    type="button"
-                    className="sm ghost danger"
-                    disabled={pending}
-                    onClick={() => onVoid(item)}
-                  >
-                    作废
-                  </button>
-                  <button
-                    type="button"
-                    className="sm ghost danger"
-                    disabled={pending}
-                    onClick={() => onPurge(item)}
-                  >
-                    彻底删除
-                  </button>
-                </div>
+        <div className="mt-4">
+          {groups.map(([groupLabel, groupItems]) => (
+            <section key={groupLabel} className="mb-4 last:mb-0">
+              <div className="mb-1 flex items-center gap-2 text-xs text-white/50"><span className="h-px w-5 bg-white/30" /><h4 className="font-medium text-white/65">{groupLabel}</h4><span className="text-white/50">{groupItems.length}</span></div>
+              <div>
+                {groupItems.map((item) => {
+                  const rowKey = `${item.scope}-${item.id}`;
+                  const isLong = item.content.length > 64;
+                  const expanded = expandedKey === rowKey;
+                  return (
+                    <article key={rowKey} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 border-t border-white/[0.06] py-3">
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-start gap-3"><span className="mt-2 size-1.5 shrink-0 rounded-full bg-white/40" /><p className={`min-w-0 break-words text-sm leading-5 text-white/85 ${isLong && !expanded ? "line-clamp-2" : ""}`}>{item.content}</p></div>
+                        {isLong && <button type="button" aria-expanded={expanded} onClick={() => setExpandedKey(expanded ? null : rowKey)} className="ml-5 mt-1 px-1 py-0.5 text-xs text-white/60 hover:text-white/90">{expanded ? "收起全文" : "展开全文"}</button>}
+                        <div className="ml-5 mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-white/50"><span>#{item.id}</span><span>·</span><span>{item.source_kind_label}</span>{item.fact_time && <><span>·</span><span>事实 {item.fact_time.slice(0, 10)}</span></>}</div>
+                        <div className="ml-5"><ReviewLine item={item} /></div>
+                        {item.evidence.length > 0 && <details className="ml-5 mt-1.5"><summary className="flex cursor-pointer list-none items-center gap-1 text-[11px] text-green/90 hover:text-green"><ArrowRight className="size-3" />来源 {item.evidence.length}</summary><ul className="mt-2 space-y-1 border-l border-green/25 pl-3 text-[11px] leading-5 text-white/50">{item.evidence.map((evidence, index) => <li key={`${evidence.source_type}-${evidence.source_id}-${index}`}>{evidence.source_label}#{evidence.source_id}{evidence.source_time && `（${evidence.source_time.slice(0, 10)}）`}：「{evidence.excerpt}」</li>)}</ul></details>}
+                      </div>
+                      <div className="flex items-start gap-1 pt-0.5"><button type="button" disabled={pending} onClick={() => onEdit(item)} className="border border-white/[0.08] px-2 py-1 text-xs text-white/50 hover:border-white/20 hover:text-white disabled:opacity-35">改</button><button type="button" disabled={pending} onClick={() => onVoid(item)} className="border border-red-300/[0.12] px-2 py-1 text-xs text-red-200/55 hover:border-red-300/30 hover:text-red-100 disabled:opacity-35">作废</button><button type="button" disabled={pending} onClick={() => onPurge(item)} className="border border-red-300/[0.1] px-2 py-1 text-xs text-red-200/45 hover:border-red-300/25 hover:text-red-100 disabled:opacity-35">删除</button></div>
+                    </article>
+                  );
+                })}
               </div>
-              <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "6px" }}>
-                #{item.id} · {item.category_label ?? item.kind_label} · {item.source_kind_label}
-                {item.fact_time && ` · 事实时间 ${item.fact_time.slice(0, 10)}`}
-              </div>
-              <ReviewLine item={item} />
-              {item.evidence.length > 0 && (
-                <details style={{ marginTop: "6px", marginBottom: 0 }}>
-                  <summary style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-                    来源（{item.evidence.length} 条）
-                  </summary>
-                  <ul style={{ margin: "6px 0 0", paddingLeft: "18px", fontSize: "11px" }}>
-                    {item.evidence.map((evidence, index) => (
-                      <li key={`${evidence.source_type}-${evidence.source_id}-${index}`}>
-                        {evidence.source_label}#{evidence.source_id}
-                        {evidence.source_time && `（${evidence.source_time.slice(0, 10)}）`}：
-                        「{evidence.excerpt}」
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </div>
+            </section>
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
-/** 收件箱里的一张候选卡：动作、范围、陈述还是推断、证据原话，加批准 / 驳回。 */
+/** 收件箱里的一行候选：把「为什么」和「依据」紧跟在陈述后面，动作固定在右侧。 */
 function CandidateCard({
   row,
   pending,
@@ -963,99 +659,38 @@ function CandidateCard({
   onReject: () => void;
 }) {
   return (
-    <div
-      style={{
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-sm)",
-        padding: "12px 14px",
-        background: "var(--bg-subtle)",
-      }}
-    >
-      <div className="flex-between" style={{ alignItems: "flex-start" }}>
-        <div className="flex-row gap-sm" style={{ flexWrap: "wrap" }}>
-          <span className="badge badge-in_progress">{row.action_label}</span>
-          <span className="badge badge-not_started">{row.scope_label}</span>
-          {row.category_label && <span className="badge badge-not_started">{row.category_label}</span>}
-          {row.kind_label && <span className="badge badge-not_started">{row.kind_label}</span>}
-          <span className="badge badge-not_started">{row.source_kind_label}</span>
-          {row.review_at && (
-            <span className="badge badge-not_started">复核时间 {row.review_at.slice(0, 10)}</span>
-          )}
+    <article className="grid gap-3 border-b border-white/[0.06] py-4 first:pt-0 last:border-b-0 last:pb-1 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-6">
+      <div className="min-w-0">
+        <div className="mb-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-white/50">
+          <span className="font-medium text-white/85">{row.action_label}</span>
+          <span>{row.scope_label}</span>
+          {row.category_label && <span>{row.category_label}</span>}
+          {row.kind_label && <span>{row.kind_label}</span>}
+          <span>{row.source_kind_label}</span>
+          {row.review_at && <span className="text-amber-200/75">复核 {row.review_at.slice(0, 10)}</span>}
         </div>
-        {row.batch_eligible && (
-          <label style={{ fontSize: "12px", marginLeft: "12px" }}>
-            <input type="checkbox" checked={checked} onChange={onToggle} /> 可批量
-          </label>
-        )}
+        <p className="text-sm leading-5 text-white/85">{row.action === "review" ? `${row.decision_label ?? "处理"}：${row.target_content ?? ""}` : row.content}</p>
+        {row.action === "supersede" && row.target_content && <p className="mt-1.5 border-l border-white/[0.12] pl-3 text-xs leading-5 text-white/50">取代旧的那条：「{row.target_content}」</p>}
+        <p className="mt-1.5 text-xs leading-5 text-white/50"><span className="text-white/55">原因</span> {row.reason}</p>
+        {row.duplicate_hint && <div className="mt-2 border-l border-amber-300/35 pl-3 text-xs leading-5 text-amber-100/75">{row.duplicate_hint}</div>}
+        {row.evidence.length > 0 && <ul className="mt-2 space-y-1 border-l border-green/25 pl-3 text-[11px] leading-5 text-white/50">{row.evidence.map((evidence, index) => <li key={`${evidence.source_type}-${evidence.source_id}-${index}`}><span className="text-green/90">{evidence.source_label}#{evidence.source_id}</span>{evidence.source_time && `（${evidence.source_time.slice(0, 10)}）`}：「{evidence.excerpt}」</li>)}</ul>}
       </div>
-
-      <div style={{ fontSize: "13px", marginTop: "8px" }}>
-        {row.action === "review"
-          ? `${row.decision_label ?? "处理"}：${row.target_content ?? ""}`
-          : row.content}
+      <div className="flex shrink-0 items-center gap-2 lg:items-start lg:pt-0.5">
+        {row.batch_eligible && <label className="inline-flex h-7 items-center gap-1.5 text-[11px] text-white/50"><input type="checkbox" checked={checked} onChange={onToggle} className="size-3.5 accent-green" />批量</label>}
+        <button type="button" disabled={pending} onClick={onApprove} className="inline-flex h-7 items-center gap-1 border border-white/[0.18] bg-white px-2.5 text-xs font-medium text-black hover:bg-white/85 disabled:opacity-35"><Check className="size-3" />批准</button>
+        <button type="button" disabled={pending} onClick={onReject} className="inline-flex h-7 items-center gap-1 border border-white/[0.1] px-2.5 text-xs text-white/60 hover:bg-white/[0.07] hover:text-white disabled:opacity-35"><X className="size-3" />驳回</button>
       </div>
-
-      {row.action === "supersede" && row.target_content && (
-        <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "4px" }}>
-          取代旧的那条：「{row.target_content}」
-        </div>
-      )}
-
-      <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "6px" }}>
-        为什么：{row.reason}
-      </div>
-
-      {row.duplicate_hint && (
-        <div className="alert alert-warning" style={{ fontSize: "12px", marginTop: "8px" }}>
-          {row.duplicate_hint}
-        </div>
-      )}
-
-      {row.evidence.length > 0 && (
-        <ul style={{ margin: "8px 0 0", paddingLeft: "18px", fontSize: "12px" }}>
-          {row.evidence.map((evidence, index) => (
-            <li key={`${evidence.source_type}-${evidence.source_id}-${index}`}>
-              {evidence.source_label}#{evidence.source_id}
-              {evidence.source_time && `（${evidence.source_time.slice(0, 10)}）`}：「
-              {evidence.excerpt}」
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <div className="flex-row gap-sm" style={{ marginTop: "10px" }}>
-        <button type="button" className="primary sm" disabled={pending} onClick={onApprove}>
-          批准
-        </button>
-        <button type="button" className="sm" disabled={pending} onClick={onReject}>
-          驳回
-        </button>
-      </div>
-    </div>
+    </article>
   );
 }
 
 function Modal({ children, onClose }: { children: ReactNode; onClose: () => void }) {
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0, 0, 0, 0.45)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 50,
-      }}
-    >
-      <div className="card" style={{ maxWidth: "620px", width: "90%", margin: 0 }}>
+    <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-5 backdrop-blur-sm">
+      <div className="card-border-gradient max-h-[88vh] w-full max-w-[620px] overflow-y-auto p-5 md:p-6">
         {children}
-        <div className="flex-row gap-sm" style={{ marginTop: "12px" }}>
-          <button type="button" className="sm" onClick={onClose}>
-            关掉
-          </button>
+        <div className="mt-5 flex justify-end">
+          <button type="button" onClick={onClose} className="inline-flex h-8 items-center rounded-md border border-white/[0.1] px-3 text-xs text-white/55 hover:bg-white/[0.07] hover:text-white">关掉</button>
         </div>
       </div>
     </div>

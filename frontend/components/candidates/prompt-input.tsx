@@ -36,6 +36,7 @@ export function PromptInput({
       className="w-full bg-[#141416] border border-white/[0.06] rounded-2xl flex flex-col focus-within:border-white/[0.15] transition-colors p-3 shadow-lg"
     >
       <textarea
+        aria-label="描述你的处境与困惑"
         value={rawText}
         onChange={(e) => {
           setRawText(e.target.value);
@@ -65,17 +66,15 @@ export function PromptInput({
         
         <div className="flex items-center gap-4">
           {bannedCount > 0 && (
-            <span className="text-[11px] text-white/30 hidden md:inline-block tracking-wide">
+            <span className="text-[11px] text-white/50 hidden md:inline-block tracking-wide">
               已避开 {bannedCount} 条禁区
             </span>
           )}
-          <span className="text-[11px] text-white/30 hidden md:inline-block tracking-wide mr-1">
-            Enter 发送
-          </span>
           <button
             type="submit"
+            aria-label="开始找候选"
             disabled={asking || rawText.trim() === ""}
-            className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:bg-white/90 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40 transition-colors shrink-0"
+            className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:bg-white/90 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/50 transition-colors shrink-0"
           >
             {asking ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" />}
           </button>
