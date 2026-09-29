@@ -16,6 +16,7 @@ import {
   ThinkingShimmer,
 } from "@/components/agents/loading-states/thinking-shimmer";
 import { Sparkles, Loader2, Check } from "lucide-react";
+import Link from "next/link";
 import {
   ActionSwapIcon,
   ActionSwapText,
@@ -91,7 +92,7 @@ export function WorkbenchChat() {
   };
 
   const onSplitDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    splitDrag.current = { startX: e.clientX, startW: panelWidth ?? 340 };
+    splitDrag.current = { startX: e.clientX, startW: panelWidth ?? 400 };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onSplitMove = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -117,7 +118,7 @@ export function WorkbenchChat() {
   };
   const onSplitKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     const step = e.shiftKey ? 48 : 16;
-    const base = panelWidth ?? 340;
+    const base = panelWidth ?? 400;
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     const w = clampSplit(e.key === "ArrowLeft" ? base + step : base - step);
     panelWRef.current = w;
@@ -264,7 +265,15 @@ export function WorkbenchChat() {
               加载数据中...
             </div>
           ) : !selectedPlanId ? (
-            <div className="p-8 text-muted/75 text-sm">没有可用的计划</div>
+            <div className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.02] p-8 text-center text-sm text-muted/75">
+              <p>还没有可用的计划。</p>
+              <Link
+                href="/candidates"
+                className="rounded-full border border-white/[0.14] px-4 py-2 text-xs text-primary transition-colors hover:bg-white/[0.08]"
+              >
+                去提出想法
+              </Link>
+            </div>
           ) : (
             <ChatFlow
               dialogue={dialogue}
@@ -344,7 +353,7 @@ export function WorkbenchChat() {
           role="separator"
           aria-orientation="vertical"
           aria-label="拖拽调整计划树宽度（双击复位）"
-          aria-valuenow={panelWidth ?? 340}
+          aria-valuenow={panelWidth ?? 400}
           tabIndex={0}
           onPointerDown={onSplitDown}
           onPointerMove={onSplitMove}
@@ -357,10 +366,10 @@ export function WorkbenchChat() {
 
       {selectedPlanId && (
         <aside
-          style={{ width: panelWidth ?? 340 }}
+          style={{ width: panelWidth ?? 400 }}
           className="hidden min-h-0 shrink-0 lg:flex"
         >
-          <PlanTreePanel planId={selectedPlanId} version={treeVersion} />
+          <PlanTreePanel key={selectedPlanId} planId={selectedPlanId} version={treeVersion} />
         </aside>
       )}
 

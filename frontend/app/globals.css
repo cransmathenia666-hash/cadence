@@ -584,3 +584,26 @@ details:not(.dark *) summary:hover {
   gap: 8px;
 }
 }
+
+/* 根外壳接管旧页面后，限旧页恢复表单可读性；不改已重做页面的视觉。 */
+.legacy-page {
+  --bg-card: var(--surface-raised);
+  --bg-subtle: var(--surface-overlay);
+  --text-main: var(--text-primary);
+  --text-muted: var(--text-secondary);
+  color: var(--text-primary);
+}
+.legacy-page h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
+.legacy-page h2 { font-size: 18px; font-weight: 600; }
+.legacy-page label { display: inline-block; margin-bottom: 4px; }
+.legacy-page :is(input, select, textarea, button, a.primary) {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-overlay);
+  color: var(--text-primary);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.legacy-page :is(button, a).primary { background: var(--primary); color: var(--primary-foreground); }
+.legacy-page button:disabled { opacity: .5; cursor: not-allowed; }
+.legacy-page a:not(.primary) { color: var(--text-primary); text-decoration: underline; }

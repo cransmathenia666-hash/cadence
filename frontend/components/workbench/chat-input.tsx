@@ -80,7 +80,7 @@ export function ChatInput({
               onClick={handleSend}
               disabled={!value.trim() || sending}
               aria-label={sending ? "发送中" : "发送"}
-              className="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-white text-black transition-colors hover:bg-white/85 disabled:bg-white/15 disabled:text-white/45 disabled:opacity-100"
+              className="ml-auto grid size-9 shrink-0 place-items-center rounded-full bg-white text-black transition-colors hover:bg-white/85 disabled:bg-white/15 disabled:text-white/45 disabled:opacity-100"
             >
               <AnimatePresence initial={false} mode="popLayout">
                 <motion.span

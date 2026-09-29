@@ -2,17 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
+import { ArrowRight, CornerDownRight, History, ScanSearch } from "lucide-react";
 
 import { JudgmentView } from "@/components/judgment-view";
-import {
-  ApiError,
-  askMaterial,
-  listJudgments,
-  getProfile,
-  type AskResult,
-  type JudgmentRecord,
-  type ProfileView,
-} from "@/lib/api";
+import { ApiError, askMaterial, listJudgments, getProfile, type AskResult, type JudgmentRecord, type ProfileView } from "@/lib/api";
 
 export default function JudgePage() {
   const [profile, setProfile] = useState<ProfileView | null>(null);
@@ -20,23 +13,15 @@ export default function JudgePage() {
   const [asking, setAsking] = useState(false);
   const [result, setResult] = useState<AskResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-
   const [history, setHistory] = useState<JudgmentRecord[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
-
-  function refreshHistory() {
-    listJudgments()
-      .then((data) => setHistory(data.items))
-      .catch((cause: unknown) =>
-        setHistoryError(cause instanceof ApiError ? cause.message : "取历史时出了意外错误"),
-      );
-  }
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   useEffect(() => {
-    getProfile()
-      .then(setProfile)
-      .catch(() => setProfile(null));
-    refreshHistory();
+    getProfile().then(setProfile).catch(() => setProfile(null));
+    listJudgments().then((data) => setHistory(data.items)).catch((cause: unknown) =>
+      setHistoryError(cause instanceof ApiError ? cause.message : "取历史时出了意外错误"),
+    );
   }, []);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -44,9 +29,9 @@ export default function JudgePage() {
     setAsking(true);
     setError(null);
     setResult(null);
+    setSelectedId(null);
     try {
-      const asked = await askMaterial(rawText);
-      setResult(asked);
+      setResult(await askMaterial(rawText));
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "问模型失败，原因不明");
     } finally {
@@ -54,127 +39,64 @@ export default function JudgePage() {
     }
   }
 
+  const selected = history?.find((item) => item.id === selectedId);
+
   return (
-    <div>
-      <div className="flex-between" style={{ marginBottom: "16px" }}>
+    <div className="mx-auto w-full max-w-[1320px] px-5 pb-24 pt-20 text-white md:px-10 md:pt-24">
+      <header className="mb-12 grid gap-6 border-b border-white/[0.1] pb-8 lg:grid-cols-[minmax(0,1fr)_16rem] lg:items-end">
         <div>
-          <h1>判一份资料：值不值得学</h1>
-          <p style={{ color: "var(--text-muted)", fontSize: "13px", margin: 0 }}>
-            输入你偶然看到的课程、书籍或开源项目，决策引擎结合你的长期档案进行严谨的四问评估。
-          </p>
+          <h1 className="text-[32px] font-semibold tracking-[-0.03em] md:text-[42px]">一份资料，值不值得学？</h1>
+          <p className="mt-3 max-w-[60ch] text-[14px] leading-7 text-white/50">把课程、书籍或项目交给四问判断。它会对照长期档案，给出深度、取舍和时间预算；结论仍由你裁定。</p>
         </div>
-        {profile !== null && (
-          <span className="badge badge-not_started">
-            当前长期档案 {profile.items.length} 条
-          </span>
-        )}
-      </div>
+        <Link href="/profile" className="group flex items-center justify-between border-t border-white/[0.12] pt-4 text-[12px] text-white/55 hover:text-white">
+          <span>判断依据 · {profile ? `${profile.items.length} 条有效档案` : "正在读取档案"}</span><ArrowRight className="size-4 transition-transform group-hover:translate-x-1" />
+        </Link>
+      </header>
 
-      <div className="card">
-        <form onSubmit={onSubmit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-          <div>
-            <label htmlFor="raw" style={{ fontWeight: 600 }}>
-              输入待评估资料或主题：
-            </label>
-            <textarea
-              id="raw"
-              rows={3}
-              value={rawText}
-              onChange={(event) => setRawText(event.target.value)}
-              placeholder="例如：我看到一个 Rust 异步并发与网络协议实战课，要不要学？"
-              disabled={asking}
-              style={{ width: "100%" }}
-              required
-            />
-          </div>
-          <div className="flex-between">
-            <small style={{ color: "var(--text-muted)" }}>
-              四问将输出：①值不值得学 ②目标深度 ③板块取舍 ④时间预算
-            </small>
-            <button type="submit" className="primary" disabled={asking || rawText.trim() === ""}>
-              {asking ? (
-                <>
-                  <span className="spinner" />
-                  <span>正在严格按四问评判…</span>
-                </>
-              ) : (
-                "开始评判"
-              )}
-            </button>
-          </div>
-        </form>
-
-        {error !== null && (
-          <div className="alert alert-danger" style={{ marginTop: "14px" }}>
-            <strong>评判失败：</strong>
-            {error}
-          </div>
-        )}
-      </div>
-
-      {result !== null && (
-        <div className="card" style={{ borderColor: "var(--primary)" }}>
-          <div className="card-header">
-            <div className="flex-row gap-sm">
-              <span className="badge badge-done">四问评判结果</span>
-              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-                （依据 {result.profile_basis.total} 条档案 · 耗时/调用 {result.calls} 次）
-              </span>
+      <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_18rem]">
+        <main className="min-w-0">
+          <form onSubmit={onSubmit} className="border-b border-white/[0.12] pb-8">
+            <label htmlFor="raw" className="mb-4 block text-[12px] font-medium text-white/60">你正在犹豫什么资料？</label>
+            <textarea id="raw" rows={3} value={rawText} onChange={(event) => setRawText(event.target.value)} placeholder="例如：我看到一个 Rust 异步并发与网络协议实战课，要不要学？" disabled={asking} required className="w-full resize-y border-0 bg-transparent p-0 text-[19px] leading-8 text-white outline-none placeholder:text-white/25 focus:ring-0 md:text-[23px]" />
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+              <span className="text-[11px] text-white/35">判断 · 深度 · 取舍 · 时间，四问一次回答</span>
+              <button type="submit" disabled={asking || !rawText.trim()} className="inline-flex min-h-10 items-center gap-3 bg-white px-5 text-[13px] font-semibold text-black hover:bg-white/85 disabled:cursor-not-allowed disabled:opacity-40">
+                {asking ? "正在按四问评判…" : "开始评判"}<ArrowRight className="size-4" />
+              </button>
             </div>
-            <Link href="/proposals" className="btn sm primary">
-              前往待裁定页记账 (#{result.proposal_id}) →
-            </Link>
-          </div>
+          </form>
 
-          <JudgmentView judgment={result.judgment} />
+          {error && <p role="alert" className="mt-6 border-t border-red-400/30 pt-4 text-[13px] text-red-300">评判失败：{error}。原文还在，可以重试。</p>}
+          {asking && <div role="status" className="mt-12 flex items-center gap-3 text-[13px] text-white/50"><ScanSearch className="size-5 animate-pulse" />正在对照档案，请稍候…</div>}
 
-          <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: "10px 0 0" }}>
-            此评判已生成待裁定提案。四问评判的批准仅作决策留痕记账，不会自动变更你的执行计划。
-          </p>
-        </div>
-      )}
-
-      <div style={{ marginTop: "24px" }}>
-        <div className="flex-between" style={{ marginBottom: "12px" }}>
-          <h2>已裁定的资料评估历史（只读回看）</h2>
-          <small>仅展示已裁定生效的判断记录</small>
-        </div>
-
-        {historyError !== null && (
-          <div className="alert alert-danger">{historyError}</div>
-        )}
-
-        {history === null && (
-          <div className="card" style={{ textAlign: "center", padding: "30px" }}>
-            <span className="spinner" style={{ width: "18px", height: "18px" }} />
-            <p style={{ color: "var(--text-muted)", marginTop: "8px" }}>读取历史评估中…</p>
-          </div>
-        )}
-
-        {history !== null && history.length === 0 && (
-          <div className="card" style={{ textAlign: "center", padding: "30px" }}>
-            <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无历史判断记录。</p>
-          </div>
-        )}
-
-        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-          {(history ?? []).map((item) => (
-            <div key={item.id} className="card" style={{ margin: 0, padding: "14px 18px" }}>
-              <div className="flex-between" style={{ marginBottom: "8px" }}>
-                <span style={{ fontWeight: 600 }}>{item.source_text}</span>
-                <div className="flex-row gap-sm">
-                  <span className={`badge ${item.status === "accepted" ? "badge-done" : "badge-stuck"}`}>
-                    {item.status === "accepted" ? "裁定通过" : "裁定否决"}
-                  </span>
-                  <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-                    {item.decided_at?.slice(0, 10)}
-                  </span>
-                </div>
+          {result ? (
+            <section className="mt-12" aria-labelledby="judgment-title">
+              <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+                <div><h2 id="judgment-title" className="text-[22px] font-medium">四问判断</h2><p className="mt-1 text-[11px] text-white/40">依据 {result.profile_basis.total} 条档案 · 模型调用 {result.calls} 次</p></div>
+                <Link href="/proposals" className="inline-flex items-center gap-2 text-[13px] text-white underline underline-offset-4 hover:text-white/65">去裁定并记账 #{result.proposal_id}<ArrowRight className="size-4" /></Link>
               </div>
-              {item.judgment && <JudgmentView judgment={item.judgment} />}
-            </div>
-          ))}
-        </div>
+              <JudgmentView judgment={result.judgment} />
+              <p className="mt-5 max-w-[65ch] text-[12px] leading-6 text-white/40">判断已经生成待裁定提案。批准只留下决策记录，不会自动改变执行计划。</p>
+            </section>
+          ) : selected?.judgment ? (
+            <section className="mt-12" aria-labelledby="history-detail-title">
+              <div className="mb-7 flex items-start justify-between gap-4"><div><h2 id="history-detail-title" className="max-w-[65ch] text-[21px] font-medium leading-snug">{selected.source_text}</h2><p className="mt-2 text-[12px] text-white/40">{selected.decided_at?.slice(0, 10)} · {selected.status === "accepted" ? "已批准" : "已否决"} · 历史记录只读</p></div><button type="button" onClick={() => setSelectedId(null)} className="shrink-0 text-[12px] text-white/45 hover:text-white">收起</button></div>
+              <JudgmentView judgment={selected.judgment} />
+            </section>
+          ) : (
+            <div className="mt-14 flex min-h-32 items-start gap-4 text-white/35"><CornerDownRight className="mt-1 size-5 shrink-0" /><p className="max-w-[42ch] text-[14px] leading-7">写下你正在考虑的资料，判断会在这里展开；也可以从右侧翻看已裁定的记录。</p></div>
+          )}
+        </main>
+
+        <aside className="min-w-0 border-t border-white/[0.12] pt-5 lg:border-l lg:border-t-0 lg:pl-7 lg:pt-0" aria-label="历史判断">
+          <div className="mb-5 flex items-center gap-2 text-white/65"><History className="size-4" /><h2 className="text-[13px] font-medium">已裁定的判断</h2><span className="ml-auto font-mono text-[11px] text-white/35">{history?.length ?? "—"}</span></div>
+          {historyError && <p role="alert" className="text-[12px] text-red-300">{historyError}</p>}
+          {history === null && !historyError && <p role="status" className="text-[12px] text-white/35">正在读取历史…</p>}
+          {history?.length === 0 && <p className="text-[12px] leading-6 text-white/40">还没有已裁定记录。完成一次评判并裁定后会出现在这里。</p>}
+          <div className="divide-y divide-white/[0.08]">
+            {history?.map((item) => <button key={item.id} type="button" onClick={() => { setResult(null); setSelectedId(selectedId === item.id ? null : item.id); }} aria-pressed={selectedId === item.id} className={`w-full py-4 text-left transition-colors hover:text-white ${selectedId === item.id ? "text-white" : "text-white/60"}`}><span className="block text-[13px] leading-6">{item.source_text}</span><span className="mt-2 block text-[11px] text-white/35">{item.decided_at?.slice(0, 10)} · {item.status === "accepted" ? "批准" : "否决"}</span></button>)}
+          </div>
+        </aside>
       </div>
     </div>
   );

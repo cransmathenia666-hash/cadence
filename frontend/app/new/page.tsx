@@ -1,7 +1,5 @@
 "use client";
 
-import "../cadence-theme.css";
-
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
@@ -141,7 +139,7 @@ export default function NewPage() {
   }
 
   return (
-    <div className="dark min-h-screen p-6 md:p-10">
+    <div className="dark min-h-screen px-6 pb-10 pt-20 md:px-10">
       <div className="max-w-5xl mx-auto space-y-10">
         <div className="space-y-2">
           <Link

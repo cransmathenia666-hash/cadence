@@ -25,7 +25,6 @@ import {
   type ApprovalCardAnswers,
   type ApprovalCardQuestion,
 } from "@/components/agents/approval-card";
-import { TiltCard } from "@/components/motion/tilt-card";
 import { SPRING_SWAP } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
@@ -126,9 +125,9 @@ function SuggestionCard({
   }
 
   return (
-    <TiltCard max={5} className="mt-2 w-full max-w-[520px] rounded-2xl">
+    <div className="mt-2 w-full max-w-[520px]">
       {/* 卡面对齐 ApprovalCard：同款深色浮起，不要渐变亮边、光晕与扫光 */}
-      <div className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-[#131316] px-5 py-4 shadow-[0_8px_32px_rgba(0,0,0,0.45)]">
+      <div className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-surface2/80 px-5 py-4 shadow-[0_8px_32px_rgba(0,0,0,0.45)]">
         {error && (
           <div className="text-red-300 text-xs mb-3 bg-red-400/10 px-2 py-1 rounded">
             {error}
@@ -137,7 +136,7 @@ function SuggestionCard({
 
         <div className="flex items-center gap-2.5 mb-3">
           <span className="relative flex h-2 w-2 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60"></span>
+            <span className="absolute -inset-1 rounded-full border border-amber-500/20"></span>
             <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500"></span>
           </span>
           {/* 状态是拍板依据，亮度不低于 white/70 一档 */}
@@ -157,7 +156,7 @@ function SuggestionCard({
           <button
             onClick={() => handleDecide(true)}
             disabled={loading}
-            className="inline-flex flex-1 items-center justify-center gap-2 rounded-full bg-white px-4 py-2 text-[13px] font-medium text-black transition-colors hover:bg-white/85 disabled:opacity-50"
+            className="inline-flex flex-1 items-center justify-center gap-2 rounded-full bg-white px-5 py-2.5 text-[15px] font-medium text-black transition-colors hover:bg-white/85 disabled:opacity-50"
           >
             <Check className="w-3.5 h-3.5" />
             {loading ? "处理中..." : "确认"}
@@ -175,7 +174,7 @@ function SuggestionCard({
           确认后才会真的改动计划；忽略会记入台账。
         </p>
       </div>
-    </TiltCard>
+    </div>
   );
 }
 
@@ -369,15 +368,13 @@ function QuestionCard({
 
   return (
     <div className="mt-2 w-full max-w-[520px]">
-      <TiltCard max={4} className="rounded-2xl">
-        <ApprovalCard
-          title="cadence 想先问清楚"
-          questions={items}
-          status={submitting ? "submitting" : "pending"}
-          submitLabel="提交回答"
-          onSubmit={handleSubmit}
-        />
-      </TiltCard>
+      <ApprovalCard
+        title="cadence 想先问清楚"
+        questions={items}
+        status={submitting ? "submitting" : "pending"}
+        submitLabel="提交回答"
+        onSubmit={handleSubmit}
+      />
       <p
         className={cn(
           "mt-2 text-[11px] leading-relaxed",

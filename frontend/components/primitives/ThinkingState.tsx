@@ -1,5 +1,6 @@
 "use client";
 
+import { useReducedMotion } from "motion/react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 /* ─────────────────────────────────────────────────────────
@@ -107,6 +108,7 @@ export default function ThinkingState({
   /** override the header glyph (defaults to the sparkle) */
   icon?: ReactNode;
 }) {
+  const reduce = useReducedMotion() ?? false;
   const stage = useSequence(STAGES);
   const [manualExpanded, setManualExpanded] = useState<boolean | null>(null);
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
@@ -136,14 +138,7 @@ export default function ThinkingState({
   }, [working, onSettled]);
 
   return (
-    <div
-      key={variant}
-      className="flex w-full max-w-95 flex-col"
-      style={{
-        minHeight: working || expanded ? 176 : undefined,
-        transition: "min-height 400ms cubic-bezier(0.23,1,0.32,1)",
-      }}
-    >
+    <div key={variant} className="flex w-full max-w-95 flex-col">
       {/* header — shared across variants */}
       <button
         type="button"
@@ -169,7 +164,7 @@ export default function ThinkingState({
                 backgroundImage:
                   "linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%)",
                 backgroundSize: "200% 100%",
-                animation: "shimmer-text 1.4s linear infinite",
+                animation: reduce ? undefined : "shimmer-text 1.4s linear infinite",
               }}
             >
               {v.active}
@@ -177,7 +172,7 @@ export default function ThinkingState({
           ) : (
             <span
               className="text-[13px] font-medium whitespace-nowrap text-ink-2"
-              style={{ animation: "fade-in 350ms ease-out both" }}
+              style={{ animation: reduce ? undefined : "fade-in 350ms ease-out both" }}
             >
               {v.done}
             </span>
@@ -185,7 +180,7 @@ export default function ThinkingState({
         </span>
         <svg
           width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
-          className="transition-transform duration-300"
+          className="transition-transform duration-300 motion-reduce:transition-none"
           style={{ transform: expanded ? "rotate(180deg)" : "rotate(0)" }}
         >
           <path d="M6 9l6 6 6-6" />
@@ -198,6 +193,7 @@ export default function ThinkingState({
         style={{
           gridTemplateRows: expanded ? "1fr" : "0fr",
           opacity: expanded ? 1 : 0,
+          transitionDuration: reduce ? "1ms" : "400ms",
           transitionTimingFunction: "cubic-bezier(0.23, 1, 0.32, 1)",
         }}
       >
@@ -206,11 +202,14 @@ export default function ThinkingState({
             <span
               aria-hidden
               className="absolute left-[3px] w-px bg-line"
-              style={{ top: -8, height: lineHeight ? lineHeight - 2 : 0, transition: "height 500ms cubic-bezier(0.23,1,0.32,1)" }}
+              style={{
+                top: -8,
+                height: lineHeight ? lineHeight - 2 : 0,
+              }}
             />
             <div ref={traceRef} className="flex flex-col gap-1 py-1">
             {v.query && (
-              <div className="flex h-6 items-center gap-2 px-1.5" style={{ animation: expanded ? "fade-up 300ms cubic-bezier(0.23,1,0.32,1) both" : undefined }}>
+              <div className="flex h-6 items-center gap-2 px-1.5" style={{ animation: !reduce && expanded ? "fade-up 300ms cubic-bezier(0.23,1,0.32,1) both" : undefined }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" strokeWidth="2" strokeLinecap="round" className="shrink-0">
                   <circle cx="11" cy="11" r="7" />
                   <path d="M21 21l-4.3-4.3" />
@@ -228,7 +227,7 @@ export default function ThinkingState({
                       <path d="M20 6L9 17l-5-5" />
                     </svg>
                   ) : (
-                    <span className="size-3 shrink-0 rounded-full border-[1.5px] border-line-strong border-t-ink-2" style={{ animation: "spin 700ms linear infinite" }} />
+                    <span className="size-3 shrink-0 rounded-full border-[1.5px] border-line-strong border-t-ink-2" style={{ animation: reduce ? undefined : "spin 700ms linear infinite" }} />
                   )
                 )}
                 <span className={`min-w-0 truncate text-[12.5px] ${variant === "Reasoning" ? "whitespace-normal leading-relaxed text-ink-2" : "font-medium text-ink"} ${variant === "Search" ? "animated-underline" : ""}`}>
@@ -248,7 +247,9 @@ export default function ThinkingState({
                 </>
               );
               const rowClass = "flex min-h-7 w-full items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-left";
-              const animation = { animation: `fade-up 320ms cubic-bezier(0.23,1,0.32,1) ${i * 120}ms both` };
+              const animation = {
+                animation: reduce ? undefined : `fade-up 320ms cubic-bezier(0.23,1,0.32,1) ${i * 120}ms both`,
+              };
 
               if (variant === "Search") {
                 return (
@@ -288,7 +289,7 @@ export default function ThinkingState({
               );
             })}
             {variant === "Search" && stage >= 3 && (
-              <span className="text-[12px] text-ink-3" style={{ animation: "fade-in 300ms ease-out both" }}>
+              <span className="text-[12px] text-ink-3" style={{ animation: reduce ? undefined : "fade-in 300ms ease-out both" }}>
                 +7 more
               </span>
             )}
