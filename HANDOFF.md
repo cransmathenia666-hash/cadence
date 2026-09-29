@@ -1,30 +1,29 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-27（**/candidates 重做**（E-58））
+> 最近更新：2026-09-29（E-65：工作台右栏改章节/目录双视图，lint/tsc 通过；界面走查归用户）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜**分支 `feat/frontend-a-shell`**｜**远端**：`origin` 公开库（备份 `D:\cadence-history-backup-20260923.bundle`）｜**未提交改动**：无（用户私人笔记 `docs/认领链条笔记.md` 留本机不入库）
-> 其他工作树：无
-> 当前唯一目标：**比赛前端冲刺——剩余页面按模板逐页重做**（报告 → 记忆 → 档案 → 设置）；P4 与「接本地库」排后
-> 下一条动作：① 用户手工走查工作台（E-57）、/candidates（E-58）与 /memory（E-56）；② 通过后重做档案页；③ 反重力 CLI 先 ping
+> 主工作树：`D:\cadence`｜分支 `feat/frontend-a-shell`｜HEAD `d07967b`，领先 origin 32 提交；工作区未提交（视觉 + 流程闭环 + 回归 + 双入口整改 E-61～E-63 + 节点放回）。本轮未 commit/push/stash/reset；origin 为公开库，历史备份 `D:/cadence-history-backup-20260923.bundle`。
+> 其他工作树：`D:\cadence-flow-closure`｜同 HEAD，只读保留。
+> 当前唯一目标：工作台 PC 阶段视图已重构，静态检查通过，待用户走查；四旧页与双入口真实模型走查仍待用户，P4 与「接本地库」排后。
+> 下一条动作：用户在 `/workbench` 桌面端查看当前阶段、切目录选其他阶段、完成/放回任务、提交交付物及周报告入口；四旧页与双入口仍待走查。真实写入由用户决定；此前用 **tools/dev_server.py** 重启后端；不清真实库。
 
 ## 1. 当前状态
 
 | 范围 | 状态 | 证据依据 | 有效范围/失效条件 |
 | --- | --- | --- | --- |
-| 后端地基与规则层（P0 schema / ledger；P1 状态机 / 落后量 / 周检查点 T4–T6；建节点防重复 T19；台账语义归属 T20） | 通过 | E-19、E-38 | `ledger.py` / `plan.py` / `backend/` 代码与测试变更后失效 |
-| 接口契约（入参校验 + 方案 C 错误形状 + CORS + 启动） | 通过 | E-19 | `main.py`、`config.py` 或接口契约变更后失效 |
-| 端到端闭环与两个自查脚本 | 通过 | E-19；E-51（冒烟 17 步） | 脚本、既有路由或 `backend/app/plan.py` 变更后失效；计划类数据 2026-09-17 清库（见第 3 节），只有档案可复查 |
+| 后端规则、接口与闭环回归 | 通过 | 本轮 E-60；历史语义沿用 E-19/E-38/E-51 | 本轮后端验证范围见 E-60 |
 | LLM provider 管理与调用记账（T10） | 通过 | E-26、E-32 | `llm.py`、或那 6 条 provider / llm-calls 路由与请求模型变更后失效 |
-| 前端 P2 四页（`/`、`/new`、`/report`；T7–T9）与 provider 管理页（T11） | 通过 | 各轮 lint/tsc exit=0＋用户走查 | 相应页面行为、`lib/api.ts` 对应函数或 `Provider*` 类型变更后失效 |
+| 统一外壳、工作台执行与报告回流 | 通过 | E-60（静态与构建）＋本轮 E-65（工作台 lint/tsc） | 工作台章节/目录切换仅静态验证，桌面操作待用户走查；`plan-tree-panel.tsx` 或 `workbench-view.tsx` 的阶段选择/操作变更后 E-65 失效 |
 | 四问判断链路（T12） | 通过 | E-26、E-27（真实模型一次） | `advisor.py`、`/api/requests`、`/api/profile`、`RequestIn` 变更后失效 |
-| 候选清单页（T14；落点可就地新建计划；**追问槽=对话输入框作答（09-27 定）、路径候选一张卡**；E-54：切页存续/历史轮次） | 通过 | E-37、E-54、E-58 | `app/(app)/candidates/page.tsx` 与 `components/candidates/`（含 `find-session.ts`）的行为、或 `listCandidates` / `findCandidates` / `verdictCandidate` 变更后失效；**走查归用户** |
-| 提案裁定（T14`/proposals` + 两条后端路由；09-26 迁壳重做） | 通过 | E-37、E-53 | `backend/app/proposals.py`、那两条路由与请求模型、`app/(app)/proposals/`、`components/proposals/`、`lib/api.ts` 的 `listProposals` / `decideProposal` 变更后失效；走查归用户 |
+| 候选清单、明确轮次追问与历史恢复 | 通过 | 本轮 E-63（后端路由级＋前端 lint/tsc） | 逐轮回复/保持形态/交错分段已修；**刷新与切页观感走查归用户**；`candidates/page.tsx`、`find-session.ts`、`api.ts`、`advisor.list_search_requests` 变更后失效 |
+| 提案裁定与批准结果卡 | 通过 | 本轮 E-60（静态）；后端规则沿用 E-37 | 结果卡跳转与裁定视觉待走查；失效范围见 E-60 |
+| 判断、档案、模型接入、报告四页新构图 | 通过 | E-64（lint/tsc） | 仅静态验证；桌面/窄屏与交互待用户走查；四页、`judgment-view.tsx`、外壳改动后失效 |
 | 「找」候选清单与去重（T13） | 通过 | E-31/E-32（假上游）、E-33/E-34/E-36（真实模型两次 + 采纳落阶段） | `find_candidates` / `_check_find` / `decide_candidate`、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效 |
-| 「找」加宽（T25：反馈流水 + 追问槽位；**T36 已修订追问口径；E-52/E-54 走查整改两轮已过**） | 通过 | E-40/E-41、E-52、E-54 | `advisor._feedback_block`、`_answered_clarifies`、`compose_clarify_round`、`_check_find`、`_clarify_problem`、`find.py` 的 prompt 段与形状行、`/api/requests` 响应那两个新字段变更后失效 |
+| 双入口对话整改（线程/追问/形态/更替/蓝图门槛/工作台建议/逐轮历史） | 通过 | E-62＋本轮 E-63（pytest 528 passed、隔离冒烟 17 步、前端 lint/tsc 通过） | 六项口径与复核缺口均落地；`advisor`/`dialogue`/`blueprint` 的门槛与历史相关函数、`main._search_round`、`db._ADDED_COLUMNS` 那 4 列、`/api/find/shape/keep`、候选页与提案页组件变更后失效；**真实模型观感与桌面走查归用户** |
 | 档案录入（T22） | 通过 | E-29/E-30 | 那三条 profile 写路由与请求模型、`advisor.PROFILE_CATEGORIES` 变更后失效 |
 | 采纳自动落阶段（2026-09-17 用户拍板） | 通过 | E-33/E-34/E-36 | `decide_candidate`、verdict 路由或 `VerdictResult` 变更后失效 |
 | 多计划与严格分开（T24） | 通过 | E-39 | `plan.list_plans`/`close_plan`/`void_plan`、`db._ADDED_COLUMNS` 那条加列、`advisor` 的归属与过期逻辑、`find.py` 的计划上下文段、那三条计划路由、计划切换器与 `/candidates` 页面变更后失效；**走查归用户** |
-| 三级结构：任务层 + 交付物验收（T23） | 通过 | E-38 | `plan.py` 的判定与三个动作（`stage_completion` / `stage_finished` / `check_task` / `skip_task` / `submit_deliverable`）、`main.py` 那三条动作路由、`deliverable_submission` 表、计划表组件与 `/new` 页变更后失效；**浏览器走查归用户** |
+| 三级结构：任务层 + 交付物验收（T23）＋节点「放回」（2026-09-28） | 通过 | E-38；历史全量 524 passed／1 例对话硬闸重试失败（与本改无关），冒烟 17 步含放回断言；本轮 E-65 前端静态 | `plan.py` 的判定与动作（`stage_completion` / `stage_finished` / `check_task` / `skip_task` / `submit_deliverable` / `reopen_node`）、`main.py` 四条动作路由（含 `/reopen`）、`deliverable_submission` 表变更后后端证据失效；计划树现为章节/目录切换，前端行为待用户走查（任务点标题展开、打勾先确认、已完成可放回） |
 | 计划生命周期四态与历史计划出口（T27） | 通过 | E-42 | `plan.pause_plan` / `reopen_plan` / `list_plans` 的 `ended_*` 两字段、`proposals.decide` 的收尾判据、两条新路由、首页计划管理区与「历史计划」段、`api.ts` 的 `pausePlan` / `reopenPlan` 变更后失效；**浏览器走查归用户** |
 | 计划级对话（T28：接着聊 + 档案变更提案能真写档案；**09-26 起信封可带结构化追问 → 界面问答卡（E-55）**） | 通过 | E-47、E-55 | `dialogue.py`（含 `Reply.questions`）、`plan_dialogue.questions` 列、`profile.py` 的写入规则、`proposals.decide` 的 profile_change 分支、`components/workbench/` 与 `components/agents/`、`lib/api.ts` 对话类型变更后失效；**真实模型未跑过追问，走查归用户** |
 | 提案瘦身与页面分家（T29）＋节点字段写入口（T30） | 通过 | E-44、E-45 | `plan.update_node_fields` 与 `/fields` 路由、`proposals.decide`、`plan_tree` 的落后提醒两字段、`/judge` 与 `/proposals` 两类渲染、`plan-tree.tsx` 的改字段入口变更后失效；**页面走查归用户** |
@@ -33,24 +32,22 @@
 | 候选路径形状 · 阶段跳过 · 追问槽收口（P3.7，T34–T36） | 通过 | E-48 | `advisor` 的 `FoundList` / `_shape_problem` / `_shape_and_steps`、`find.py` 的 prompt 段、`plan.skip_node`、`advisor.pending_clarify` / `record_clarify`、`candidate.payload` 与 `learning_request.clarify` 两列、`/api/requests` 的 `clarify_answer`、`candidates/page.tsx` 与 `plan-tree.tsx` 变更后失效；**真实模型未跑，走查归用户** |
 | 采纳落点留得住（T37，2026-09-21 走查截图触发） | 通过 | E-49 | `advisor.landing_plan` 的优先序、`decide_candidate` 写落点那一条、`candidate.landing_plan_id` 列、`blueprint.resolve_plan`、`/api/candidates` 的 `landing_plan_id`、`candidates/page.tsx` 的落点优先序变更后失效；**只验假上游** |
 | 对话式规划与蓝图（T26） | 通过 | E-40/E-41 | `blueprint.py`、`proposals.decide` 的蓝图分支与 `ProposalDecideIn.selected`、`blueprint.resolve_plan` 的归属解析、`plan_chat` 表、`/candidates` 对话区与 `/proposals` 的蓝图渲染变更后失效；**真实模型未跑，走查归用户** |
-| 记忆系统：三层记忆 · 记忆候选 · 扫描 · 彻底删除（P3.9，T38–T41）＋**走查整改（T42–T45）** | 通过 | E-50、E-51、E-56 | `backend/app/memory.py`、`agent_tools` 的 `TOOLS`、`proposals.decide` 的 `memory_change` 分支、`/api/memory*` 那十一条路由、`frontend/app/memory/page.tsx` 的业务动作或 `api.ts` 对应函数变更后失效；**真实模型没跑过，走查归用户** |
-| E-50 / 2026-09-21 | **P3.9 记忆系统（T38–T41）**（决策 42）：`pytest -q` **429 passed**、冒烟 **17 步**、lint/tsc exit=0 | `test_memory.py` 可复跑 | 通过：跨计划读不到；来源 / 摘录 / 完全重复 / 取代目标失效判不合格、**近似重复只提示**；批量只收「新增 + 用户陈述」；到期的不进默认结果；游标只推进处理过的部分；彻底删除清正文、残留如实列 | 失效条件见第 1 节记忆系统那行。**只验假上游**；**真实模型跑扫描归用户走查** |
-| E-51 / 2026-09-21 | **P3.10 记忆走查整改（T42–T45）**（决策 43）：`pytest -q` **443 passed**（+14）、冒烟 **17 步**、lint/tsc exit=0；真库已 `db.init` 补 `memory_deletion.plan_id` | `test_memory.py` / `test_agent.py` / `test_dialogue.py` 可复跑 | 通过：显式日期优先于默认 90 天且续期不产生新行；散文只在**重试之后**被收下；中文别名+报错只列中文名；记忆变过 → 摘要列对动作、没变 / 没读过 / 别的计划的不出现且进下轮开头排在额度之后 | 失效条件见第 1 节 Agent 与记忆系统两行。**只验假上游**；**「摘要出现那一轮它真读了记忆」留给用户真机走查** |
+| 记忆系统：三层记忆 · 候选 · 扫描 · 删除（P3.9，T38–T45） | 通过 | E-50、E-51、E-59 | `backend/app/memory.py`、`agent_tools`、`proposals.decide`、`/api/memory*`、`frontend/app/(app)/memory/page.tsx` 或 `api.ts` 变更后失效；**真实模型没跑过，走查归用户** |
 | SPEC 第 9 节真实使用验收 | 未验证 | 标准 1、5 后端部分由 E-19 与 E-38 覆盖 | 需 P2–P4 完成后 |
 
 ## 2. 当前目标与完成定义
-
 **目标：见文件头；P4（T15–T17）排后。**
 
 ## 3. 当前开放问题
 
-无阻塞。**待用户亲手做的事**：见「下一条动作」；有空可独立复核 pytest -q。
+**双入口整改已收口（E-63）**：上一轮复核列出的缺口全部落地——蓝图要「最新回话就绪且不再提问」才可生成、空白目标/交付物生成期即拦；工作台以「原话里有明确修改要求」或「对紧邻的具体澄清问题回确认」为授权，只报近况时先澄清；找方向逐轮落库原话/意图/回复并进下一轮上下文，追问点名精确到轮、占用带属主（旧属主不能释放或提交接管者的占用）、只有「重新推荐」才更替同线程旧候选；候选页刷新恢复逐轮对话与「保持原形态」决定、失败保留原话、A→B→A 归一段。余下只有：真实模型措辞与桌面观感（归用户走查）。真库 4 列已幂等补上，未用真库实验。
 
-候选队列——**一个仍有的事**：`start_reason` 未落库（加列 = Ask first），重看旧候选要依据得重问一轮。**记忆系统那侧**：周扫描的定时入口要等 P4 的 T16 周任务接上（两个开关已就绪，只差定时器）；真库的记忆与收件箱是空的（老档案已标 `legacy_manual`）。
+候选队列——**一个仍有的事**：`start_reason` 未落库（加列 = Ask first），重看旧候选要依据得重问一轮。**记忆系统那侧**：周扫描的定时入口要等 P4 的 T16 周任务接上（两个开关已就绪，只差定时器）；真库记忆与收件箱为空——见下方「真实库现状」，2026-09-28 已整库清空。
 
-- **真实库现状**：计划类数据曾于 2026-09-17 按用户指示**物理清库**（`tools/wipe_plan_data.py`，备份 `.bak-20260917-234923` 可回退），此后他走查又建了真实计划。**别拿清库时那批旧数字对账**。4 条已采纳候选里 3 条的落点靠对话记录定得下来，**候选 #22 是 T37 修之前采纳的、落点为空，需要在界面上选一次计划**；**计划对话那条链（P3.6）真库还没跑过**。
+- **真实库现状**：**2026-09-28 整库清空，随后据他本人的 Obsidian 知识库重建了长期档案**。清空清的是 19 张业务表（计划/节点/候选/提案/两种对话/运行记录/交付/记忆与扫描/台账流水/调用记账，自增主键归零），只留 `llm_provider`（2 个，密钥没动）——他对「档案与配置是否一起清」答的是「模型提供商留着，其他人全删了」。**现在**：`profile_item` 22 条五类齐全（`source_kind` = 20 条用户陈述 + 2 条待验证，15 条带事实时间、3 条带复核日期），计划类与记忆仍为空；回退点 `.bak-20260928-014049`（2026-09-17 那次只清计划类、留了档案，口径不同别混着对账）。
+- **档案来源与知识库里的方向性事实**：22 条提炼自库外两份 vault——`C:\Users\123\Documents\Obsidian Vault\个人知识库`（93 篇，正式结论在 `10-生活/01-个人基础` 与三个领域总览）和 `D:\学习`（课程资产与进度）。**vault 不进本仓库**：个人内容只写本地库，不写进提交或本文件；取料按 SPEC「接本地库」的点名式两层，一次性脚本用完即删。清库前那些具体数字（候选 #22 落点、P3.6 真库未跑）**全部失效**，`/judge` 不必再为缺判据底座重新录料。那份库另记着一条未经他口头确认的方向：cadence 暂停新功能开发、留作以后的工程样本，当前学习主线是 Python 命令行小项目，实习投递 2027-03 才开始——**别主动推 cadence 新功能**。
 - **两个已知边界**：① 去重只做「去空白 + 转小写」——换个说法的同一件事仍可能被当新候选；② 长输出慢（E-31/E-32/E-34）：最坏一次 `find` 约 6 分钟；提速得压 prompt，未做。
-- **口径与约定**：① 候选在 `/candidates` 裁定、提案在 `/proposals`（五类：蓝图 / 档案变更 / 资料判断 / 计划改动 / **记忆候选**）、判资料在 `/judge`、记忆在 `/memory`；② 档案类别只收五个约定令牌（表外 422）、取代与作废必填理由、同类别同文本回 409；③ 四问输出没给 id 又不说「依据不足」→ 一律判不合格；④ 档案 #4/#5 是修复前留下的重复，**未清**；⑤ **`/report` 只列「最新 active 计划」的节点**；⑥ 两种对话别混（`/candidates` 那段绑候选、6 轮、出树；计划页那块绑计划、不限轮数、能提建议＋提炼档案）；⑦ **记忆候选只有「新增 + 你明说的」能批量批准**（取代 / 推断 / 彻底删除逐条）；改与作废走台账，彻底删除走「预览 → 确认 → 全库复扫」。其余口径（落后提醒、原地改字段、聊天建议、三层「不要」出口）见 SPEC 决策 30/38/39/41。
+- **口径与约定**：候选在 `/candidates`，提案在 `/proposals`，判资料在 `/judge`，记忆在 `/memory`；`/` 跳转 `/workbench`，`/new` 为高级手工入口。报告按 URL 的计划/周检查点进入，侧栏携带所选计划；直接无参数访问仍取最新 active 计划。候选规划对话与计划长对话不混用；记忆批量批准仅「新增 + 用户明说」，其余逐条裁定；彻底删除仍需预览与确认。其余规则见 SPEC。
 - **样式与零散口径**：`POST /api/report` 无防重复（正解是前端禁用）；框架生成的 `404`/`405` 文案仍是英文；provider 的「地址/模型」清不成空（留空 = 不改）；`ledger.fetch_active` 取的是「初始业务状态」（名字误导、行为没错）；前端 effect 里同步 setState 会被 lint 拦（取数写成 `.then` 回调）；**数据库连接关掉了 sqlite3 的跨线程检查**（不关会随机 500）。
 
 ## 4. 稳定边界与重新打开条件
@@ -62,7 +59,7 @@
 - 错误响应统一为 `{"detail": 中文一句话, "errors": 数组}`（SPEC 第 18 节第 24 条）；前端只按这一种形状处理。
 - **P2 取数架构：浏览器直连**（决策 26）。前端用客户端组件，`lib/api.ts` 在浏览器里 fetch 后端，因此受 CORS 名单约束。不采用服务端取数路线（理由见 SPEC 第 10 节）。
 - 前端不得持久化业务状态，不得直连数据库或 LLM；业务规则在后端算完再给前端；LLM 只产出结构化提案，写入必须经用户裁定。
-- 已定决策共 43 条见 `docs/SPEC.md` 第 18 节，除用户明确要求不重新讨论；台账拆列（方案 A）只在 SPEC 第 17 节第 2 条那三个条件满足时才重开。
+- 已定决策共 44 条见 `docs/SPEC.md` 第 18 节（双入口对话修订为第 44 条），除用户明确要求不重新讨论；台账拆列（方案 A）只在 SPEC 第 17 节第 2 条那三个条件满足时才重开。
 - `无标题-2026-09-14-2037.excalidraw` 是用户手绘的原始设计图，**只留本机、已不入库**，不得删除或改写。
 - 本地库 `data/cadence.db` 存着用户真实档案与手工验收痕迹（现状见第 3 节）——**不得清库**。
 
@@ -70,24 +67,25 @@
 
 | 编号/日期 | 来源、操作与环境 | 留存/访问 | 结论 | 适用范围/失效条件 |
 | --- | --- | --- | --- | --- |
-| E-19 / E-26 / E-27 / E-29 / E-30 / E-31 / E-32 / E-33 / E-34 / E-36（2026-09-15–17） | P0–P3 早期：CORS 与错误形状、四问（**真实模型端到端跑通一次**）、档案录入与防重复、候选链路与两次真实模型「找」＋采纳落阶段。**逐题记录见 `tasks/todo.md`** | `test_advisor.py` / `test_profile_write.py` / `test_candidates.py` / `test_llm.py` 可复跑 | 通过：错误键集恒为 `{detail, errors}`；四问没给 id 又不说「依据不足」判不合格；档案五令牌外 422、同文本 409；候选越界与禁区命中判不合格、两次不落一条；采纳落同名阶段、撞名 409 | 各自失效条件见第 1 节对应行。**真实模型只跑过 1 次（四问）与 2 轮（「找」）** |
+| E-19 / E-26 / E-27 / E-29 / E-30 / E-31 / E-32 / E-33 / E-34 / E-36（2026-09-15–17） | P0–P3 早期：CORS 与错误形状、四问（真机一次）、档案录入与防重复、候选链路与两次真机「找」＋采纳落阶段 | `test_advisor.py` / `test_profile_write.py` / `test_candidates.py` / `test_llm.py` 可复跑 | 通过：错误键集恒为 `{detail, errors}`；四问没给 id 又不说「依据不足」判不合格；档案五令牌外 422、同文本 409；候选越界与禁区命中判不合格、两次不落一条；采纳落同名阶段、撞名 409 | 各自失效条件见第 1 节对应行。**真实模型只跑过 1 次（四问）与 2 轮（「找」）** |
 | E-37 / 2026-09-17 | **T14：提案两条后端路由 + 两个正式页**。`pytest -q` 216 passed、冒烟 9 步；lint/tsc exit=0 | `test_proposals.py` 可复跑 | 通过：只列 pending；裁定落业务终态并补 `decided_at`；缺理由 400、已裁定 409、不存在 404 | `proposals.py`、那两条路由与请求模型、两个页面、`api.ts` 两个函数变更后失效。**只验假上游**；**走查归用户** |
-| E-38 / 2026-09-17 | **T23 三级结构与交付物验收**（决策 30–32）：`plan_node.level` 加 `task`、新表 `deliverable_submission`、打勾 / 跳过 / 交交付物三条路由。`pytest -q` 229 passed、冒烟 10 步全绿、lint/tsc exit=0 | `test_task_layer.py` 可复跑 | 通过：四组合判定符合规则；跳过算完成且理由进台账；交付物只对阶段、重提交留痕；打勾/跳过只对任务 | 失效条件见第 1 节同名行。**浏览器走查归用户** |
+| E-38 / 2026-09-17 | **T23 三级结构与交付物验收**（决策 30–32）：`plan_node.level` 加 `task`、新表 `deliverable_submission`、打勾 / 跳过 / 交交付物三条路由。`pytest -q` 229 passed、lint/tsc exit=0 | `test_task_layer.py` 可复跑 | 通过：四组合判定符合规则；跳过算完成且理由进台账；交付物只对阶段、重提交留痕；打勾/跳过只对任务 | 失效条件见第 1 节同名行。**浏览器走查归用户** |
 | E-39 / 2026-09-18 | **T24 多计划与严格分开**（决策 33–34）：`learning_request.plan_id` 加列、`list_plans` / `close_plan` / `void_plan` + 三条路由。`pytest -q` 244 passed、冒烟 10 步、lint/tsc exit=0 | `test_plans.py` 可复跑 | 通过：默认列表只给进行中；采纳落归属计划、无归属不指明 409；同计划上一轮未裁定的候选过期、已裁定的不动 | 失效条件见第 1 节同名行。**浏览器走查归用户** |
-| E-40 / E-41 / E-52（2026-09-18 / 09-26） | **T25「找」加宽 + T26 对话式规划与蓝图**（决策 35 / 36）：反馈流水进 prompt + 追问槽位；新表 `plan_chat`（6 轮）、蓝图（树 = 版本）、`selected` 勾选建树。`pytest -q` 274 → 279 passed、冒烟 10 步、lint/tsc exit=0。**E-52（走查整改）**：四处整改见第 1 节 T25 行；447 passed（+4） | `test_candidates.py`、`test_blueprint.py` 可复跑 | 通过：流水只取 `search`、只放已裁定；未采纳不能聊、6 轮封顶；蓝图落 `pending`、新版标旧版 `superseded`、只建勾中的、同名阶段复用、冲突在建前拦下；E-52 真机：不重问已答、候选全贴原话 | 失效条件见第 1 节 T25/T26 两行；追问口径已按 E-48 修订。「找」整改已真机验证；T26 部分**只验假上游** |
+| E-40 / E-41 / E-52（2026-09-18 / 09-26） | **T25「找」+ T26 对话式规划与蓝图**：`pytest -q` 274→279、E-52 447 passed；冒烟 10 步、lint/tsc 通过 | `test_candidates.py`、`test_blueprint.py` 可复跑 | 通过：已裁定反馈进「找」，未采纳不能规划；蓝图版本与勾选生效、同名阶段复用、冲突预拦；E-52 真机不重问已答、候选贴原话 | 失效条件见第 1 节 T25/T26；T26 只验假上游 |
 | E-42 / 2026-09-18 | **T27 计划生命周期四态**（决策 33）：`pytest -q` 294 passed、冒烟 10 步、lint/tsc exit=0 | `test_plans.py` 可复跑 | 通过：暂停幂等、收尾/作废不可暂停、作废是单向门；重开放回进行中 | 失效条件见第 1 节同名行。**走查归用户** |
 | E-44 / 2026-09-18 | **T29 提案瘦身与页面分家**（决策 28/29/30 修订）：`pytest -q` 301 passed、冒烟 10 步、lint/tsc exit=0 | `test_proposals.py` / `test_progress.py` / `test_plan.py` 可复跑 | 通过：阶段收尾不再产提案（判定仍在）、落后只出提醒、老类型批准被拒 | 失效条件见第 1 节同名行。**走查归用户** |
 | E-45 / 2026-09-18 | **T30 节点字段写入口**（决策 38）：`pytest -q` 312 passed、冒烟 11 步全绿、lint/tsc exit=0 | `test_task_layer.py` / `test_blueprint.py` 可复跑 | 通过：id 与引用不断、流水留改前改后、挪截止日带动落后量、清日期、缺理由 / 非法日期 / 给任务设交付物一律拒、撞同名被拒 | 失效条件见第 1 节同名行。**走查归用户** |
 | E-46 / 2026-09-18 | **T31 计划对话的「一条可执行建议」**（决策 39）：`pytest -q` 332 passed、冒烟 11 步、lint/tsc exit=0 | `test_dialogue.py` 可复跑 | 通过：建议一次最多一条、坏建议一条都不落、批准后 **id 不变**且留流水、加东西按序建节点、超 5 件与批内重名都拒、计划离开进行中时批准被拒 | 失效条件见第 1 节同名行。**真实模型只被他走查跑过** |
-| E-47 / 2026-09-20 | **P3.6 Agent 核心（T32/T33）**（决策 40）：`pytest -q` 354 passed、冒烟 11 步、lint/tsc exit=0 | `test_agent.py` / `test_dialogue.py` 可复跑 | 通过：目录=注册表、四个工具只读、跨计划参数被拒、两条上限闸、撞上限如实交代且**一条提案都不落**、三种结局都留一行 `agent_run` | 失效条件见第 1 节 Agent 那行。**只验假上游**：计划对话那条链真库没跑过 |
-| E-48 / 2026-09-20 | **P3.7：T34 路径形状 + T35 阶段跳过 + T36 追问槽收口**（决策 41）。`pytest -q` 385 passed（+31）、冒烟 11 步、lint/tsc exit=0。真库已补两列 | `test_candidates.py` / `test_task_layer.py` / `test_blueprint.py` 可复跑 | 通过：`path` 只落一行伞候选、形状与条数对不上判不合格重试、**步骤名不进禁区**、采纳回执带 steps；阶段跳过留痕 + 视同完成 + 落后不算 + 周打卡不给跳；追问只问事实、已答的不再问（回答拼原话见 E-54） | 失效条件见第 1 节 T34–T36 那行。**只验假上游** |
+| E-47 / 2026-09-20 | **P3.6 Agent 核心（T32/T33）**（决策 40）：`pytest -q` 354 passed、冒烟 11 步、lint/tsc exit=0 | `test_agent.py` / `test_dialogue.py` 可复跑 | 通过：目录=注册表、四个工具只读、跨计划参数被拒、两条上限闸、撞上限如实交代且**一条提案都不落**、三种结局都留一行 `agent_run` | 失效条件见第 1 节 Agent 那行。**只验假上游** |
+| E-48 / 2026-09-20 | **P3.7：T34 路径形状 + T35 阶段跳过 + T36 追问槽收口**（决策 41）。`pytest -q` 385 passed（+31）、冒烟 11 步、lint/tsc exit=0。真库已补两列 | `test_candidates.py` / `test_task_layer.py` / `test_blueprint.py` 可复跑 | 通过：`path` 只落一行伞候选、形状与条数对不上判不合格重试、**步骤名不进禁区**、采纳回执带 steps；阶段跳过留痕 + 视同完成 + 落后不算 + 周打卡不给跳；追问只问事实、已答的不再问（回答拼原话见 E-63） | 失效条件见第 1 节 T34–T36 那行。**只验假上游** |
 | E-49 / 2026-09-21 | **T37 采纳落点留得住**（决策 33 ② 补的洞）：`pytest -q` **392 passed**（+7）、冒烟 11 步、lint/tsc exit=0；真库已补列 | `test_candidates.py` / `test_blueprint.py` 可复跑 | 通过：采纳后重新取行仍定得下来、换计划要拒、落点计划被收尾后报得清楚、否决不留落点 | 失效条件见第 1 节 T37 那行。**只验假上游**；真库里候选 #22 是修之前的，不受益 |
-| E-53 / 2026-09-26 | **/proposals 迁壳重做**（冲刺第 4 页）：lint/tsc/build 全 0；浏览器实测勾选级联、全不勾禁批准、驳回两段式 | `design-samples/real-round5/` 截图（本机） | 通过：勾选逻辑原样复用、`selected` 仅蓝图传、回执语义保留并补记忆 effect 分支、未知 kind 兜底 | 失效条件见第 1 节提案裁定行。**真库只走展示与取消，批准/驳回未真点** |
-| E-54 / 2026-09-26 | **走查整改二批**：追问回答保原话（原话丢失致无关候选）+ /candidates 切页存续/等待保旧结果/历史轮次。448 passed（+1）、lint/tsc 0 | `test_candidates.py` 可复跑 | 通过：追问轮输入以原话打头；真机一轮候选直接引用原话（#65–68） | 失效条件见第 1 节「找」加宽与候选清单页两行。真库 #65–68 为验证轮所落 |
-| E-55 / 2026-09-26 | **工作台四件套**：历史滚动导航条、AI 追问渲染成问答卡（回话信封加 `questions`、`plan_dialogue` 加列）、回话流式展开、思考态（回答上屏形态已被 E-57 改写）。pytest **452 passed**（+5）、冒烟 17 步、lint/tsc 0；真库已 `db.init` 补列 | `test_dialogue.py` 末段 4 例可复跑 | 通过：追问落库且 view/turn 带出、自由题归一化、空标题 / 单选项带原因重说、不问就不带；老字段一个没动 | 失效条件见第 1 节计划级对话行。**真实模型未跑，走查归用户** |
-| E-56 / 2026-09-26 | **`/memory` 重做**：接入 `AppShell`，保留原动作；lint/tsc/build exit=0 | `frontend/app/memory/page.tsx`、`frontend/app/cadence-theme.css` | 通过，浏览器走查留给用户 | 接口契约或动作变更后失效，不覆盖真库结果 |
-| E-57 / 2026-09-26 | **工作台打磨**（纯前端）：两卡裁定/回答后收起成摘要行；问答卡回答不冒充用户气泡（silent 发送 + 紧凑条渲染，含 silent 漏传补修）；运行依据重做（结局+统计+逐条工具）；提炼回执改右下角 toast（可跳转）；输入框重做成 halaska 形态；留白收紧；计划树 bouncy 展开 + 阶段点按完成判定（绿=完、黄=只差交付）+ 任务行可打勾；新增 `motion/tilt-card.tsx`（两卡 3D 质感）；lint/tsc 回 0（含清 4 处存量） | `components/workbench/`、`motion/tilt-card.tsx`、`agents/citations.tsx`、`ui/toast.tsx`、`candidates/candidate-card.tsx` | 通过：lint/tsc 0；走查归用户 | 第 1 节计划级对话行失效条件 |
-| E-58 / 2026-09-27 | **/candidates 交互重做**（纯前端）：候选卡改单开手风琴（beui 参考）；右栏默认收起：选中候选或追问时右滑出成主体、左列压成按钮列（按钮全可点：已采纳进规划对话，未采纳弹出详情卡可裁定）；追问为找方向对话（问答留痕、输入框作答）；历史轮次可收纳、选择器弹层改全局浮层免被裁切。lint/tsc 0 | `lint`/`tsc` 可复跑 | 通过：接口未动 | 失效条件见第 1 节候选清单页行。**走查归用户** |
+| E-53 / 2026-09-26 | **/proposals 迁壳重做**：lint/tsc/build 全 0；浏览器实测勾选级联、全不勾禁批准、驳回两段式 | `design-samples/real-round5/` 截图（本机） | 通过：勾选逻辑原样复用、`selected` 仅蓝图传、回执语义保留并补记忆 effect 分支、未知 kind 兜底 | 失效条件见第 1 节提案裁定行。**真库只走展示与取消，批准/驳回未真点** |
+| E-55 / 2026-09-26 | **工作台四件套**：历史导航条、追问渲染成问答卡（信封加 `questions`）、流式展开、思考态。452 passed、冒烟 17 步、lint/tsc 0；真库补列 | `test_dialogue.py` 末段 4 例可复跑 | 通过：追问落库且 view/turn 带出、自由题归一化、空标题/单选项带原因重说 | 失效条件见第 1 节计划级对话行。**真实模型未跑，走查归用户** |
+| E-50/E-51 / 2026-09-21 | 记忆新增/扫描/裁定/彻底删除与走查整改；历史 pytest 429→443、冒烟17步 | test_memory/test_agent/test_dialogue 可复跑 | 通过：日期优先、续期不增行、散文重试后兜底、中文工具别名、记忆变化摘要；只验假上游 | memory/agent_tools/dialogue 的这些行为变化需复验，真实模型扫描待用户 |
+| E-60 / 2026-09-27 | 主树整合：四项前端命令 0、pytest 460 passed、隔离冒烟 17 步、diff-check 过（备份在 `%TEMP%` cadence-merge-20260927） | 同轮 patch 与日志 | 通过：三方合并源代码哈希未变；新接口 GET /api/learning-requests 与 clarify_request_id 纳入 | 相关路由/组件被 E-61～E-63 重写后失效；不覆盖真实模型/浏览器 |
+| E-63 / 2026-09-28 | 双入口整改收口：蓝图就绪闸与空白拦截、工作台意图硬闸；找方向逐轮原话/意图/回复落库＋同线程限长历史、保留原形态度裁定、追问占用带属主、redo 原子更替；候选页逐轮对话留痕、失败回填、A→B→A 归段、刷新接回在途轮次；提案页文案与编号。后端 `-m pytest -q` **528 passed**；隔离冒烟 **17 步**（用完即删）；前端 lint **0 error**、`tsc --noEmit` 通过；真库只幂等 `db.init` 补 4 列（16 行请求/22 条档案未动） | `test_candidates` / `test_dialogue` / `test_blueprint` / `test_agent` 可复跑 | 通过：只报近况不给建议（先澄清）、澄清后回「对」可落建议；模型未就绪/仍带问题不许出蓝图；找方向刷新能恢复逐轮回复与「保持原形态」决定；同线程历史进模型；跨线程不串、旧属主不误放锁 | 失效条件见 §1 两行；真实模型措辞与桌面走查未验（归用户） |
+| E-64 / 2026-09-29 | 四旧页重做：评判纵向展开/历史回看、档案分类/侧边编辑、服务商列表/详情/流水、报告检查点/回执。前端 `npm run lint`（0 error，9 warning）、`npx tsc --noEmit`、`git diff --check` 通过；`impeccable detect --json` 为 `[]` | 本轮源码；未跑浏览器、未写真库 | 仅静态验证；桌面/窄屏、键盘与真实操作待用户走查；四页、`judgment-view.tsx`、外壳改动后失效 |
+| E-65 / 2026-09-29 | 工作台 PC 右栏：默认当前阶段章节，目录替换正文，阶段选择/前后翻页、交付物与执行清单重排；`npm run lint`（0 error，9 条既有 warning）、`npx tsc --noEmit`、`git diff --check -- frontend/components/workbench/plan-tree-panel.tsx frontend/components/workbench/workbench-view.tsx` 通过 | 本轮源码；未跑浏览器、未写真库 | 仅静态验证；阶段切换、任务/交付物/报告与计划管理真实操作待用户桌面走查；两个工作台组件的相关行为变更后失效 |
 
 ## 6. 启动、验收与上下文
 
@@ -96,17 +94,17 @@ cd D:\cadence\backend
 .\.venv\Scripts\python.exe -m app.db init         # 建库；加表/加列都走它
 .\.venv\Scripts\python.exe -m pytest -q           # 全绿
 .\.venv\Scripts\python.exe tools\show_db.py       # 只读看库：树 / 报告 / 台账 / 提案
-.\.venv\Scripts\python.exe tools\smoke_p1.py      # 闭环冒烟：临时库跑 17 步，不动真库
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000   # 开发热重启
+.\.venv\Scripts\python.exe -c "import pathlib,tempfile; from tools import smoke_p1; smoke_p1.TEMP_DB=pathlib.Path(tempfile.mkdtemp(prefix='cadence-merge-smoke-'))/'smoke.db'; raise SystemExit(smoke_p1.main())"
+.\.venv\Scripts\python.exe tools\dev_server.py    # 开发热重启（**勿用 `uvicorn --reload`**，本机必有日志 Reloading 后卡死，原因见下）
 
 cd D:\cadence\frontend   # ——— 以下在另一个终端 ———
-npm run dev        # 开发服务，默认 http://localhost:3000（Next 16 dev 只认 localhost 来源；127.0.0.1 不水合）
+npm run dev        # 开发服务，默认 http://localhost:3000（建议使用 localhost；已纳入源 next.config 的 allowedDevOrigins，其他来源未复验）
                    # 现有页面：/workbench · / · /new · /report · /candidates · /judge · /proposals · /memory · /providers · /profile
-                   # 外壳：`app/(app)/` 路由组 + `components/shell/`；风格标准 `design-samples/style-dna.md`
-npm run lint       # ESLint，当前 exit=0
+                   # 外壳唯一挂在 app/layout.tsx；(app)/layout.tsx 仅路由分组；/memory 只在 (app)/memory/page.tsx
+npm run lint; npx next typegen; npx tsc --noEmit; npm run build  # 本轮依次执行，均 exit=0
 ```
 
-**端口与服务**：后端 8000、前端 3000。**停服务别只杀父进程**：用 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端换 3000）找 PID 再 `Stop-Process`。热加载只监听 Python。**全新克隆验收**：`pip install -r requirements.txt` 后 pytest 全绿；`npm ci` + `build` 之后再 `tsc` 才过——Next 16 的类型构建时生成了才有。
+**端口与服务**：后端 8000、前端 3000。停服务按端口用 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端改 3000）找 PID 再 `Stop-Process`；后端 worker 名字不含 uvicorn，别只杀父进程。**热重启只用 `tools\dev_server.py`**：本机 Python 3.14 下 `uvicorn --reload` 首次保存必卡在 `Reloading...`；替代脚本 1–2 秒重启并写 `%TEMP%\cadence-uvicorn.log`。全新克隆先装后端依赖；前端 `npm ci` + `build` 后再 `tsc`。
 
 | 任务类型 | 必读文件 |
 | --- | --- |
@@ -115,6 +113,5 @@ npm run lint       # ESLint，当前 exit=0
 | 产品/架构变更与需求背景 | `docs/SPEC.md` 第 10、11、17、18 节（产品/架构）与第 1–9 节（需求背景）、`docs/U2-触达详解.md`（`docs/未决项讨论.md` 已被 SPEC 取代） |
 
 ## 7. 给下一个 Agent 的启动提示
-
 1. 开工先完整读本文件并核对 Git 与未提交改动；只读当前目标相关源码与规则。P4 验收标准在 `tasks/todo.md` P4 一节，SMTP 授权码不是开工前提。
-2. **探测一律指向临时库**（照 `tools/smoke_p1.py`：临时库 + 空闲端口），绝不拿 `data/cadence.db` 做实验（曾误建 `plan_node #7`）。遵守项目 `AGENTS.md`。
+2. **探测一律指向临时库**，绝不拿 `data/cadence.db` 做实验（曾误建节点）；细则照 `tools/smoke_p1.py` 与项目 `AGENTS.md`。
