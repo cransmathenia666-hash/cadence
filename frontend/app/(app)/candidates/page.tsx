@@ -1035,6 +1035,10 @@ export default function CandidatesPage() {
       <div className="mx-auto w-full max-w-[1400px] px-4 md:px-8 xl:px-12">
       {/* Prompt and results share one frame */}
       <div className="mb-10 mt-4 w-full">
+        <div className="mb-6 flex items-end justify-between gap-4 border-b border-white/[0.08] pb-5">
+          <h1 className="text-[27px] font-medium tracking-tight text-primary">找方向</h1>
+          <span className="text-[12px] text-white/45">描述困惑，比较方向，再决定是否采纳</span>
+        </div>
         <PromptInput 
           plans={plans}
           planChoice={planChoice}
@@ -1099,10 +1103,16 @@ export default function CandidatesPage() {
               {history.length > 0 && (
                 <div className="border-t border-white/[0.08] px-2 py-3">
                   <button type="button" onClick={() => setHistoryOpen((value) => !value)} aria-expanded={historyOpen} className="flex w-full items-center justify-between text-left text-[11px] text-white/50 hover:text-white/80">
-                    历史对话 · {history.length} 轮 <ChevronDown className={`size-3 transition-transform ${historyOpen ? "rotate-180" : ""}`} />
+                    历史对话 · {historyThreads.length} 段 <ChevronDown className={`size-3 transition-transform ${historyOpen ? "rotate-180" : ""}`} />
                   </button>
                   {historyOpen && <div className="mt-3 max-h-48 space-y-1 overflow-y-auto">
-                    {history.map((round, index) => <button key={`${round.requestId ?? "draft"}-${index}`} type="button" disabled={historyLoading || round.requestId === null} onClick={() => { if (round.requestId !== null) void openHistoryRound(index, round.requestId); }} className={`block w-full border-l py-1.5 pl-2 text-left text-[11px] leading-relaxed disabled:opacity-40 ${historyView?.roundIndex === index ? "border-white/70 text-primary" : "border-white/15 text-white/50 hover:border-white/40 hover:text-white/75"}`}>第 {history.length - index} 轮 · {clip(round.utterance ?? round.requestText, 28)}</button>)}
+                    {historyThreads.map((thread) => {
+                      const unfolded = openThreads.includes(thread.key) || thread.entries.some((entry) => entry.index === historyView?.roundIndex);
+                      return <div key={thread.key} className="border-l border-white/15 pl-2">
+                        <button type="button" onClick={() => toggleThread(thread.key)} aria-expanded={unfolded} className="flex w-full items-center gap-1 py-1.5 text-left text-[11px] text-white/60 hover:text-white/85"><ChevronRight className={`size-3 shrink-0 transition-transform ${unfolded ? "rotate-90" : ""}`} />{clip(thread.title, 30) || "（没有留下原话）"}</button>
+                        {unfolded && <div className="ml-3 space-y-1 pb-2">{thread.entries.map(({ round, index }) => <button key={index} type="button" disabled={historyLoading || typeof round.requestId !== "number"} onClick={() => { if (typeof round.requestId === "number") void openHistoryRound(index, round.requestId); }} className={`block w-full py-1 text-left text-[11px] disabled:opacity-40 ${historyView?.roundIndex === index ? "text-primary" : "text-white/45 hover:text-white/75"}`}>第 {history.length - index} 轮 · {clip(round.utterance ?? round.requestText, 22)}</button>)}</div>}
+                      </div>;
+                    })}
                   </div>}
                 </div>
               )}
@@ -1111,7 +1121,7 @@ export default function CandidatesPage() {
           <>
           <div className="flex items-center justify-between mb-10">
             <div className="flex items-center gap-4">
-              <h1 className="text-[26px] font-semibold text-primary/90 tracking-tight">候选清单</h1>
+              <h2 className="text-[26px] font-semibold text-primary/90 tracking-tight">候选清单</h2>
               {profile !== null && (
                 <span className="px-3 py-1 bg-white/[0.03] border border-white/[0.06] rounded-full text-[11px] font-medium text-white/60 shadow-sm shrink-0">
                   长期档案 {profile.items.length} 条
