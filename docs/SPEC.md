@@ -191,6 +191,9 @@
 | POST | `/api/memory/{id}/purge` | 执行彻底删除（**不可恢复**）：清掉正文、候选 payload 里的内容、证据摘录，并按证据关系把来源里那句原话换成「已按用户要求删除」（行与状态时间保留）；清完**全库复扫**，`complete=false` 时把 `leftover` 如实列出——**不宣称删除成功** |
 | POST | `/api/proposals/{id}/decide` | 裁定提案（**2026-09-21 起第五类 `memory_change`**，决策 42）：批准记忆候选 = 真写长期记忆（`add` 落新条目 / `supersede` 走台账取代 / `review` 按 `decision` 续期或作废），`effect` 为 `memory_added` / `memory_superseded` / `memory_renewed` / `memory_voided`，回执带 `remembered`。**批准前再验一次**：目标那条记忆可能已经被改掉了，那时回 409、提案保持 `pending` 可重裁 |
 | POST | `/api/plans/{id}/close` | 收尾计划（**2026-09-21 起**回执多带 `memory_scan_id`）：收尾顺手**登记一条待扫描**——这个计划的经历该提炼一遍了。刻意**不在收尾里同步调模型**（收尾不该被一次模型调用拖住、也不该因此失败），由每周任务或记忆页之后做掉 |
+| GET | `/api/notify` | 每周提醒的现状（**只读，不发信不导出**）：开关、收件邮箱、通道（`email` / `none`）、`next_send_at`、本周该不该发与理由（`due` / `decision_reason` / `missed_week`）、**本周这封会说什么**（`preview.subject` / `preview.body`）、最近几次发送记录、四个导出文件的现状。`plan_id` 可选，不给就取当前的进行中计划 |
+| PUT | `/api/notify` | 改开关与收件邮箱（**只传要改的字段**，存在 `app_setting` 键值对里；SMTP 密钥不在这里，按第 16 节放 `.env`）。**开着却没有收件邮箱一律 `400`**——「开着但发不出去」是最坑的一种状态；所有值先验完再落库，不留半截配置 |
+| POST | `/api/notify/export` | 手动导出四个只读 Markdown（计划-当前 / 决策台账 / 档案-当前 / 周检查点），`CADENCE_EXPORT_DIR` 可改落点（201）。**只写文件、库里一行都不动**——手改文件下次导出会被覆盖，这是「单向」的定义（T17） |
 
 **多家提供商管理的设计**（v0.3 新增）：
 
@@ -263,6 +266,7 @@ backend/
     agent_tools.py    Agent 的六个只读工具（当前计划 / 最近报告 / 长期档案 / 计划来历 / 长期记忆 / 经历检索）
     memory.py         记忆系统：长期记忆的读写、记忆候选的确定性校验、经历检索、扫描、彻底删除（决策 42）
     notify.py         触达通道接口（邮箱实现 / 空实现）
+    export.py         四个只读 Markdown 快照的单向导出（T17）
     jobs/
       weekly_checkpoint.py
   sql/schema.sql      建表语句
