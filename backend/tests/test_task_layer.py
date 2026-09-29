@@ -19,9 +19,11 @@ from app.main import (
     DeliverableIn,
     NodeFieldsIn,
     NodeIn,
+    NodeReopenIn,
     TaskSkipIn,
     post_deliverable,
     post_node_fields,
+    post_node_reopen,
     post_task_check,
     post_task_skip,
 )
@@ -128,6 +130,80 @@ def test_skip_as_completed_unblocks_the_stage(conn):
     plan.submit_deliverable(conn, stage_id, "https://example.com/repo", "做完了")
 
     assert plan.stage_finished(conn, plan.get_node(conn, stage_id)) is True
+
+
+# ---------- ②c 放回（2026-09-28 走查后补的出口） ----------
+#
+# 打勾是一键动作（决策 31），手滑一次原来就没有回头路。状态机一直允许
+# done / skipped → in_progress，这里补的是写入口：与跳过同一层口径、同一道理由闸。
+
+def test_reopen_puts_a_checked_task_back(conn):
+    plan_id, stage_id = make_plan(conn)
+    task_id = add_task(conn, plan_id, stage_id)
+
+    plan.check_task(conn, task_id)
+    assert plan.stage_completion(conn, stage_id)["settled"] == 1
+
+    result = plan.reopen_node(conn, task_id, reason="点错了，还没做完")
+
+    assert result["node_status_before"] == "done"
+    assert result["node_status"] == "in_progress"
+    assert plan.get_node(conn, task_id)["status"] == "in_progress"
+    assert plan.stage_completion(conn, stage_id)["settled"] == 0
+    assert ledger.history(conn, "plan_node", task_id)[-1]["reason"] == "点错了，还没做完"
+
+
+def test_reopen_a_skipped_stage_brings_the_lag_back(conn):
+    plan_id, stage_id = make_plan(conn, due_date="2026-09-01")  # 已过期
+    plan.skip_node(conn, stage_id, reason="先不走了")
+    assert plan.plan_lag(conn, plan_id, TODAY)["behind"] is False
+
+    plan.reopen_node(conn, stage_id, reason="还是得做，重新捡回来")
+
+    assert plan.get_node(conn, stage_id)["status"] == "in_progress"
+    assert plan.plan_lag(conn, plan_id, TODAY)["behind"] is True
+
+
+@pytest.mark.parametrize("bad", ["", "   "])
+def test_reopen_needs_a_reason(conn, bad):
+    plan_id, stage_id = make_plan(conn)
+    task_id = add_task(conn, plan_id, stage_id)
+    plan.check_task(conn, task_id)
+
+    with pytest.raises(plan.PlanError):
+        plan.reopen_node(conn, task_id, reason=bad)
+    assert plan.get_node(conn, task_id)["status"] == "done"  # 没动它
+
+
+def test_reopen_refuses_unfinished_nodes_and_checkpoints(conn):
+    plan_id, stage_id = make_plan(conn)
+    task_id = add_task(conn, plan_id, stage_id)
+
+    # 还没完成，没什么可放回的
+    with pytest.raises(plan.PlanError):
+        plan.reopen_node(conn, task_id, reason="放回去")
+    # 周打卡不给放回（它的状态由报告推进）
+    checkpoint_id = plan.add_node(conn, plan_id, "checkpoint", "本周打卡", parent_id=stage_id)
+    with pytest.raises(plan.PlanError):
+        plan.reopen_node(conn, checkpoint_id, reason="放回去")
+
+
+def test_reopen_via_the_route_translates_errors(conn):
+    """接口层只做翻译：不存在 404、规则拒绝 400。"""
+    plan_id, stage_id = make_plan(conn)
+    task_id = add_task(conn, plan_id, stage_id)
+
+    with pytest.raises(HTTPException) as missing:
+        post_node_reopen(999, NodeReopenIn(reason="放回去"), conn)
+    assert missing.value.status_code == 404
+
+    with pytest.raises(HTTPException) as refused:
+        post_node_reopen(task_id, NodeReopenIn(reason="放回去"), conn)  # 还没完成
+    assert refused.value.status_code == 400
+
+    plan.check_task(conn, task_id)
+    done = post_node_reopen(task_id, NodeReopenIn(reason="手滑了"), conn)
+    assert done["node_status"] == "in_progress"
 
 
 # ---------- ②b 阶段跳过（T35：SPEC 决策 41） ----------

@@ -395,6 +395,42 @@ def skip_task(
     return skip_node(conn, node_id, reason, actor)
 
 
+def reopen_node(
+    conn: sqlite3.Connection, node_id: int, reason: str, actor: str = "user"
+) -> dict[str, Any]:
+    """放回：把**已完成 / 已跳过的阶段或任务**退回「进行中」（2026-09-28 补的出口）。
+
+    为什么要有它：打勾是一键动作（决策 31），手滑一次原来就没有回头路——状态机其实
+    一直允许 `done → in_progress` 与 `skipped → in_progress`，缺的只是这条写入口。
+    与跳过同一层口径（阶段与任务），同一道理由闸：理由进台账，回答「为什么又把它放回来」。
+    周打卡不给放回——它的状态由报告推进，改主意就再交一份报告。
+    """
+    if not str(reason or "").strip():
+        raise PlanError("放回必须写一句理由——它进台账，回答「为什么又把它放回来」")
+    node = get_node(conn, node_id)
+    if node is None:
+        raise PlanError(f"节点 id={node_id} 不存在")
+    if node["level"] not in SKIPPABLE_LEVELS:
+        raise PlanError(
+            f"id={node_id} 是 {node['level']}，「放回」只对阶段与任务用"
+            f"（周打卡的状态由报告推进）"
+        )
+    before = node["status"]
+    if before not in SETTLED_STATUSES:
+        raise PlanError(f"id={node_id} 现在还是「{before}」，没完成也没什么可放回的")
+    assert_transition(before, "in_progress")
+    ledger.set_status(
+        conn, "plan_node", node_id, "in_progress", actor=actor, reason=str(reason).strip()
+    )
+    return {
+        "node_id": node_id,
+        "level": node["level"],
+        "node_status_before": before,
+        "node_status": "in_progress",
+        "proposal_id": None,  # T29：不再顺产推进提案
+    }
+
+
 def submit_deliverable(
     conn: sqlite3.Connection, node_id: int, url: str, note: str, actor: str = "user"
 ) -> dict[str, Any]:

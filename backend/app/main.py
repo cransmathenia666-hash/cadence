@@ -250,6 +250,10 @@ class TaskSkipIn(BaseModel):
     reason: str = Field(min_length=1, description="为什么跳过——进台账，必填")
 
 
+class NodeReopenIn(BaseModel):
+    reason: str = Field(min_length=1, description="为什么放回来——进台账，必填")
+
+
 class DeliverableIn(BaseModel):
     url: str = Field(min_length=1, description="交付物链接：仓库 / URL / 录屏都行")
     note: str = Field(min_length=1, description="一句话说明这份交付物")
@@ -283,6 +287,22 @@ def post_task_skip(
     _require_node(conn, node_id)
     try:
         return plan.skip_node(conn, node_id, payload.reason)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan/nodes/{node_id}/reopen")
+def post_node_reopen(
+    node_id: int, payload: NodeReopenIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """放回：把**已完成 / 已跳过的阶段或任务**退回「进行中」（2026-09-28 补的出口）。
+
+    为什么要有它：打勾是一键动作（决策 31），手滑一次原来就没有回头路。与 `/skip`
+    同一层口径（阶段与任务）、同一道理由闸（理由进台账）。周打卡不给放回。
+    """
+    _require_node(conn, node_id)
+    try:
+        return plan.reopen_node(conn, node_id, payload.reason)
     except plan.PlanError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
