@@ -160,6 +160,16 @@ CREATE TABLE IF NOT EXISTS notification_log (
   sent_at  TEXT    NOT NULL
 );
 
+-- 「界面能改、后端要用」的运行时设置（键值对）。
+-- 为什么单开一张表：这类设置是给用户拧的旋钮（开关、收件邮箱），既不是业务对象
+-- （进不了台账），也不该埋在 .env 里（改了要重启进程，界面拧不动）。**密钥不放这里**——
+-- 密钥按 SPEC 第 16 节放 .env，只出现在后端进程里。
+CREATE TABLE IF NOT EXISTS app_setting (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TEXT NOT NULL
+);
+
 -- ========== LLM 接入（多家提供商 + 调用记账） ==========
 
 CREATE TABLE IF NOT EXISTS llm_provider (

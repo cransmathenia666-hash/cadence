@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -33,6 +35,8 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND.parent
 TEMP_DB = PROJECT_ROOT / "data" / "_smoke_p1.db"
+# 导出步骤的落点：冒烟不往仓库根的 exports/ 里丢文件，跑完连目录一起删。
+TEMP_EXPORTS = PROJECT_ROOT / "data" / "_smoke_exports"
 
 
 def free_port() -> int:
@@ -85,6 +89,7 @@ def start_temp_server(port: int) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, "-c", launcher],
         cwd=str(BACKEND),
+        env={**os.environ, "CADENCE_EXPORT_DIR": str(TEMP_EXPORTS)},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -263,9 +268,36 @@ def main() -> int:
                      status, {"complete": purged["complete"], "leftover": purged["leftover"]})
         checker.expect("清干净了（complete=True）", purged["complete"], True)
 
+        status, notify_state = request(base, "GET", "/api/notify")
+        checker.step(17, "每周提醒的现状：开关、下次发送、本周会发什么",
+                     status, {"enabled": notify_state["enabled"], "to_addr": notify_state["to_addr"],
+                              "due": notify_state["due"], "next_send_at": notify_state["next_send_at"],
+                              "subject": notify_state["preview"]["subject"]})
+        checker.expect("开关默认是关的", notify_state["enabled"], False)
+        checker.expect("收件邮箱还没填", notify_state["to_addr"], None)
+        checker.expect("三问的主题带上了当前阶段", "周检查点" in notify_state["preview"]["subject"], True)
+        checker.expect("导出目录里还什么都没有", notify_state["export"]["files"], [])
+
+        status, saved = request(base, "PUT", "/api/notify",
+                                {"to_addr": "smoke@example.com", "enabled": True})
+        checker.step(18, "打开每周提醒：收件邮箱 + 开关",
+                     status, {"enabled": saved["enabled"], "to_addr": saved["to_addr"], "due": saved["due"]})
+        checker.expect("开关打开了", saved["enabled"], True)
+        checker.expect("本周还没问过，所以这周有一封要发", saved["due"], True)
+
+        status, exported = request(base, "POST", "/api/notify/export")
+        names = sorted(item["name"] for item in exported["files"])
+        checker.step(19, "手动导出四个只读文件", status, {"dir": exported["dir"], "files": names})
+        checker.expect("四个文件都写了", len(exported["files"]), 4)
+        checker.expect("周检查点的文件名带周编号",
+                       any(name.startswith("周检查点-") for name in names), True)
+
+        status, again = request(base, "GET", "/api/notify")
+        checker.expect("重新取一次：导出的清单读得回来", again["export"]["last_at"] is not None, True)
+
         status, closed = request(base, "POST", f"/api/plans/{plan['id']}/close",
                                  {"reason": "冒烟：收尾"})
-        checker.step(17, "收尾计划：只登记一条待扫描，不在收尾里调模型",
+        checker.step(20, "收尾计划：只登记一条待扫描，不在收尾里调模型",
                      status, {"memory_scan_id": closed["memory_scan_id"]})
         checker.expect("收尾登记了待扫描", isinstance(closed["memory_scan_id"], int), True)
 
@@ -286,7 +318,8 @@ def main() -> int:
                 server.kill()
                 server.wait(timeout=10)
             TEMP_DB.unlink(missing_ok=True)
-            print(f"\n临时库已删除：{TEMP_DB}")
+            shutil.rmtree(TEMP_EXPORTS, ignore_errors=True)
+            print(f"\n临时库已删除：{TEMP_DB}（导出目录 {TEMP_EXPORTS} 一并清掉）")
 
 
 if __name__ == "__main__":

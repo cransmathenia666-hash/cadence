@@ -29,9 +29,11 @@ from . import (
     config,
     db,
     dialogue,
+    export,
     ledger,
     llm,
     memory,
+    notify,
     plan,
     profile,
     proposals,
@@ -1532,3 +1534,36 @@ def post_memory_purge(
         return memory.purge(conn, payload.scope, memory_id, reason=payload.reason)
     except memory.MemoryError as error:
         raise _memory_error(error) from error
+
+
+# ---------- 触达：每周提醒与导出（T15–T17，SPEC 决策 15 / 16 / 20） ----------
+#
+# 这是全产品唯一一个「你不在场」的场景：本地定时 + 邮件三问提醒。手机点不开本地页面，
+# 所以邮件只做提醒、不放操作链接（U2 档 2）。三条路由都只做翻译——该不该发、发什么、
+# 降频与否全在 `notify.py`，导出的排版在 `export.py`，这里不重复任何判定。
+
+class NotifyIn(BaseModel):
+    enabled: bool | None = Field(default=None, description="开不开每周提醒")
+    to_addr: str | None = Field(default=None, description="收件邮箱；传空串表示清掉")
+
+
+@app.get("/api/notify")
+def get_notify(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """设置页那一节要的全部事实：开关、发到哪、下次什么时候、本周会发什么、发过什么、导出了什么。"""
+    return {**notify.status(conn, plan_id=plan_id), "export": export.summary()}
+
+
+@app.put("/api/notify")
+def put_notify(payload: NotifyIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """改开关与收件邮箱。开启前必须有收件邮箱——「开着但发不出去」是最坑的一种状态。"""
+    try:
+        notify.update_config(conn, enabled=payload.enabled, to_addr=payload.to_addr)
+    except notify.NotifyError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {**notify.status(conn), "export": export.summary()}
+
+
+@app.post("/api/notify/export", status_code=201)
+def post_notify_export(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """手动导出四个只读文件（T17 的按钮）。导出只写文件，库里一行都不动。"""
+    return export.export_all(conn, plan_id=plan_id)
