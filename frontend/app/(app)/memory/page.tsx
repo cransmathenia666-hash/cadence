@@ -46,9 +46,6 @@ import {
   type PurgePreview,
 } from "@/lib/api";
 import { HoverSelect } from "@/components/ui/hover-select";
-import { WorkspaceProvider } from "@/components/shell/workspace-context";
-import { AppShell } from "@/components/shell/app-shell";
-import "../cadence-theme.css";
 
 const LOAD_FAILED = "取记忆时出了意外错误";
 const CATEGORY_KEYS = Object.keys(PROFILE_CATEGORIES) as ProfileCategory[];
@@ -224,15 +221,13 @@ export default function MemoryPage() {
   const dueItems = listing?.due ?? [];
 
   return (
-    <WorkspaceProvider>
-      <AppShell>
-        <div className="memory-page dark min-h-full bg-transparent px-5 pb-16 pt-20 md:px-8 lg:px-12">
+    <div className="memory-page min-h-full bg-transparent px-5 pb-16 pt-20 md:px-8 lg:px-12">
           <div className="mx-auto w-full max-w-[1440px]">
-            <header className="mb-4 flex flex-wrap items-center justify-between gap-x-8 gap-y-3 border-b border-white/[0.1] pb-4">
+            <header className="mb-10 flex flex-wrap items-center justify-between gap-x-8 gap-y-3 border-b border-white/[0.1] pb-4">
               <div className="flex items-center gap-3">
                 <BrainCircuit className="size-5 text-white/70" />
                 <div>
-                  <div className="flex items-baseline gap-3"><h1 className="text-2xl font-semibold tracking-[-0.035em] text-white">记忆</h1><span className="text-xs text-white/50">长期依据工作台</span></div>
+                  <div className="flex items-baseline gap-3"><h1 className="text-[26px] font-semibold tracking-tight text-white">记忆</h1><span className="text-xs text-white/50">长期依据工作台</span></div>
                   <p className="mt-0.5 text-xs text-white/50">可追溯、可复核、可撤回</p>
                 </div>
               </div>
@@ -369,10 +364,10 @@ export default function MemoryPage() {
                             <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-white/50"><span>#{item.id}</span><span>·</span><span>{item.scope_label}</span>{item.plan_id !== null && <><span>·</span><span>计划 #{item.plan_id}</span></>}<span>·</span><span>{item.category_label ?? item.kind_label}</span><span>·</span><span>{item.source_kind_label}</span></div>
                             <ReviewLine item={item} />
                           </div>
-                          <div className="flex shrink-0 items-start gap-1.5">
-                            <button type="button" disabled={pending} onClick={() => { setRenewOpen(renewOpen === rowKey ? null : rowKey); setRenewDate(defaultReviewDate()); }} className="inline-flex h-7 items-center gap-1 border border-white/[0.12] px-2.5 text-xs text-white/70 hover:border-white/25 hover:bg-white/[0.05] disabled:opacity-35"><RefreshCw className="size-3" />还作数</button>
-                            <button type="button" disabled={pending} onClick={() => run(async () => { await reviewMemory({ memoryId: item.id, scope: item.scope, decision: "void", reason: "复核后确认不再作数" }); return `#${item.id} 已作废`; })} className="inline-flex h-7 items-center gap-1 border border-red-300/[0.12] px-2.5 text-xs text-red-200/70 hover:border-red-300/30 hover:bg-red-400/[0.06] disabled:opacity-35"><X className="size-3" />不再作数</button>
-                            <button type="button" disabled={pending} onClick={() => { setPurging({ item, preview: null }); setPurgeReason(""); }} className="inline-flex h-7 items-center gap-1 border border-red-300/[0.1] px-2.5 text-xs text-red-200/55 hover:border-red-300/25 hover:bg-red-400/[0.06] disabled:opacity-35"><Trash2 className="size-3" />删除</button>
+                          <div className="flex flex-wrap shrink-0 items-start gap-1.5 lg:justify-end">
+                            <button type="button" disabled={pending} onClick={() => { setRenewOpen(renewOpen === rowKey ? null : rowKey); setRenewDate(defaultReviewDate()); }} className="inline-flex h-8 items-center gap-1 border border-white/[0.12] px-2.5 text-xs text-white/70 hover:border-white/25 hover:bg-white/[0.05] disabled:opacity-35"><RefreshCw className="size-3" />还作数</button>
+                            <button type="button" disabled={pending} onClick={() => run(async () => { await reviewMemory({ memoryId: item.id, scope: item.scope, decision: "void", reason: "复核后确认不再作数" }); return `#${item.id} 已作废`; })} className="inline-flex h-8 items-center gap-1 border border-red-300/[0.12] px-2.5 text-xs text-red-200/70 hover:border-red-300/30 hover:bg-red-400/[0.06] disabled:opacity-35"><X className="size-3" />不再作数</button>
+                            <button type="button" disabled={pending} onClick={() => { setPurging({ item, preview: null }); setPurgeReason(""); }} className="inline-flex h-8 items-center gap-1 border border-red-300/[0.1] px-2.5 text-xs text-red-200/55 hover:border-red-300/25 hover:bg-red-400/[0.06] disabled:opacity-35"><Trash2 className="size-3" />删除</button>
                           </div>
                           {renewOpen === rowKey && <div className="col-span-full flex flex-wrap items-center gap-2 border-l border-amber-300/35 pl-3 pt-1"><label htmlFor={`renew-${rowKey}`} className="text-xs text-amber-100/75">下次复核：</label><input id={`renew-${rowKey}`} type="date" value={renewDate} onChange={(event) => setRenewDate(event.target.value)} className="memory-input h-8 rounded-md px-3 text-xs" /><button type="button" disabled={pending || renewDate === ""} onClick={() => run(async () => { const result = await reviewMemory({ memoryId: item.id, scope: item.scope, decision: "renew", reviewAt: renewDate, reason: `复核过了，还作数，下次复核放到 ${renewDate}` }); setRenewOpen(null); return `#${item.id} 的复核时间推到了 ${result.memory?.review_at?.slice(0, 10) ?? renewDate}`; })} className="btn-primary h-8 rounded-md px-3 text-xs text-white disabled:opacity-35">确认</button><button type="button" onClick={() => setRenewOpen(null)} className="h-8 px-2 text-xs text-white/55 hover:text-white">取消</button><span className="text-[11px] text-white/50">默认往后推 {REVIEW_DAYS} 天，也可以自己改日期</span></div>}
                         </div>
@@ -387,7 +382,7 @@ export default function MemoryPage() {
       {editing !== null && (
         <Modal onClose={() => setEditing(null)}>
           <h2>改这条记忆</h2>
-          <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          <p className="text-xs text-white/50">
             改 = 台账「取代」：旧值留痕、内容换成新的，编号会变（历史永远查得到当时写过什么）。
           </p>
           <label style={{ fontSize: "12px" }}>新的内容</label>
@@ -557,10 +552,9 @@ export default function MemoryPage() {
       )}
             </div>
           </div>
-        </AppShell>
-      </WorkspaceProvider>
   );
 }
+
 
 /** 一段记忆列表（全局一段、计划内一段，同一个渲染）。 */
 function Metric({ label, value, accent = "white" }: { label: string; value: number; accent?: "white" | "amber" }) {
@@ -621,7 +615,7 @@ function MemoryBlock({
                   const isLong = item.content.length > 64;
                   const expanded = expandedKey === rowKey;
                   return (
-                    <article key={rowKey} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 border-t border-white/[0.06] py-3">
+                    <article key={rowKey} className="grid min-w-0 gap-3 border-t border-white/[0.06] py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-x-4">
                       <div className="min-w-0">
                         <div className="flex min-w-0 items-start gap-3"><span className="mt-2 size-1.5 shrink-0 rounded-full bg-white/40" /><p className={`min-w-0 break-words text-sm leading-5 text-white/85 ${isLong && !expanded ? "line-clamp-2" : ""}`}>{item.content}</p></div>
                         {isLong && <button type="button" aria-expanded={expanded} onClick={() => setExpandedKey(expanded ? null : rowKey)} className="ml-5 mt-1 px-1 py-0.5 text-xs text-white/60 hover:text-white/90">{expanded ? "收起全文" : "展开全文"}</button>}
@@ -629,7 +623,7 @@ function MemoryBlock({
                         <div className="ml-5"><ReviewLine item={item} /></div>
                         {item.evidence.length > 0 && <details className="ml-5 mt-1.5"><summary className="flex cursor-pointer list-none items-center gap-1 text-[11px] text-green/90 hover:text-green"><ArrowRight className="size-3" />来源 {item.evidence.length}</summary><ul className="mt-2 space-y-1 border-l border-green/25 pl-3 text-[11px] leading-5 text-white/50">{item.evidence.map((evidence, index) => <li key={`${evidence.source_type}-${evidence.source_id}-${index}`}>{evidence.source_label}#{evidence.source_id}{evidence.source_time && `（${evidence.source_time.slice(0, 10)}）`}：「{evidence.excerpt}」</li>)}</ul></details>}
                       </div>
-                      <div className="flex items-start gap-1 pt-0.5"><button type="button" disabled={pending} onClick={() => onEdit(item)} className="border border-white/[0.08] px-2 py-1 text-xs text-white/50 hover:border-white/20 hover:text-white disabled:opacity-35">改</button><button type="button" disabled={pending} onClick={() => onVoid(item)} className="border border-red-300/[0.12] px-2 py-1 text-xs text-red-200/55 hover:border-red-300/30 hover:text-red-100 disabled:opacity-35">作废</button><button type="button" disabled={pending} onClick={() => onPurge(item)} className="border border-red-300/[0.1] px-2 py-1 text-xs text-red-200/45 hover:border-red-300/25 hover:text-red-100 disabled:opacity-35">删除</button></div>
+                      <div className="flex flex-wrap items-start gap-1 pt-0.5 lg:justify-end"><button type="button" disabled={pending} onClick={() => onEdit(item)} className="inline-flex h-8 items-center border border-white/[0.08] px-2 py-1 text-xs text-white/50 hover:border-white/20 hover:text-white disabled:opacity-35">改</button><button type="button" disabled={pending} onClick={() => onVoid(item)} className="inline-flex h-8 items-center border border-red-300/[0.12] px-2 py-1 text-xs text-red-200/55 hover:border-red-300/30 hover:text-red-100 disabled:opacity-35">作废</button><button type="button" disabled={pending} onClick={() => onPurge(item)} className="inline-flex h-8 items-center border border-red-300/[0.1] px-2 py-1 text-xs text-red-200/45 hover:border-red-300/25 hover:text-red-100 disabled:opacity-35">删除</button></div>
                     </article>
                   );
                 })}
