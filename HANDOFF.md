@@ -1,11 +1,11 @@
 # cadence 交接文档
 
-> 最近更新：2026-09-29（E-65：工作台右栏改章节/目录双视图，lint/tsc 通过；界面走查归用户）
+> 最近更新：2026-09-29（E-66：候选页 PC 目录/评审席与路径轨迹；界面走查归用户）
 > 仓库根目录：`D:\cadence`
-> 主工作树：`D:\cadence`｜分支 `feat/frontend-a-shell`｜HEAD `d07967b`，领先 origin 32 提交；工作区未提交（视觉 + 流程闭环 + 回归 + 双入口整改 E-61～E-63 + 节点放回）。本轮未 commit/push/stash/reset；origin 为公开库，历史备份 `D:/cadence-history-backup-20260923.bundle`。
-> 其他工作树：`D:\cadence-flow-closure`｜同 HEAD，只读保留。
-> 当前唯一目标：工作台 PC 阶段视图已重构，静态检查通过，待用户走查；四旧页与双入口真实模型走查仍待用户，P4 与「接本地库」排后。
-> 下一条动作：用户在 `/workbench` 桌面端查看当前阶段、切目录选其他阶段、完成/放回任务、提交交付物及周报告入口；四旧页与双入口仍待走查。真实写入由用户决定；此前用 **tools/dev_server.py** 重启后端；不清真实库。
+> 主工作树：`D:\cadence`｜分支 `feat/frontend-a-shell`（远端默认主分支）｜HEAD `f710006`，与 origin 同步；积压与本轮整改已分批入库并推送，工作区只余一份用户笔记未跟踪。origin 为公开库，历史备份 `D:/cadence-history-backup-20260923.bundle`。
+> 其他工作树：`D:\cadence-flow-closure`｜`feat/flow-closure`、HEAD `d07967b`，只读保留。
+> 当前唯一目标：候选页 PC 结果区已重构，静态检查通过，待用户走查；工作台、四旧页与双入口真实模型仍待走查，P4 排后。
+> 下一条动作：用户在 `/candidates` 桌面端分别看“备选方向”目录/单条评审与“完整路径”轨迹，切探索对话、历史、采纳/否决；真实写入由用户决定，不清真实库。
 
 ## 1. 当前状态
 
@@ -15,7 +15,7 @@
 | LLM provider 管理与调用记账（T10） | 通过 | E-26、E-32 | `llm.py`、或那 6 条 provider / llm-calls 路由与请求模型变更后失效 |
 | 统一外壳、工作台执行与报告回流 | 通过 | E-60（静态与构建）＋本轮 E-65（工作台 lint/tsc） | 工作台章节/目录切换仅静态验证，桌面操作待用户走查；`plan-tree-panel.tsx` 或 `workbench-view.tsx` 的阶段选择/操作变更后 E-65 失效 |
 | 四问判断链路（T12） | 通过 | E-26、E-27（真实模型一次） | `advisor.py`、`/api/requests`、`/api/profile`、`RequestIn` 变更后失效 |
-| 候选清单、明确轮次追问与历史恢复 | 通过 | 本轮 E-63（后端路由级＋前端 lint/tsc） | 逐轮回复/保持形态/交错分段已修；**刷新与切页观感走查归用户**；`candidates/page.tsx`、`find-session.ts`、`api.ts`、`advisor.list_search_requests` 变更后失效 |
+| 候选清单、明确轮次追问与历史恢复 | 通过 | E-63（后端路由级）＋本轮 E-66（前端静态） | PC 目录/评审席/路径轨迹及刷新切页观感待用户走查；`candidates/page.tsx`、`candidate-card.tsx` 的展示/选择变更后 E-66 失效；`find-session.ts`、`api.ts`、`advisor.list_search_requests` 的逐轮契约变更后 E-63 失效 |
 | 提案裁定与批准结果卡 | 通过 | 本轮 E-60（静态）；后端规则沿用 E-37 | 结果卡跳转与裁定视觉待走查；失效范围见 E-60 |
 | 判断、档案、模型接入、报告四页新构图 | 通过 | E-64（lint/tsc） | 仅静态验证；桌面/窄屏与交互待用户走查；四页、`judgment-view.tsx`、外壳改动后失效 |
 | 「找」候选清单与去重（T13） | 通过 | E-31/E-32（假上游）、E-33/E-34/E-36（真实模型两次 + 采纳落阶段） | `find_candidates` / `_check_find` / `decide_candidate`、`providers/find.py`、那三条路由、`ledger.set_status` 的 `extra` 变更后失效 |
@@ -83,9 +83,10 @@
 | E-55 / 2026-09-26 | **工作台四件套**：历史导航条、追问渲染成问答卡（信封加 `questions`）、流式展开、思考态。452 passed、冒烟 17 步、lint/tsc 0；真库补列 | `test_dialogue.py` 末段 4 例可复跑 | 通过：追问落库且 view/turn 带出、自由题归一化、空标题/单选项带原因重说 | 失效条件见第 1 节计划级对话行。**真实模型未跑，走查归用户** |
 | E-50/E-51 / 2026-09-21 | 记忆新增/扫描/裁定/彻底删除与走查整改；历史 pytest 429→443、冒烟17步 | test_memory/test_agent/test_dialogue 可复跑 | 通过：日期优先、续期不增行、散文重试后兜底、中文工具别名、记忆变化摘要；只验假上游 | memory/agent_tools/dialogue 的这些行为变化需复验，真实模型扫描待用户 |
 | E-60 / 2026-09-27 | 主树整合：四项前端命令 0、pytest 460 passed、隔离冒烟 17 步、diff-check 过（备份在 `%TEMP%` cadence-merge-20260927） | 同轮 patch 与日志 | 通过：三方合并源代码哈希未变；新接口 GET /api/learning-requests 与 clarify_request_id 纳入 | 相关路由/组件被 E-61～E-63 重写后失效；不覆盖真实模型/浏览器 |
-| E-63 / 2026-09-28 | 双入口整改收口：蓝图就绪闸与空白拦截、工作台意图硬闸；找方向逐轮原话/意图/回复落库＋同线程限长历史、保留原形态度裁定、追问占用带属主、redo 原子更替；候选页逐轮对话留痕、失败回填、A→B→A 归段、刷新接回在途轮次；提案页文案与编号。后端 `-m pytest -q` **528 passed**；隔离冒烟 **17 步**（用完即删）；前端 lint **0 error**、`tsc --noEmit` 通过；真库只幂等 `db.init` 补 4 列（16 行请求/22 条档案未动） | `test_candidates` / `test_dialogue` / `test_blueprint` / `test_agent` 可复跑 | 通过：只报近况不给建议（先澄清）、澄清后回「对」可落建议；模型未就绪/仍带问题不许出蓝图；找方向刷新能恢复逐轮回复与「保持原形态」决定；同线程历史进模型；跨线程不串、旧属主不误放锁 | 失效条件见 §1 两行；真实模型措辞与桌面走查未验（归用户） |
+| E-63 / 2026-09-28 | 双入口整改：蓝图就绪、工作台意图闸、找方向逐轮历史/形态裁定/占用与 redo；`pytest -q` 528 passed、隔离冒烟 17 步、前端 lint/tsc 通过；真库幂等补 4 列 | `test_candidates` / `test_dialogue` / `test_blueprint` / `test_agent` 可复跑 | 通过：只报近况先澄清、蓝图未就绪拦截、找方向刷新恢复轮次与形态决定、同线程历史进模型，跨线程与旧占用不串 | 后端契约变更后失效；真实模型措辞与桌面观感待用户 |
 | E-64 / 2026-09-29 | 四旧页重做：评判纵向展开/历史回看、档案分类/侧边编辑、服务商列表/详情/流水、报告检查点/回执。前端 `npm run lint`（0 error，9 warning）、`npx tsc --noEmit`、`git diff --check` 通过；`impeccable detect --json` 为 `[]` | 本轮源码；未跑浏览器、未写真库 | 仅静态验证；桌面/窄屏、键盘与真实操作待用户走查；四页、`judgment-view.tsx`、外壳改动后失效 |
 | E-65 / 2026-09-29 | 工作台 PC 右栏：默认当前阶段章节，目录替换正文，阶段选择/前后翻页、交付物与执行清单重排；`npm run lint`（0 error，9 条既有 warning）、`npx tsc --noEmit`、`git diff --check -- frontend/components/workbench/plan-tree-panel.tsx frontend/components/workbench/workbench-view.tsx` 通过 | 本轮源码；未跑浏览器、未写真库 | 仅静态验证；阶段切换、任务/交付物/报告与计划管理真实操作待用户桌面走查；两个工作台组件的相关行为变更后失效 |
+| E-66 / 2026-09-29 | 候选页 PC：左侧目录替换折叠清单、右侧单条评审；路径为横向步骤轨迹，保留对话/历史/推荐依据/裁定。`npm run lint`（0 error，9 既有 warning）、`npx tsc --noEmit`、`git diff --check` 通过 | 当前源码；未跑浏览器、未写真库 | 仅静态验证；两种形态、历史切换与裁定待用户走查；候选页及候选卡展示变更后失效 |
 
 ## 6. 启动、验收与上下文
 
