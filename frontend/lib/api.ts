@@ -1806,3 +1806,75 @@ export async function purgeMemory(input: {
     body: JSON.stringify({ scope: input.scope, reason: input.reason }),
   });
 }
+
+// ---------- 每周提醒与导出（P4 触达：T15–T17） ----------
+
+/** 一次触达的记录：真发（email）还是空实现（none），成没成，失败原因是什么。 */
+export type NotifySendRecord = {
+  id: number;
+  channel: "email" | "none";
+  channel_label: string;
+  kind: string | null;
+  kind_label: string;
+  subject: string | null;
+  ok: boolean;
+  error: string | null;
+  sent_at: string;
+};
+
+export type ExportFile = { name: string; path: string; bytes: number; modified: string };
+
+/** 导出目录的现状：有什么文件、最近一次是什么时候（只读，不写文件）。 */
+export type ExportSummary = { dir: string; last_at: string | null; files: ExportFile[] };
+
+/** 手动导出的回执。 */
+export type ExportResult = { dir: string; exported_at: string; week: string; files: ExportFile[] };
+
+/**
+ * 设置页「每周提醒」那一节要的全部事实：开关、发到哪、下次什么时候、本周会发什么、
+ * 发过什么、导出了什么。`preview` 就是这周那封邮件会写的内容。
+ */
+export type NotifyState = {
+  enabled: boolean;
+  to_addr: string | null;
+  channel: "email" | "none";
+  smtp_configured: boolean;
+  smtp_missing_env: string[];
+  week: string;
+  plan_id: number | null;
+  due: boolean;
+  decision_reason: string;
+  missed_week: string | null;
+  next_send_at: string;
+  preview: { subject: string; body: string };
+  notice: string | null;
+  recent: NotifySendRecord[];
+  export: ExportSummary;
+};
+
+/** 读每周提醒的现状（不会发信、不会导出）。 */
+export async function getNotify(planId?: number): Promise<NotifyState> {
+  const query = planId === undefined ? "" : `?plan_id=${planId}`;
+  return request<NotifyState>(`/api/notify${query}`);
+}
+
+/** 改开关与收件邮箱：只传要改的字段。开着却没有邮箱会被后端拒（400），那是故意的。 */
+export async function updateNotify(input: {
+  enabled?: boolean;
+  toAddr?: string;
+}): Promise<NotifyState> {
+  const body: Record<string, unknown> = {};
+  if (input.enabled !== undefined) body.enabled = input.enabled;
+  if (input.toAddr !== undefined) body.to_addr = input.toAddr;
+  return request<NotifyState>("/api/notify", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** 手动导出四个只读文件（计划-当前 / 决策台账 / 档案-当前 / 周检查点）。只写文件，不动库。 */
+export async function runExport(planId?: number): Promise<ExportResult> {
+  const query = planId === undefined ? "" : `?plan_id=${planId}`;
+  return request<ExportResult>(`/api/notify/export${query}`, { method: "POST" });
+}
