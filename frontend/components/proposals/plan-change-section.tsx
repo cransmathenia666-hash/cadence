@@ -1,7 +1,14 @@
 import { ChevronRight } from "lucide-react";
 import { planChangeTasks, type PlanChangePayload, type Proposal } from "@/lib/api";
 
-export function PlanChangeSection({ proposal }: { proposal: Proposal }) {
+export function PlanChangeSection({
+  proposal,
+  planName,
+}: {
+  proposal: Proposal;
+  /** 计划 id → 计划名；解不出名字的地方才退回编号。 */
+  planName?: (planId: number) => string | null;
+}) {
   const payload = proposal.payload as unknown as PlanChangePayload;
   const tasks = planChangeTasks(payload);
 
@@ -17,7 +24,7 @@ export function PlanChangeSection({ proposal }: { proposal: Proposal }) {
               : "加阶段"}
         </span>
         <span className="text-[13px] text-white/60 font-medium">
-          计划 #{payload.plan_id} 改动建议
+          {planName?.(Number(payload.plan_id)) ?? `计划 #${payload.plan_id}`} · 改动建议
         </span>
       </div>
 

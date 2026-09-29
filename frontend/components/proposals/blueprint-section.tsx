@@ -9,10 +9,12 @@ export function BlueprintSection({
   proposal,
   selection,
   onSelection,
+  planName,
 }: {
   proposal: Proposal;
   selection: string[];
   onSelection: (value: string[]) => void;
+  planName?: (planId: number) => string | null;
 }) {
   const payload = proposal.payload as unknown as BlueprintPayload;
   const stages = payload.stages ?? [];
@@ -77,8 +79,7 @@ export function BlueprintSection({
         <div>
           所属计划：
           <span className="text-white/70 font-medium">
-            计划 #{payload.plan_id}
-            {payload.candidate_id !== undefined && `（源自候选 #${payload.candidate_id}）`}
+            {planName?.(Number(payload.plan_id)) ?? `计划 #${payload.plan_id}`}
           </span>
         </div>
         <span className="opacity-30 hidden sm:inline">|</span>

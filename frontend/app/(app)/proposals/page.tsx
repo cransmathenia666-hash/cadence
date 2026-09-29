@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Inbox } from "lucide-react";
 import {
   ApiError,
@@ -11,55 +12,33 @@ import {
 } from "@/lib/api";
 import { selectionOf } from "@/components/blueprint-body";
 import { ProposalCard } from "@/components/proposals/proposal-card";
+import { ActionResultCard } from "@/components/ui/action-result-card";
 import { ToastStack, type ToastData } from "@/components/ui/toast";
+import { useWorkspace } from "@/components/shell/workspace-context";
 
 /** 成功后先让按钮的「已批准/已驳回」变形被看见，再把卡摘走。 */
 const SETTLED_CARD_LINGER_MS = 900;
 
-/** 裁定成功的回执文案（只进 Toast；失败永远留在页内错误条）。 */
-function decisionNote(done: ProposalDecision, approved: boolean): string {
-  if (!approved) return "已驳回，理由已记入台账。";
-  switch (done.effect) {
-    case "blueprint_built":
-      return (
-        `已批准：计划 #${done.built?.plan_id ?? ""} 里建了 ` +
-        `${done.built?.stages.length ?? 0} 个新阶段、${done.built?.tasks.length ?? 0} 件任务` +
-        `${done.built?.notes.length ? `。${done.built.notes.join("；")}` : "。"}`
-      );
-    case "profile_written":
-      return (
-        `已批准：把「${done.written?.content ?? ""}」写进了长期档案（${done.written?.category ?? ""}）` +
-        "——去「长期档案」页能看到它。"
-      );
-    case "node_updated":
-      return done.updated !== null
-        ? `已批准并原地修改：#${done.updated.node_id} 的 ${done.updated.changed.join("、")} 改为了 ` +
-          `${done.updated.changed.map((k) => done.updated?.after[k] ?? "（清空）").join("、")}（编号保持不变，台账已留痕）。`
-        : "已批准，只记账：这项不会改计划或档案。";
-    case "node_added":
-      return done.added !== null
-        ? `已批准并新建：${done.added.nodes
-            .map((node) => `${node.level === "stage" ? "阶段" : "任务"} #${node.id}「${node.title}」`)
-            .join("、")} 已进计划。`
-        : "已批准，只记账：这项不会改计划或档案。";
-    case "memory_added":
-      return `已批准：已新增记忆「${done.remembered?.memory?.content ?? ""}」`;
-    case "memory_superseded":
-      return `已批准：已用新记忆「${done.remembered?.memory?.content ?? ""}」取代旧记忆「${done.remembered?.before ?? ""}」`;
-    case "memory_renewed":
-      return `已批准：已续期记忆「${done.remembered?.memory?.content ?? ""}」`;
-    case "memory_voided":
-      return `已批准：已作废记忆「${done.remembered?.memory?.content ?? done.remembered?.before ?? ""}」`;
-    default:
-      return "已批准，只记账：这项不会改计划或档案。";
-  }
+type SettledApproval = { proposal: Proposal; decision: ProposalDecision };
+
+/** 驳回提示仍用短 Toast；批准后的结果会留在页面交接卡中（卡上带着标题与去向）。 */
+function decisionNote(approved: boolean): string {
+  return approved ? "已批准，已按提案写入实际数据。" : "已驳回，理由已记入台账。";
 }
 
 export default function ProposalsPage() {
+  const router = useRouter();
+  const { plans, refreshPlans, setSelectedPlanId } = useWorkspace();
+  // 提案正文优先给计划名；清单里查不到（已收尾/不在当前列表）才退回编号。
+  const planName = useCallback(
+    (planId: number) => plans.find((plan) => plan.id === planId)?.goal ?? null,
+    [plans],
+  );
   const [proposals, setProposals] = useState<Proposal[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [toasts, setToasts] = useState<ToastData[]>([]);
+  const [settledApprovals, setSettledApprovals] = useState<SettledApproval[]>([]);
   const [selections, setSelections] = useState<Record<number, string[]>>({});
   const [rejectingId, setRejectingId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -87,10 +66,18 @@ export default function ProposalsPage() {
     refresh();
   }, []);
 
+  function enterWorkbench(planId: number) {
+    setSelectedPlanId(planId);
+    void refreshPlans();
+    router.push(`/workbench?plan_id=${encodeURIComponent(String(planId))}`);
+  }
+
   /** 返回是否成功（成功=true）；失败只落页内错误条，卡上的按钮必须回到可点。 */
   async function onDecide(proposal: Proposal, approved: boolean, reason?: string) {
     setBusy(true);
     setError(null);
+    // payload 必须在裁定前保留：后端裁定回执不会重复返回计划归属等原始上下文。
+    const originalPayload = proposal.payload;
     const selected = selectionOf(proposal, selections);
     try {
       const done = await decideProposal(proposal.id, {
@@ -100,7 +87,13 @@ export default function ProposalsPage() {
       });
 
       const id = ++toastSeq.current;
-      setToasts((previous) => [...previous, { id, text: decisionNote(done, approved) }].slice(-4));
+      setToasts((previous) => [...previous, { id, text: decisionNote(approved) }].slice(-4));
+      if (approved) {
+        setSettledApprovals((previous) => [
+          ...previous.filter((item) => item.proposal.id !== proposal.id),
+          { proposal: { ...proposal, payload: originalPayload }, decision: done },
+        ]);
+      }
 
       // 先让卡上的「已批准/已驳回」变形停留一瞬（驳回态还依赖 rejectingId 保持输入行），
       // 再收掉驳回输入、摘卡并对账。
@@ -123,22 +116,22 @@ export default function ProposalsPage() {
 
   return (
     <div className="flex flex-col h-full min-h-screen pt-20 pb-24">
-      <div className="max-w-[1400px] mx-auto w-full px-4 md:px-8 xl:px-12">
+      <div className="mx-auto w-full max-w-[1120px] px-4 md:px-8">
         {/* 页头 */}
-        <div className="mb-8">
+        <div className="mb-10">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-4">
-              <h1 className="text-[20px] font-semibold text-primary/90 tracking-tight">
+              <h1 className="text-[26px] font-semibold text-primary/90 tracking-tight">
                 提案裁定
               </h1>
               {proposals !== null && (
-                <span className="px-2.5 py-1 bg-amber-500/10 border border-amber-500/20 rounded-full text-[11px] font-medium text-amber-500 uppercase tracking-widest shrink-0">
+                <span className="shrink-0 rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-400">
                   {pendingCount} 条待裁定
                 </span>
               )}
             </div>
           </div>
-          <p className="text-[12px] text-white/60">
+          <p className="text-[13px] text-white/60 mt-2">
             批准后才会写入实际数据；驳回必须填写理由并记入台账。
           </p>
         </div>
@@ -154,6 +147,19 @@ export default function ProposalsPage() {
           </div>
         )}
 
+        {settledApprovals.length > 0 && (
+          <div className="mb-8 space-y-4" aria-label="已完成的提案结果">
+            {settledApprovals.map(({ proposal, decision }) => (
+              <ActionResultCard
+                key={proposal.id}
+                proposal={proposal}
+                decision={decision}
+                onEnterWorkbench={enterWorkbench}
+              />
+            ))}
+          </div>
+        )}
+
         {/* 加载态 */}
         {proposals === null && (
           <div className="flex flex-col items-center justify-center py-24 text-center border border-white/[0.04] rounded-2xl bg-surface2/30">
@@ -165,8 +171,8 @@ export default function ProposalsPage() {
         {/* 空态 */}
         {proposals !== null && proposals.length === 0 && (
           <div className="flex flex-col items-center justify-center py-24 text-center border border-white/[0.04] rounded-2xl bg-surface2/30">
-            <Inbox className="w-10 h-10 text-white/50 mb-3 stroke-[1.5]" />
-            <div className="text-[14px] text-white/60 mb-2 font-medium">当前没有待裁定的提案</div>
+            <Inbox className="w-12 h-12 text-white/50 mb-4 stroke-[1.5]" />
+            <div className="text-[16px] text-white/70 mb-2 font-semibold">当前没有待裁定的提案</div>
             <div className="text-[12px] text-white/50">
               候选清单生成蓝图、对话提炼档案变更或记忆扫描后，会出现在这里
             </div>
@@ -175,11 +181,12 @@ export default function ProposalsPage() {
 
         {/* 提案胶囊行列表 */}
         {proposals !== null && proposals.length > 0 && (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {proposals.map((proposal) => (
               <ProposalCard
                 key={proposal.id}
                 proposal={proposal}
+                planName={planName}
                 selection={selectionOf(proposal, selections)}
                 onSelection={(value) =>
                   setSelections((previous) => ({ ...previous, [proposal.id]: value }))

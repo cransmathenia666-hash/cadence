@@ -627,37 +627,61 @@ export type PathStep = {
 
 /**
  * 这一轮「找」给的**形状**（T34）：
- * - `directions`：3–5 条**互相竞争**的方向，逐条采纳 / 否决（否决＝永久禁区）；
+ * - `directions`：3–5 条**互相竞争**的方向，逐条采纳 / 否决（否决只在本探索线程／计划内禁推，不跨探索生效）；
  * - `path`：**一条路**——1 条伞候选 + 2–8 个先后步骤，整条裁定一次。
  */
 export type CandidateShape = "directions" | "path";
 
+/**
+ * 这一轮「找」模型自报的**意图**（决策 44 ①）：只有 `candidates` 轮才带候选清单。
+ * - `chat`：寒暄 / 闲聊 / 模型要解释「为什么想换形态」（看 `reply`，可带 `shape_change`）；
+ * - `need_info`：信息不足，先问一句关于你的事实（`reply` + `clarify`，不落候选）；
+ * - `candidates`：候选清单照旧（`shape` / `candidates` / `steps` 齐备）。
+ */
+export type FindIntent = "chat" | "need_info" | "candidates";
+
 export type FindResult = {
   request_id: number;
   kind: "search";
+  /** 本轮归属的探索线程（线程头请求的 id）。后续续问 / 答追问都带上它。 */
+  thread_id: number;
+  /** 这一轮模型做了什么（决策 44 ①）。 */
+  intent: FindIntent;
+  /**
+   * 这轮是不是「明确重做」：只有 redo 轮落新候选才会让同线程上一版未裁定候选过期；
+   * 普通续聊里模型给的候选照常落库，但旧版原样留着、仍可裁定。
+   */
+  redo: boolean;
+  /** chat / need_info 轮的人话回应；candidates 轮为 null。 */
+  reply: string | null;
   /** 这一轮针对哪个计划；null = 「新方向（不属于任何计划）」（SPEC 决策 33）。 */
   plan_id: number | null;
-  /** 这一轮给的是一条路还是几个方向（T34）。 */
-  shape: CandidateShape;
+  /** 这一轮给的是一条路还是几个方向（T34）。chat / need_info 轮为 null。 */
+  shape: CandidateShape | null;
   /** 步骤草案：只有 `shape === "path"` 时非空。 */
   steps: PathStep[];
-  /** 与 `candidates` 一一对应、同顺序：裁决时要用它们。 */
+  /** 与 `candidates` 一一对应、同顺序：裁决时要用它们。非候选轮为空数组。 */
   candidate_ids: number[];
-  /** 顺序即优先级（后端已按 rank 排好，前端不再自己排）。 */
+  /** 顺序即优先级（后端已按 rank 排好，前端不再自己排）。非候选轮为空数组。 */
   candidates: FoundCandidate[];
-  /** 「建议先从哪条开始」的那条标题（一字不差复制自 candidates）。 */
-  recommended_start: string;
-  start_reason: string;
+  /** 「建议先从哪条开始」的那条标题（一字不差复制自 candidates）。非候选轮为 null。 */
+  recommended_start: string | null;
+  start_reason: string | null;
   /**
-   * 追问槽位（SPEC 决策 35 ②）：模型觉得档案里缺了某类信息时先问的一句。
-   * 它是**关于你的事实**（一句话能答）——「这条路怎么走」是采纳之后规划对话的事。
-   * 回答走 `findCandidates` 的第三个参数，后端会把它与这句原问题拼成下一轮输入。
+   * 追问槽位（SPEC 决策 35 ②）：need_info 轮必有；candidates 轮也可带（带追问的候选
+   * 可直接采纳，回答后推荐可能更新）。它是**关于你的事实**——「这条路怎么走」是
+   * 采纳之后规划对话的事。回答走 `findCandidates` 的 `clarifyAnswer`。
    */
   clarify: { question: string; missing: string } | null;
+  /**
+   * 形态切换请求（决策 44 ③）：模型认为新事实推翻了原判断时的说明，只有 chat 轮可能有。
+   * 切不切由用户确认——确认后下一轮带 `allowShapeSwitch: true` 重算。
+   */
+  shape_change: { from: CandidateShape; to: CandidateShape; reason: string } | null;
   /** 候选来源自述。`networked: false` = 甲档（不联网，只给路线建议）。 */
   source: { name: string; networked: boolean };
   profile_basis: ProfileBasis;
-  /** 这次被当成禁区的标题（你以前否决过的）。 */
+  /** 这次被当成禁区的标题（你以前否决过的，只限本计划 / 本线程）。 */
   banned_titles: string[];
   /** 发进 prompt 的反馈流水（最近几轮「找」与你的表态），已按上限截好。 */
   feedback_lines: string[];
@@ -665,19 +689,26 @@ export type FindResult = {
 };
 
 /**
- * 提交「我不知道该学什么」，拿回候选（`directions` 时 3–5 条，`path` 时 1 条伞候选 + 步骤）。
+ * 提交「我不知道该学什么」，拿回这一轮的结果（候选 / 追问 / 纯回应由 `intent` 区分）。
  *
- * 走的是同一个 `POST /api/requests`，只是 `kind` 不同。落成的是 `proposed` 候选，
- * 等你在界面上采纳 / 否决——**否决过的标题会成为下次的禁区**。
+ * 走的是同一个 `POST /api/requests`，只是 `kind` 不同。candidates 轮落成 `proposed` 候选，
+ * 等你在界面上采纳 / 否决；否决过的标题会成为**同计划 / 同线程**的禁区（决策 44 ②）。
  *
- * `clarifyAnswer` 是回答上一轮追问的那句话（T36）：后端把它与**原问题**拼成这一轮的输入
- * （不拼上原问题，下一轮模型就丢了前提），并把那条追问标成「已答」进反馈流水，
- * 后续轮次不再重复问同一件事。
+ * 探索线程（决策 44 ①）：新探索不传 `threadId`，响应里的 `thread_id` 记下来；
+ * 续问 / 答追问都带着它——换计划续问会被 409 拒绝。同句原话再发一次（不带 threadId）
+ * 就是两段独立线程。
+ *
+ * `clarifyAnswer` 回答上一轮追问（T36）：后端拼成「原话 + 追问 + 回答」的输入，
+ * 且**模型成功后才把那条追问置为已答**——失败可原样重试。
  */
 export async function findCandidates(
   rawText: string,
   planId?: number | null,
   clarifyAnswer?: string | null,
+  clarifyRequestId?: number | null,
+  threadId?: number | null,
+  allowShapeSwitch?: boolean,
+  redo?: boolean,
 ): Promise<FindResult> {
   return request<FindResult>("/api/requests", {
     method: "POST",
@@ -687,6 +718,10 @@ export async function findCandidates(
       raw_text: rawText,
       plan_id: planId ?? null,
       clarify_answer: clarifyAnswer ?? null,
+      clarify_request_id: clarifyRequestId ?? null,
+      thread_id: threadId ?? null,
+      allow_shape_switch: allowShapeSwitch ?? false,
+      redo: redo ?? false,
     }),
   });
 }
@@ -717,20 +752,74 @@ export type CandidateRow = {
   steps: PathStep[];
 };
 
+export type LearningRequestHistory = {
+  request_id: number;
+  raw_text: string;
+  /** 用户本轮的原话；raw_text 是发给模型的合成输入。 */
+  utterance: string;
+  intent: "chat" | "need_info" | "candidates" | null;
+  reply: string | null;
+  status: "pending" | "success" | "failed";
+  plan_id: number | null;
+  /** 这轮所属的探索线程（线程头请求的 id）。旧记录是 null——各自独立成段，不靠原话猜合并。 */
+  thread_id: number | null;
+  created_at: string;
+  clarify: { question: string; missing: string; answer: string | null } | null;
+  /**
+   * 待确认的形态切换提案（若有）：模型说要换「多方向/一路径」、还在等用户拍板的那份。
+   * 刷新后据此恢复确认条；出过新版候选或用户保持旧形态继续后它会失效（后端判）。
+   */
+  shape_change: { from: CandidateShape | null; to: CandidateShape; reason: string; decision: "pending" | "keep" | "switch" } | null;
+  candidate_count: number;
+  has_candidates: boolean;
+};
+
+export async function keepFindShape(threadId: number, proposalRequestId: number): Promise<void> {
+  await request(`/api/find/shape/keep`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ thread_id: threadId, shape_change_request_id: proposalRequestId }),
+  });
+}
+
 export type CandidateList = {
   /** 还没问过时是 null（不是错误）。 */
   request_id: number | null;
   raw_text: string | null;
   /** 这一轮的所属计划；null = 「新方向（不属于任何计划）」。 */
   plan_id: number | null;
+  /** 这轮所属的探索线程；旧记录为 null。 */
+  thread_id?: number | null;
   created_at?: string | null;
+  clarify?: { question: string; missing: string; answer: string | null } | null;
   candidates: CandidateRow[];
   recommended: CandidateRow | null;
 };
 
-/** 取候选清单。不传 `requestId` 就取最近一轮有候选的那次「找」。 */
-export async function listCandidates(requestId?: number): Promise<CandidateList> {
-  const query = requestId === undefined ? "" : `?request_id=${requestId}`;
+export async function listLearningRequests(
+  planId?: number | null,
+  limit = 50,
+): Promise<LearningRequestHistory[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (planId !== undefined && planId !== null) params.set("plan_id", String(planId));
+  const result = await request<{ requests: LearningRequestHistory[] }>(
+    `/api/learning-requests?${params.toString()}`,
+  );
+  return result.requests;
+}
+
+/**
+ * 取候选清单。`requestId` 指定看哪一轮；`threadId` 指定看哪段探索线程
+ * （取该线程内最近一条有候选的请求）；都不传就取最近一轮有候选的那次「找」。
+ */
+export async function listCandidates(
+  requestId?: number,
+  threadId?: number,
+): Promise<CandidateList> {
+  const params = new URLSearchParams();
+  if (requestId !== undefined) params.set("request_id", String(requestId));
+  if (threadId !== undefined) params.set("thread_id", String(threadId));
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   return request<CandidateList>(`/api/candidates${query}`);
 }
 
@@ -774,7 +863,7 @@ export async function verdictCandidate(
 
 // ---------- 任务与交付物（T23 三级结构） ----------
 
-/** 打勾 / 跳过的回执。`proposal_id` 恒为 `null`：T29 起阶段完成不再顺产推进提案（键留着不动形状）。 */
+/** 打勾 / 跳过 / 放回的回执。`proposal_id` 恒为 `null`：T29 起阶段完成不再顺产推进提案（键留着不动形状）。 */
 export type TaskActionResult = {
   node_id: number;
   node_status_before: string;
@@ -788,10 +877,24 @@ export async function checkTask(nodeId: number): Promise<TaskActionResult> {
 }
 
 /**
+ * 放回：把**已完成 / 已跳过的阶段或任务**退回「进行中」（2026-09-28 补的出口）。
+ *
+ * 与跳过同一层口径、同一道理由闸：**理由必填**（缺理由回 400）——它进台账，
+ * 回答「为什么又把它放回来」。周打卡不给放回（它的状态由报告推进）。
+ */
+export async function reopenNode(nodeId: number, reason: string): Promise<TaskActionResult> {
+  return request<TaskActionResult>(`/api/plan/nodes/${nodeId}/reopen`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/**
  * 跳过：跳过算完成的一种，但**必须写一句理由**（缺理由回 400）。
  *
  * **阶段与任务都能跳**（T35：SPEC 决策 41）——「不要了」在三层各有出口：方向层否决＝
- * 永久拉黑（太重）、蓝图不勾＝本版不建、这里＝**已经建出来的这一步不做了**（留一句理由，
+ * 本线程/计划局部禁推（不跨探索生效）、蓝图不勾＝本版不建、这里＝**已经建出来的这一步不做了**（留一句理由，
  * 答「当时为什么没做」）。周打卡不给跳（它是节奏节点，报告里本来就有「跳过」这个状态）。
  * 阶段跳过时其下的任务原样留着（它们是痕迹），落后量不再算它，阶段完成判定直接满足。
  */
@@ -1061,16 +1164,21 @@ export type PlanChatView = {
   plan_id: number | null;
   messages: ChatMessage[];
   turns_used: number;
+  /** **聊成的轮数**（决策 44 / III-01）：模型回话成功才算数——只留下话、没聊成的不算。 */
+  valid_turns_used: number;
   max_turns: number;
-  /** 聊过至少一轮才能出方案（决策 36：不是一次性静默生成）。 */
+  /** 聊成至少一轮才能出方案。 */
   can_generate: boolean;
   /**
    * 这条候选自带的**步骤草案**（T34，只有路径候选有）：对话区顶部把它列出来，
    * 让你看得见它在照哪份底稿聊。刷新页面也还在（后端从候选 payload 解，不靠当刻响应）。
    */
   steps: PathStep[];
-  /** 这个计划当前待裁定的蓝图（同一计划同时只有一份）。 */
-  blueprint: { id: number; created_at: string } | null;
+  /**
+   * 这个计划当前待裁定的蓝图（同一计划同时只有一份）。`candidate_id` 用来核对
+   * 这份蓝图确实是这条候选聊出来的——别把同计划另一条候选的树挂过来（III-02）。
+   */
+  blueprint: { id: number; created_at: string; candidate_id: number } | null;
 };
 
 /** 看这段对话（历史 + 聊了几轮 + 能不能出方案）。 */
@@ -1242,6 +1350,11 @@ export async function getPlanDialogue(planId: number): Promise<PlanDialogueView>
 export type DialogueTurn = {
   plan_id: number;
   reply: string;
+  /**
+   * 它这一轮自报的行为（决策 44 / IV-01）：chat＝寒暄闲聊、answer＝问执行现状、
+   * discuss＝讨论技术方案、modify＝明确请求修改。只有 modify 轮才可能带 suggestion。
+   */
+  intent: "chat" | "answer" | "discuss" | "modify";
   suggestion: DialogueSuggestion | null;
   /** 这一轮带出的结构化追问（没问就是 `null`）。 */
   questions: DialogueQuestion[] | null;

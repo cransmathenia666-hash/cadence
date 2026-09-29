@@ -33,7 +33,7 @@ export function PromptInput({
   return (
     <form 
       onSubmit={onSubmit} 
-      className="w-full bg-[#141416] border border-white/[0.06] rounded-2xl flex flex-col focus-within:border-white/[0.15] transition-colors p-3 shadow-lg"
+      className="w-full min-w-0 bg-surface2/60 border border-white/[0.06] rounded-xl flex flex-col focus-within:border-white/[0.15] transition-colors p-3 shadow-lg"
     >
       <textarea
         aria-label="描述你的处境与困惑"
@@ -51,16 +51,16 @@ export function PromptInput({
         required
       />
       
-      <div className="flex items-center justify-between gap-3 mt-2 px-1">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 mt-2 px-1">
         <HoverSelect
           value={planChoice}
           onChange={setPlanChoice}
           disabled={asking}
           placeholder="新方向 (不从属现有计划)"
-          className="min-w-[220px]"
+          className="min-w-0 w-full sm:min-w-[220px] sm:w-auto sm:flex-1"
           options={[
             { value: "", label: "新方向 (不从属现有计划)" },
-            ...plans.map((item) => ({ value: String(item.id), label: `#${item.id} ${item.goal}` })),
+            ...plans.map((item) => ({ value: String(item.id), label: item.goal })),
           ]}
         />
         

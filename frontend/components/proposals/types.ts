@@ -13,27 +13,27 @@ export const KIND_CONFIG: Record<
   plan_blueprint: {
     label: "蓝图待批",
     badge: "BLUEPRINT",
-    badgeClass: "text-white bg-white/10 border-white/20",
+    badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   },
   profile_change: {
     label: "档案变更",
     badge: "PROFILE",
-    badgeClass: "text-sky-400 bg-sky-500/10 border-sky-500/20",
+    badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   },
   material_judgment: {
     label: "资料判断",
     badge: "JUDGMENT",
-    badgeClass: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+    badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   },
   plan_change: {
     label: "计划改动",
     badge: "PLAN",
-    badgeClass: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+    badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   },
   memory_change: {
     label: "记忆候选",
     badge: "MEMORY",
-    badgeClass: "text-purple-400 bg-purple-500/10 border-purple-500/20",
+    badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   },
 };
 

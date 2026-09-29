@@ -11,9 +11,9 @@ import { MemoryChangeSection } from "./memory-change-section";
 
 function getProposalTitle(proposal: Proposal): string {
   const payload = proposal.payload as Record<string, unknown>;
-  if (proposal.kind === "plan_blueprint") {
+    if (proposal.kind === "plan_blueprint") {
     const goal = typeof payload.goal === "string" ? payload.goal : "";
-    return goal || (payload.plan_id ? `计划 #${payload.plan_id} 方案` : "蓝图方案");
+    return goal || "蓝图方案";
   }
   if (proposal.kind === "material_judgment") {
     const text = typeof payload.source_text === "string" ? payload.source_text.trim() : "";
@@ -24,14 +24,14 @@ function getProposalTitle(proposal: Proposal): string {
   }
   if (proposal.kind === "plan_change") {
     const summary = typeof payload.summary === "string" ? payload.summary : "";
-    return summary || (payload.plan_id ? `计划 #${payload.plan_id} 改动建议` : "计划改动");
+    return summary || "计划改动建议";
   }
   if (proposal.kind === "memory_change") {
     const content = typeof payload.content === "string" ? payload.content : "";
     const target = typeof payload.target_content === "string" ? payload.target_content : "";
     return content || target || "记忆候选";
   }
-  return proposal.reason || `提案 #${proposal.id}`;
+  return proposal.reason || "提案";
 }
 
 export function ProposalCard({
@@ -45,8 +45,11 @@ export function ProposalCard({
   onCancelReject,
   rejectReason,
   setRejectReason,
+  planName,
 }: {
   proposal: Proposal;
+  /** 计划 id → 计划名（工作台已有清单）；解不出名字的地方才退回编号。 */
+  planName?: (planId: number) => string | null;
   selection: string[];
   onSelection: (value: string[]) => void;
   busy: boolean;
@@ -67,7 +70,7 @@ export function ProposalCard({
   const config = KIND_CONFIG[proposal.kind] ?? {
     label: "未知提案",
     badge: "UNKNOWN",
-    badgeClass: "text-white/50 bg-white/5 border-white/10",
+    badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   };
 
   const isBlueprint = proposal.kind === "plan_blueprint";
@@ -106,6 +109,7 @@ export function ProposalCard({
             proposal={proposal}
             selection={selection}
             onSelection={onSelection}
+            planName={planName}
           />
         );
       case "material_judgment":
@@ -113,7 +117,7 @@ export function ProposalCard({
       case "profile_change":
         return <ProfileChangeSection proposal={proposal} />;
       case "plan_change":
-        return <PlanChangeSection proposal={proposal} />;
+        return <PlanChangeSection proposal={proposal} planName={planName} />;
       case "memory_change":
         return <MemoryChangeSection proposal={proposal} />;
       default:
@@ -136,10 +140,10 @@ export function ProposalCard({
         aria-controls={`proposal-body-${proposal.id}`}
       >
         <div className="flex items-center gap-3 pr-4 min-w-0">
-          {/* 左侧状态圆片（待裁定=琥珀点+外圈 ping） */}
-          <div className="w-5 h-5 rounded-full border border-amber-500/30 flex items-center justify-center shrink-0 relative">
-            <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-            <div className="absolute inset-0 rounded-full border border-amber-500 animate-ping opacity-20" />
+          {/* 左侧状态圆片：静态琥珀点与外圈，避免持续跳动 */}
+          <div className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-500/30">
+            <div className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            <div className="absolute -inset-0.5 rounded-full border border-amber-500/15" />
           </div>
 
           {/* 类型标签（11-12px 白/40） */}
@@ -147,23 +151,17 @@ export function ProposalCard({
             {config.label}
           </span>
 
-          {/* 15px 标题行 */}
-          <div className="text-[15px] font-medium text-primary/90 truncate">
+          {/* 16px 标题行，font-semibold 加强 */}
+          <div className="text-[16px] font-semibold text-primary/90 truncate">
             {title}
           </div>
         </div>
 
         {/* 行尾：元数据 + 类型徽章 + chevron */}
         <div className="flex items-center gap-4 shrink-0">
-          <div className="text-[12px] text-white/50 hidden md:block">
-            #{proposal.id} · {proposal.created_at.slice(0, 16).replace("T", " ")}
+          <div className="text-[11px] text-white/50 hidden md:block">
+            {proposal.created_at.slice(0, 16).replace("T", " ")}
           </div>
-
-          <span
-            className={`px-2.5 py-1 rounded-full border text-[11px] font-medium uppercase tracking-widest hidden sm:block ${config.badgeClass}`}
-          >
-            {config.badge}
-          </span>
 
           <ChevronDown
             className={`w-4 h-4 text-white/50 transition-transform duration-200 ${
@@ -226,7 +224,7 @@ export function ProposalCard({
                     </button>
                   </>
                 ) : (
-                  <div className="flex flex-wrap items-center gap-3 bg-[#141416] p-3 rounded-2xl border border-white/[0.06] w-fit">
+                  <div className="flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-white/[0.06] bg-surface2/80 p-3">
                     <div className="text-[13px] text-white/70 font-medium pl-2">
                       驳回理由：
                     </div>
@@ -240,7 +238,7 @@ export function ProposalCard({
                         }
                       }}
                       placeholder="必填，将进不可逆台账"
-                      className="bg-black/40 border border-white/[0.08] rounded-full px-4 py-2 text-[13px] text-primary/90 outline-none w-[260px] focus:border-white/[0.15]"
+                      className="min-w-0 w-full bg-black/40 border border-white/[0.08] rounded-full px-4 py-2 text-[13px] text-primary/90 outline-none sm:w-[260px] focus:border-white/[0.15]"
                       disabled={busy || decided !== null}
                       autoFocus
                     />
