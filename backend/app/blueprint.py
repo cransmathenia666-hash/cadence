@@ -8,7 +8,12 @@
 - LLM 只产出**提案**：蓝图落成 `pending` 提案，建树必须经你裁定（可勾选部分采纳）。
 - 调用次数卡在 `llm.Operation` 上：对话**每轮 1 次**（决策 6 修订，不重试），
   蓝图生成 1 次 + 不合格按老规矩带原因重试 1 次。
-- 生成前**至少聊过一轮**：不允许「刚采纳就静默出树」，那正是决策 36 要避免的形态。
+- 生成前**至少聊成一轮**（III-01：模型回话失败那轮只留下你的话，不算数），且**最后一轮
+  必须是它答的那句**（上一轮还没聊成不许出方案）：不允许「刚采纳就静默出树」，那正是
+  决策 36 要避免的形态。
+- 生成时就拦下**明知批不了**的稿子（III-02）：蓝图自身的形状毛病在 `_check_blueprint`；
+  与现有计划的冲突（任务撞上同名开着的任务）在 `_plan_conflict_problem`——都带原因重试
+  一次，两次不合格一条提案不落。
 """
 
 from __future__ import annotations
@@ -143,6 +148,29 @@ def turns_used(conn: sqlite3.Connection, candidate_id: int, plan_id: int) -> int
     return int(row["n"])
 
 
+def _ready_to_generate(rows: list[sqlite3.Row]) -> bool:
+    """Only the latest successful assistant reply can authorize a blueprint."""
+    if not rows or str(rows[-1]["role"]) != "assistant":
+        return False
+    reply, problem = _check_reply(str(rows[-1]["content"]))
+    return problem is None and reply is not None and reply.ready and not reply.questions
+
+
+def valid_turns_used(conn: sqlite3.Connection, candidate_id: int, plan_id: int) -> int:
+    """聊**成**了几轮 = 模型成功回话的行数（III-01）。
+
+    每条成功回话对应它前面那条用户消息——那一问一答才算把意向聊进一步。模型回话失败的
+    那轮只在对话里留下你的一句话、没有 assistant 行，所以不算数：不然拿一句失败消息
+    就能凑数出蓝图，等于没聊就静默生成，正是决策 36 要避免的形态。
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM plan_chat"
+        " WHERE candidate_id = ? AND plan_id = ? AND role = 'assistant'",
+        (candidate_id, plan_id),
+    ).fetchone()
+    return int(row["n"])
+
+
 def _record(
     conn: sqlite3.Connection, plan_id: int, candidate_id: int, role: str, content: str
 ) -> None:
@@ -169,19 +197,30 @@ def payload_of(row: sqlite3.Row) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def pending_blueprint(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row | None:
+def pending_blueprint(
+    conn: sqlite3.Connection, plan_id: int, candidate_id: int | None = None
+) -> sqlite3.Row | None:
     """这个计划当前待裁定的蓝图。**同一计划同时只有一份**——树 = 版本（决策 36）。
 
     plan_id 藏在 payload 的 JSON 里（没有这一列），所以取回来在 Python 里筛：
     pending 的蓝图本来就只有几条，不值得为它去碰 SQLite 的 JSON 函数。
+
+    `candidate_id` 给了就再筛候选归属（2026-09-28 整改 III-02）：待批稿只给**出它的那条
+    候选**的对话看，同计划另一条候选的对话里不外显——不然那边会把它当成自己的稿子。
+    None 保持计划级语义（不筛候选）：`_supersede_previous` 那条版本更替路径按「树 = 版本」
+    的计划级口径走，**不许改**。
     """
     rows = conn.execute(
         "SELECT * FROM proposal WHERE kind = ? AND status = 'pending' ORDER BY id DESC",
         (BLUEPRINT_KIND,),
     ).fetchall()
     for row in rows:
-        if int(payload_of(row).get("plan_id") or 0) == int(plan_id):
-            return row
+        payload = payload_of(row)
+        if int(payload.get("plan_id") or 0) != int(plan_id):
+            continue
+        if candidate_id is not None and int(payload.get("candidate_id") or 0) != int(candidate_id):
+            continue
+        return row
     return None
 
 
@@ -344,35 +383,47 @@ def _check_reply(text: str) -> tuple[ChatReply | None, str | None]:
 # ---------- 对话链路（主入口） ----------
 
 def view(conn: sqlite3.Connection, candidate_id: int, plan_id: int | None = None) -> dict[str, Any]:
-    """看这段对话：历史消息 + 聊了几轮 + 能不能出方案 + 有没有待裁定蓝图。
+    """看这段对话：历史消息 + 聊了几轮 + 能不能出方案 + 有没有**本候选的**待裁定蓝图。
 
-    计划归属按「调用方说明 > 已有对话记着的 > 候选自带」取；都定不下来（「新方向」
-    的候选、又还没聊过）就先返回空的，让界面提示你先指明落在哪个计划。
+    计划归属与 say/generate 走**同一道闸**（III-02）：调用方说了 plan_id 就过
+    `resolve_plan` 核对——与这段对话已记的归属/落点对不上就当场报冲突，不悄悄换成
+    调用方说的那个，不然待批蓝图会错挂到同计划另一条候选的对话里展示。都定不下来
+    （「新方向」的候选、又还没聊过）就先返回空的，让界面提示你先指明落在哪个计划。
     """
     row = _accepted_candidate(conn, candidate_id)
-    target = plan_id if plan_id is not None else thread_plan(conn, candidate_id)
-    if target is None:
-        try:
-            target = resolve_plan(conn, row, None)
-        except BlueprintConflict:
-            target = None
+    if plan_id is not None:
+        target = resolve_plan(conn, row, plan_id)
+    else:
+        target = thread_plan(conn, candidate_id)
+        if target is None:
+            try:
+                target = resolve_plan(conn, row, None)
+            except BlueprintConflict:
+                target = None
 
     used = 0 if target is None else turns_used(conn, candidate_id, target)
-    pending = None if target is None else pending_blueprint(conn, target)
+    valid = 0 if target is None else valid_turns_used(conn, candidate_id, target)
+    rows = [] if target is None else thread(conn, candidate_id, target)
+    # III-02：查待批稿带上**本候选**的归属——本候选没有待批稿就返回 None，
+    # 同计划另一条候选的那份不外显（计划级「同时只有一份」的版本语义不变）
+    pending = None if target is None else pending_blueprint(conn, target, candidate_id)
     return {
         "candidate_id": candidate_id,
         "plan_id": target,
-        "messages": [] if target is None else [dict(item) for item in thread(conn, candidate_id, target)],
+        "messages": [dict(item) for item in rows],
         "turns_used": used,
+        "valid_turns_used": valid,
         "max_turns": MAX_TURNS,
-        # 生成前至少要聊过一轮（决策 36：不是一次性静默生成）
-        "can_generate": used >= 1,
+        # 生成前至少要**聊成**一轮（III-01）：模型回话失败的那轮不算数（决策 36：不是一次性静默生成）
+        "can_generate": valid >= 1 and _ready_to_generate(rows),
         # T34：这条候选自带的步骤草案（只有 path 形状的候选有）。对话区顶部把它列出来，
         # 让你看得见「它在照哪份底稿聊」；刷新页面也还在（从 payload 解，不靠当刻响应）。
         "steps": advisor.candidate_steps(row),
         "blueprint": None if pending is None else {
             "id": int(pending["id"]),
             "created_at": pending["created_at"],
+            # III-02：待批蓝图是谁家的也从 payload 解出来——前端据此核对没挂错候选
+            "candidate_id": payload_of(pending).get("candidate_id"),
         },
     }
 
@@ -430,7 +481,7 @@ def say(
         "reply": reply.model_dump(),
         "turns_used": used + 1,
         "max_turns": MAX_TURNS,
-        "can_generate": True,
+        "can_generate": _ready_to_generate(thread(conn, candidate_id, target)),
         "calls": operation.used,
     }
 
@@ -467,8 +518,12 @@ class Blueprint(BaseModel):
 
 
 def _check_blueprint(text: str) -> tuple[Blueprint | None, str | None]:
-    """验收模型的蓝图。`due_date` 必须真是日期，否则判不合格让重试——
-    悄悄丢掉一个日期比报错更糟：那等于把你以为排好的期给吞了。
+    """验收模型的蓝图。
+
+    校验前移（III-02）：标题空白、同阶段任务重名这类毛病，原先要等批准按钮那一步才炸——
+    落一条**明知批不了**的提案只会让你白点一次。所以生成时就拦下，不合格带原因重试 1 次。
+    `due_date` 必须真是日期，否则判不合格让重试——悄悄丢掉一个日期比报错更糟：
+    那等于把你以为排好的期给吞了。
     """
     data = advisor.extract_json(text)
     if data is None:
@@ -479,13 +534,37 @@ def _check_blueprint(text: str) -> tuple[Blueprint | None, str | None]:
     except ValidationError as error:
         return None, f"字段不合格（{_details(error)}）"
 
+    # Pydantic 的 min_length=1 挡不住纯空白，目标、交付物和标题都要再过 strip
+    if not blueprint.goal.strip():
+        return None, "蓝图目标是空白——得写清这棵树要达成什么"
+    for index, stage in enumerate(blueprint.stages, start=1):
+        if not stage.deliverable.strip():
+            return None, f"第 {index} 个阶段的交付物是空白——得写清要交什么"
     titles = [stage.title.strip() for stage in blueprint.stages]
+    blanks = [index + 1 for index, title in enumerate(titles) if not title]
+    if blanks:
+        return None, (
+            f"第 {'、'.join(str(item) for item in blanks)} 个阶段的标题是空白——阶段得有个名字"
+        )
     repeated = sorted({title for title in titles if titles.count(title) > 1})
     if repeated:
         return None, f"阶段标题重名了：{repeated}——同一个阶段别拆成两条，改掉再来"
 
     for stage in blueprint.stages:
+        seen: set[str] = set()  # 同一阶段内任务别重名；跨阶段同名合法（不同父节点）
         for task in stage.tasks:
+            title = task.title.strip()
+            if not title:
+                return None, (
+                    f"阶段「{stage.title.strip()}」下有任务没写标题（或全是空白）——"
+                    "任务得有个名字"
+                )
+            if title in seen:
+                return None, (
+                    f"阶段「{stage.title.strip()}」下有两件同名任务：「{title}」——"
+                    "同一阶段里任务别重名（不同阶段之间同名没关系），改掉再来"
+                )
+            seen.add(title)
             raw = str(task.due_date or "").strip()
             if not raw:
                 task.due_date = None
@@ -498,6 +577,32 @@ def _check_blueprint(text: str) -> tuple[Blueprint | None, str | None]:
                 )
             task.due_date = parsed.isoformat()
     return blueprint, None
+
+
+def _plan_conflict_problem(
+    conn: sqlite3.Connection, plan_id: int, blueprint: Blueprint
+) -> str | None:
+    """生成期与**现有计划**的冲突预检（2026-09-28 整改 III-02 的后半句）。
+
+    `_check_blueprint` 管的是蓝图自己的形状（空白标题、同阶段重名）；这道管的是它与现状
+    的冲突：给一个**同名还开着**的阶段排任务、任务名又撞上那个阶段里还开着的任务——
+    批准时必然撞防重名闸（`resolve_build` 的 `_check_task_conflicts`）。落一条明知批不了
+    的稿子只会让你白点一次批准，所以生成时就拦下，带原因重试一次。
+    """
+    for stage in blueprint.stages:
+        existing = plan.find_open_duplicate(conn, plan_id, "stage", stage.title.strip())
+        if existing is None:
+            continue
+        open_titles = set(plan.stage_completion(conn, int(existing["id"]))["open_titles"])
+        clash = sorted(
+            {task.title.strip() for task in stage.tasks if task.title.strip() in open_titles}
+        )
+        if clash:
+            return (
+                f"阶段「{stage.title.strip()}」里已经开着同名任务：{'、'.join(clash)}——"
+                "这份蓝图批准时会撞防重名闸；先去掉这几件任务，或在计划里把它们处理掉再出"
+            )
+    return None
 
 
 def generate_blueprint(
@@ -514,16 +619,29 @@ def generate_blueprint(
     **树 = 版本**：同一计划同时只有一份待裁定蓝图，新版落库时把旧的标成业务终态
     `superseded`。不走台账的取代——决策 22 明令禁止对提案做生命周期操作，理由（会造出
     「已作废却仍算 pending」的幽灵记录）在 `ledger.py` 里写着。
+
+    生成门槛（2026-09-28 整改 III-01）有两道：**聊成的轮数至少一轮**（回话失败那轮只留下
+    你的话，不算数），且**最后一轮必须是它答的那句**——上一轮还没聊成就不许出方案。
+    输出验收（III-02）除了蓝图自身的形状，还会预检与现有计划的任务撞车；不合格带原因
+    重试 1 次，两次都不合格就报错、一条提案不落。
     """
     row = _accepted_candidate(conn, candidate_id)
     target = resolve_plan(conn, row, plan_id)
     _require_profile(conn)
     used = turns_used(conn, candidate_id, target)
-    if used < 1:
+    # III-01：门槛数的是**聊成**的轮数——模型回话失败那轮只留下你的话，不算数
+    if valid_turns_used(conn, candidate_id, target) < 1:
         raise BlueprintConflict(
-            "先聊一轮再出方案——决策 36 要的就是「先把意向问清楚」，"
-            "不是对着一条标题静默生成一棵树"
+            "先聊成一轮再出方案——只留下话、没聊成的不算；"
+            "决策 36 要的是「先把意向问清楚」，不是对着一条标题静默生成一棵树"
         )
+    # III-01 的后半句：聊成过不等于聊到头——最后一条消息还是**你的话**（它的回话失败、
+    # 或者还没回）时，方案是对着一段没聊完的话出的；先回去把上一轮聊成再出。
+    thread_rows = thread(conn, candidate_id, target)
+    if str(thread_rows[-1]["role"]) != "assistant":
+        raise BlueprintConflict("上一轮还没聊成，先接着聊（或让它把上一句答完）再出方案")
+    if not _ready_to_generate(thread_rows):
+        raise BlueprintConflict("上一轮助手还没确认信息足够、且不再追问；先答完问题再出方案")
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -535,6 +653,8 @@ def generate_blueprint(
     operation = llm.Operation(conn, TASK_BLUEPRINT, limit=2, transport=transport)
     raw = operation.chat(messages, provider_id=provider_id, model=model)
     blueprint, problem = _check_blueprint(raw)
+    if problem is None and blueprint is not None:
+        problem = _plan_conflict_problem(conn, target, blueprint)
 
     attempts = 1
     if problem is not None:
@@ -549,6 +669,8 @@ def generate_blueprint(
         ]
         raw = operation.chat(messages, provider_id=provider_id, model=model)
         blueprint, problem = _check_blueprint(raw)
+        if problem is None and blueprint is not None:
+            problem = _plan_conflict_problem(conn, target, blueprint)
         if problem is not None:
             raise BlueprintError(
                 f"模型连着 {attempts} 次都没给出合格的蓝图（{problem}）；"
@@ -600,7 +722,8 @@ def _blueprint_brief(conn: sqlite3.Connection, plan_id: int) -> str:
         "",
         "- 阶段 1–" f"{MAX_STAGES} 个，按先后顺序；每个阶段 0–{MAX_TASKS_PER_STAGE} 个任务。",
         "- **已有阶段的标题照抄**（一个字都别改）——我会把任务挂到它下面，不会重复建。",
-        "- 阶段标题之间不要重名。",
+        "- 阶段标题之间不要重名；同一阶段里的任务标题也别重名（不同阶段之间同名没关系）。",
+        "- 阶段与任务的标题都不能是空白。",
         "- `deliverable` 必须是一句话能验收的东西（例如「写完一个能跑通的 CRUD 接口」），"
         "不是「提高工程能力」这种没法验的。",
         "- `due_date` 只在真能给出日期时写，格式 YYYY-MM-DD；拿不准就别给这个字段。",

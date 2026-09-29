@@ -11,7 +11,11 @@
 ④ **建议落成提案与当场裁定**（T31）：一次最多一条、字段缺一 / 节点不存在 / 不属于本计划 /
    改前＝改后 / 名字撞车一律判不合格且**一条都不落**；批准后节点真改了且**编号不变**、
    加东西真的建了节点、**忽略什么都没写**；
-⑤ 端到端：聊 → 提炼 → 批准 → 档案里真多一条（与 T28-1 的裁定分支接得上）。
+⑤ 端到端：聊 → 提炼 → 批准 → 档案里真多一条（与 T28-1 的裁定分支接得上）；
+⑥ **意图分层**（2026-09-28，SPEC 决策 44）：信封多必填 `intent`，只有 modify 才许附
+   建议——chat/discuss 硬塞建议被硬闸拦下重说、漏报 intent 算字段不合格、modify 照旧
+   落提案；modify 也是它自报的，**他原话说不出修改的说法**（话术闸）时同样拦下重说、
+   「先问清再改」的路径照常走；散文兜底不带建议的老语义一行没动。
 
 工具本身与循环那几道闸（上限、拒绝、运行账）的用例在 `test_agent.py`。
 一律假上游打桩，不打真实接口、不花钱。
@@ -94,9 +98,21 @@ def extraction(*items: dict) -> str:
     return json.dumps({"items": list(items)}, ensure_ascii=False)
 
 
-def envelope(reply: str = "嗯", suggestion: dict | None = None, questions: list | None = None) -> str:
-    """模型的输出信封（T31 起）：人话 + 最多一条建议；2026-09-26 起还可带结构化追问。"""
-    payload: dict = {"reply": reply, "suggestion": suggestion}
+def envelope(
+    reply: str = "嗯",
+    suggestion: dict | None = None,
+    questions: list | None = None,
+    intent: str | None = None,
+) -> str:
+    """模型的输出信封（T31 起）：意图 + 人话 + 最多一条建议；2026-09-26 起还可带结构化追问。
+
+    `intent`（2026-09-28 意图分层）不给就按内容推一个**合法**的（带建议＝modify、
+    不带＝chat）——存量用例只关心「信封合不合格」，不关心它自报了什么；意图分层自己的
+    用例（「意图分层」一节）显式传。
+    """
+    if intent is None:
+        intent = "modify" if suggestion is not None else "chat"
+    payload: dict = {"intent": intent, "reply": reply, "suggestion": suggestion}
     if questions is not None:
         payload["questions"] = questions
     return json.dumps(payload, ensure_ascii=False)
@@ -211,9 +227,18 @@ def test_the_contract_and_style_prompts_add_up_to_the_system_prompt(conn):
     assert "一轮最多一条" in dialogue.CONTRACT_PROMPT
     # 记忆变化那条硬规则也在契约段里（走查整改第 3 条）
     assert "必须先调用一次 read_memories" in dialogue.CONTRACT_PROMPT
+    # 意图分层（2026-09-28，决策 44）也在契约段：四类意图与「只有 modify 才许带建议」
+    assert "行为分层" in dialogue.CONTRACT_PROMPT
+    for token in ("chat", "answer", "discuss", "modify"):
+        assert token in dialogue.CONTRACT_PROMPT
+    assert "只有 intent=modify 的轮才许带" in dialogue.CONTRACT_PROMPT
+    # 建议的前提是他的原话（2026-09-28 第二道闸）：模型自己的判断不算
+    assert "他原话里有明确的修改要求" in dialogue.CONTRACT_PROMPT
     assert "200 字" in dialogue.STYLE_PROMPT
     assert "陪跑顾问" in dialogue.STYLE_PROMPT
     assert "只输出一个 JSON 对象" not in dialogue.STYLE_PROMPT
+    # 编号不进正文（V-01）是风格段的口径
+    assert "编号当脚注" in dialogue.STYLE_PROMPT
 
 
 def test_there_is_no_turn_cap(conn):
@@ -517,7 +542,7 @@ def test_a_suggestion_lands_one_pending_proposal(conn):
         envelope("那周你在出差，我把读 MDN 挪一周更现实。", update_due(task_id))
     )
 
-    done = dialogue.say(conn, plan_id, "10 月第一周我要出差", transport=transport)
+    done = dialogue.say(conn, plan_id, "10 月第一周我要出差，把读 MDN 截止日改到 10-08", transport=transport)
 
     assert done["reply"].startswith("那周你在出差")
     assert done["calls"] == 1  # 合格就一次调用
@@ -545,7 +570,7 @@ def test_the_view_hands_back_each_message_suggestion(conn):
     plan_id = make_plan(conn)
     task_id = node_id_of(conn, "读 MDN")
     transport = ScriptedTransport(envelope("挪一周吧。", update_due(task_id)))
-    done = dialogue.say(conn, plan_id, "我要出差", transport=transport)
+    done = dialogue.say(conn, plan_id, "我要出差，把读 MDN 截止日改到 10-08", transport=transport)
 
     view = dialogue.view(conn, plan_id)
     assert view["messages"][-2]["suggestion"] is None  # 你的那一句没有建议
@@ -567,6 +592,7 @@ def test_at_most_one_suggestion_by_shape(conn):
     task_id = node_id_of(conn, "读 MDN")
     two = json.dumps(
         {
+            "intent": "modify",
             "reply": "我一次提两条",
             "suggestion": [update_due(task_id), update_due(task_id, due_date="2026-10-15")],
         },
@@ -617,7 +643,7 @@ def test_a_bad_suggestion_is_unqualified_and_lands_nothing(conn):
         payload = envelope("我提一条", bad)
         transport = ScriptedTransport(payload, payload, payload)
         with pytest.raises(dialogue.DialogueError):
-            dialogue.say(conn, plan_id, "帮我看看这条", transport=transport)
+            dialogue.say(conn, plan_id, "帮我把这条改一下", transport=transport)
         assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS, bad  # 不合格 → 带原因重说
         assert hint in transport.seen[-1]["payload"]["messages"][-1]["content"], bad
         assert pending_changes(conn) == [], bad
@@ -635,7 +661,7 @@ def test_a_bad_suggestion_told_why_can_come_back_right(conn):
         envelope("那改成 10-08。", update_due(task_id)),               # 第二次合格
     )
 
-    done = dialogue.say(conn, plan_id, "我要出差", transport=transport)
+    done = dialogue.say(conn, plan_id, "我要出差，把读 MDN 截止日改到 10-08", transport=transport)
 
     assert done["calls"] == 2 and done["reply"] == "那改成 10-08。"
     assert len(pending_changes(conn)) == 1
@@ -653,7 +679,7 @@ def test_a_suggestion_cannot_touch_another_plan(conn):
     transport = ScriptedTransport(payload, payload, payload)
 
     with pytest.raises(dialogue.DialogueError):
-        dialogue.say(conn, plan_id, "顺便看看", transport=transport)
+        dialogue.say(conn, plan_id, "顺便把英语那边也改一下", transport=transport)
 
     assert "不属于计划" in transport.seen[-1]["payload"]["messages"][-1]["content"]
     assert pending_changes(conn) == []
@@ -668,7 +694,7 @@ def test_confirming_an_update_keeps_the_id_and_writes_a_ledger_row(conn):
     task_id = node_id_of(conn, "读 MDN")
     plan.submit_report(conn, task_id, status="done", note="读完了")  # 先留一条指着它的引用
     transport = ScriptedTransport(envelope("挪一周吧。", update_due(task_id)))
-    done = dialogue.say(conn, plan_id, "我要出差", transport=transport)
+    done = dialogue.say(conn, plan_id, "我要出差，把读 MDN 截止日改到 10-08", transport=transport)
 
     decided = proposals.decide(conn, done["proposal_id"], approved=True)
 
@@ -702,7 +728,7 @@ def test_ignoring_lands_nothing_and_leaves_one_line(conn):
     plan_id = make_plan(conn)
     task_id = node_id_of(conn, "读 MDN")
     transport = ScriptedTransport(envelope("挪一周吧。", update_due(task_id)))
-    done = dialogue.say(conn, plan_id, "我要出差", transport=transport)
+    done = dialogue.say(conn, plan_id, "我要出差，把读 MDN 截止日改到 10-08", transport=transport)
 
     decided = proposals.decide(
         conn, done["proposal_id"], approved=False, reason="聊天里先不动"
@@ -728,7 +754,7 @@ def test_confirming_an_add_task_puts_it_under_the_named_stage(conn):
         "why": "上次跑通只是顺路，错误路径根本没试过",
     }
     transport = ScriptedTransport(envelope("建议补一件任务。", suggestion))
-    done = dialogue.say(conn, plan_id, "路由跑通了但没试过错路径", transport=transport)
+    done = dialogue.say(conn, plan_id, "路由跑通了但没试过错路径，给「学 HTTP」加一件错误处理的任务", transport=transport)
 
     assert done["suggestion"]["summary"] == (
         "加一件任务：把错误处理补上（挂在「学 HTTP」下）｜截止 2026-10-15"
@@ -847,7 +873,7 @@ def test_too_many_tasks_in_one_suggestion_is_refused(conn):
     # 一直不合格 → 按上限中止，且**一条都不落**
     transport = ScriptedTransport(bad, bad, bad)
     with pytest.raises(dialogue.DialogueError) as error:
-        dialogue.say(conn, plan_id, "把这个阶段的任务全排出来", transport=transport)
+        dialogue.say(conn, plan_id, "把这个阶段的任务排一下", transport=transport)
     assert f"最多加 {plan_change.MAX_TASKS} 件" in str(error.value)
     assert pending_changes(conn) == []
 
@@ -869,7 +895,7 @@ def test_two_tasks_with_the_same_name_in_one_batch_are_refused(conn):
     )
     transport = ScriptedTransport(bad, bad, bad)
     with pytest.raises(dialogue.DialogueError) as error:
-        dialogue.say(conn, plan_id, "把这个阶段的任务排出来", transport=transport)
+        dialogue.say(conn, plan_id, "把这个阶段的任务排一下", transport=transport)
     assert "重名" in str(error.value)
     assert pending_changes(conn) == []
 
@@ -888,7 +914,7 @@ def test_confirming_an_add_stage_puts_it_last(conn):
         "why": "光看文档记不住",
     }
     transport = ScriptedTransport(envelope("建议再加一个阶段。", suggestion))
-    done = dialogue.say(conn, plan_id, "学完了但没做过东西", transport=transport)
+    done = dialogue.say(conn, plan_id, "学完了但没做过东西，加一个练手的阶段", transport=transport)
 
     assert done["suggestion"]["summary"] == (
         "加一个阶段：做一个小服务（排最后）｜要交的东西：一个能在浏览器里访问到的地址"
@@ -916,7 +942,7 @@ def test_adding_to_a_plan_that_left_active_is_refused_at_the_end(conn):
         "why": "错路径没试过",
     }
     transport = ScriptedTransport(envelope("建议补一件任务。", suggestion))
-    done = dialogue.say(conn, plan_id, "要不要加的", transport=transport)
+    done = dialogue.say(conn, plan_id, "给「学 HTTP」加一件「把错误处理补上」", transport=transport)
     plan.pause_plan(conn, plan_id)  # 中间它被暂停了
 
     with pytest.raises(proposals.ProposalConflict):
@@ -1196,8 +1222,9 @@ def test_option_request_without_questions_is_sent_back_once(conn):
     make_provider(conn)
     add_profile(conn)
     plan_id = make_plan(conn)
-    no_q = {"reply": "三条路：①收尾 ②开二版 ③补基础", "suggestion": None}
+    no_q = {"intent": "chat", "reply": "三条路：①收尾 ②开二版 ③补基础", "suggestion": None}
     with_q = {
+        "intent": "chat",
         "reply": "三条路，选一条",
         "suggestion": None,
         "questions": [{"title": "下一步先走哪条", "options": ["收尾 #33", "开第二版", "纯补基础"]}],
@@ -1215,3 +1242,354 @@ def test_option_request_without_questions_is_sent_back_once(conn):
     transport2 = ScriptedTransport(json.dumps(no_q, ensure_ascii=False))
     done2 = dialogue.say(conn, plan_id, "随便聊聊近况", transport=transport2)
     assert done2["calls"] == 1 and done2["questions"] is None
+
+
+# ---------- 意图分层（2026-09-28：SPEC 决策 44，双入口整改 IV-01/V-01） ----------
+#
+# 工作台原先每轮都是强规划语境：寒暄、问现状、聊技术、要求修改进同一条跑道，讨论一句
+# 就可能误产一条待确认提案。现在模型必须在信封里自报 `intent`（必填、无默认值），验收层
+# 上硬闸：**只有 modify 才许附 suggestion**——chat/answer/discuss 硬塞就带原因重说；
+# intent 漏报算字段不合格。散文兜底「建议恒为 None」的老语义一行没动。
+
+def test_a_greeting_is_chatted_back_without_suggestion_or_questions(conn):
+    """寒暄（intent=chat）：自然接话、不读工具、不提建议——落库的只有人话。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(
+        json.dumps(
+            {"intent": "chat", "reply": "你好呀。今天想从哪儿聊起？", "suggestion": None},
+            ensure_ascii=False,
+        )
+    )
+
+    done = dialogue.say(conn, plan_id, "hi", transport=transport)
+
+    assert done["intent"] == "chat"
+    assert done["reply"] == "你好呀。今天想从哪儿聊起？"
+    assert done["suggestion"] is None and done["proposal_id"] is None
+    assert done["questions"] is None
+    assert done["calls"] == 1 and done["tools_used"] == []
+    rows = dialogue.messages_of(conn, plan_id)
+    assert rows[1]["content"] == "你好呀。今天想从哪儿聊起？"  # 库里存的仍是人话
+    assert pending_changes(conn) == []
+
+
+def test_a_chat_turn_with_a_suggestion_is_sent_back_until_it_drops_it(conn):
+    """硬闸：它自己判了 chat 却硬塞一条建议 → 判不合格带原因重说；放下建议才收下。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    pushy = json.dumps(
+        {
+            "intent": "chat",
+            "reply": "随便聊聊，不过我顺手排了个改动",
+            "suggestion": update_due(task_id),
+        },
+        ensure_ascii=False,
+    )
+    plain = json.dumps(
+        {"intent": "chat", "reply": "那就接着聊呗。", "suggestion": None}, ensure_ascii=False
+    )
+    transport = ScriptedTransport(pushy, plain)
+
+    done = dialogue.say(conn, plan_id, "随便聊聊近况", transport=transport)
+
+    assert done["calls"] == 2 and done["intent"] == "chat"
+    assert done["suggestion"] is None and done["proposal_id"] is None
+    assert pending_changes(conn) == []
+    # 重说原因点破了意图与建议的关系
+    assert "就不该附建议" in transport.seen[1]["payload"]["messages"][-1]["content"]
+
+
+def test_a_chat_turn_that_never_drops_the_suggestion_costs_the_turn(conn):
+    """一直不肯放下建议：按上限中止（AgentStop），**一条提案都不落**——你那句话还在。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    pushy = json.dumps(
+        {"intent": "chat", "reply": "我就是要提这条", "suggestion": update_due(task_id)},
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(pushy, pushy, pushy)
+
+    with pytest.raises(dialogue.DialogueError) as error:
+        dialogue.say(conn, plan_id, "随便聊聊", transport=transport)
+
+    assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS  # 不合格 → 带原因重说到撞上限
+    assert "就不该附建议" in str(error.value)
+    assert pending_changes(conn) == []
+
+
+def test_a_discuss_turn_cannot_carry_a_suggestion_either(conn):
+    """discuss＝给利弊、答问题：讨论一轮不等于授权修改——附建议同样被硬闸拦下重说。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    bad = json.dumps(
+        {
+            "intent": "discuss",
+            "reply": "值得聊，我顺便把日期也改了吧",
+            "suggestion": update_due(task_id),
+        },
+        ensure_ascii=False,
+    )
+    good = json.dumps(
+        {"intent": "discuss", "reply": "各有利弊：先把手上这条交出去。", "suggestion": None},
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(bad, good)
+
+    done = dialogue.say(conn, plan_id, "你觉得现在这个节奏可行吗？聊聊看", transport=transport)
+
+    assert done["calls"] == 2 and done["intent"] == "discuss"
+    assert done["suggestion"] is None and done["proposal_id"] is None
+    assert pending_changes(conn) == []
+    assert "就不该附建议" in transport.seen[1]["payload"]["messages"][-1]["content"]
+
+
+def test_a_modify_turn_with_a_sound_suggestion_still_lands(conn):
+    """modify＝明确请求修改：核对对象之后提一条待确认建议——老路径一行不回归。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    transport = ScriptedTransport(
+        json.dumps(
+            {"intent": "modify", "reply": "好，挪一周。", "suggestion": update_due(task_id)},
+            ensure_ascii=False,
+        )
+    )
+
+    done = dialogue.say(conn, plan_id, "把读 MDN 的截止日改到 10-08", transport=transport)
+
+    assert done["intent"] == "modify" and done["calls"] == 1
+    assert done["suggestion"] is not None and done["proposal_id"] is not None
+    landed = pending_changes(conn)
+    assert len(landed) == 1 and landed[0]["payload"]["node_id"] == task_id
+
+
+def test_a_missing_intent_is_a_shape_error_and_gets_one_retry(conn):
+    """intent 漏报＝字段不合格：带原因重说一次；第二回合 格 才收下。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    missing = json.dumps({"reply": "好", "suggestion": None}, ensure_ascii=False)
+    transport = ScriptedTransport(missing, envelope("这回带上意图了。", intent="answer"))
+
+    done = dialogue.say(conn, plan_id, "嗯，接着说", transport=transport)
+
+    assert done["calls"] == 2 and done["intent"] == "answer"
+    hint = transport.seen[1]["payload"]["messages"][-1]["content"]
+    assert "字段不合格" in hint and "intent" in hint  # 原因里点名了缺的是 intent
+
+
+def test_an_answer_turn_reads_the_plan_then_answers(conn):
+    """answer＝问执行现状：先读当前计划再答事实——工具循环照常跑，不附建议。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport(
+        ask("read_current_plan"),
+        json.dumps(
+            {"intent": "answer", "reply": "你在学 HTTP，读 MDN 还没动。", "suggestion": None},
+            ensure_ascii=False,
+        ),
+    )
+
+    done = dialogue.say(conn, plan_id, "我现在进展到哪一步了", transport=transport)
+
+    assert done["intent"] == "answer"
+    assert done["tools_used"] == ["read_current_plan"]
+    assert done["suggestion"] is None and pending_changes(conn) == []
+    assert "读 MDN" in facts_of(transport)  # 读来的资料真进了上下文
+
+
+def test_the_prose_fallback_still_lands_no_suggestion(conn):
+    """散文兜底的老语义不动：收下的散文 suggestion 恒为 None，回执按 chat 记（没自报过）。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    transport = ScriptedTransport("   ", "就是一段没套壳的人话。")
+
+    done = dialogue.say(conn, plan_id, "我先说说现状", transport=transport)
+
+    assert done["reply"] == "就是一段没套壳的人话。"
+    assert done["intent"] == "chat"
+    assert done["suggestion"] is None and pending_changes(conn) == []
+
+
+# ---------- 修改意图的用户话术闸（2026-09-28：决策 44 的第二道闸，IV-01） ----------
+#
+# intent 是模型**自报**的——它把一句纯讨论硬报成 modify，就能绕过「只有 modify 才许带
+# 建议」那道闸。所以建议真要落提案，还得他**原话里说得出修改的说法**
+# （MODIFICATION_INTENT_MARKS）：说不出 → 判不合格重说。口径宁可漏收（漏了它会先问一句
+# 确认），不可滥收（把纯讨论误判成修改请求，等于回到误产提案的老路）。
+
+def test_a_modify_suggestion_without_modification_words_is_sent_back(conn):
+    """纯讨论 + 模型硬报 modify 并塞合法建议 → 第二道闸拦下重说；改成讨论版才收下。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    pushy = json.dumps(
+        {
+            "intent": "modify",
+            "reply": "HTTPS 就是加了加密的 HTTP，我顺手把截止日也排了",
+            "suggestion": update_due(task_id),
+        },
+        ensure_ascii=False,
+    )
+    discuss = json.dumps(
+        {
+            "intent": "discuss",
+            "reply": "HTTPS 在 HTTP 下面加了 TLS 加密层，端口也换成 443。",
+            "suggestion": None,
+        },
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(pushy, discuss)
+
+    done = dialogue.say(conn, plan_id, "HTTP 和 HTTPS 差在哪", transport=transport)
+
+    assert done["calls"] == 2 and done["intent"] == "discuss"
+    assert done["suggestion"] is None and done["proposal_id"] is None
+    assert pending_changes(conn) == []
+    # 重说原因讲的是「看不出他要求改」，与第一道「意图与建议不配」是两句话
+    assert "看不出是在要求修改" in transport.seen[1]["payload"]["messages"][-1]["content"]
+
+
+def test_a_pushy_modify_turn_that_never_listens_lands_nothing(conn):
+    """两次都硬塞：按上限中止（AgentStop），**一条提案都不落**——计划一个字没动。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    pushy = json.dumps(
+        {"intent": "modify", "reply": "我判断这轮就该改", "suggestion": update_due(task_id)},
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(pushy, pushy, pushy)
+
+    with pytest.raises(dialogue.DialogueError) as error:
+        dialogue.say(conn, plan_id, "HTTP 和 HTTPS 差在哪", transport=transport)
+
+    assert len(transport.seen) == agent_runtime.MAX_MODEL_CALLS
+    assert "看不出是在要求修改" in str(error.value)
+    assert pending_changes(conn) == []
+    assert plan.get_node(conn, task_id)["due_date"] == "2026-10-01"
+
+
+def test_clarify_first_then_the_confirmed_modify_lands(conn):
+    """「先问清再改」的完整路径：modify 不带建议照旧合法（问答卡确认）；
+    他答出「改成…」的那一轮，modify 建议才落成提案。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    clarify = json.dumps(
+        {
+            "intent": "modify",
+            "reply": "你是要把「读 MDN」的截止日往后挪吗？",
+            "suggestion": None,
+            "questions": [{"title": "要改截止日吗", "options": ["改到 10-08", "先不动"]}],
+        },
+        ensure_ascii=False,
+    )
+    confirm = json.dumps(
+        {"intent": "modify", "reply": "好，改到 10-08。", "suggestion": update_due(task_id)},
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(clarify, confirm)
+
+    # 他这句没有修改说法——modify 而建议为空是「先澄清」，不算毛病
+    first = dialogue.say(conn, plan_id, "这周好像有点赶", transport=transport)
+    assert first["calls"] == 1 and first["intent"] == "modify"
+    assert first["suggestion"] is None and first["questions"] is not None
+    assert pending_changes(conn) == []
+
+    # 他明确说出修改要求的那一轮：建议照常落（与老路径一条不差）
+    second = dialogue.say(conn, plan_id, "对，把读 MDN 的截止日改成 10-08", transport=transport)
+    assert second["calls"] == 1 and second["intent"] == "modify"
+    assert second["proposal_id"] is not None
+    landed = pending_changes(conn)
+    assert len(landed) == 1 and landed[0]["payload"]["node_id"] == task_id
+
+
+def test_an_event_only_remark_gets_a_clarify_instead_of_a_suggestion(conn):
+    """只报近况（「下周我要出差」）不算修改授权：它硬报 modify 塞建议会被打回，
+    重说成「先澄清」才合格——拿不准就多问一句，不落没人要的提案（决策 44）。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    pushy = envelope("我建议把读 MDN 挪到 10-08。", update_due(task_id))
+    clarify = envelope(
+        "你是想把「读 MDN」的截止日挪到 10-08 吗？",
+        None,
+        questions=[{"title": "要挪截止日吗", "options": ["挪到 10-08", "先不动"]}],
+        intent="modify",
+    )
+    transport = ScriptedTransport(pushy, clarify)
+
+    done = dialogue.say(conn, plan_id, "下周我要出差", transport=transport)
+
+    assert done["calls"] == 2  # 第一遍被打回、重说一次才合格
+    assert "看不出是在要求修改" in transport.seen[1]["payload"]["messages"][-1]["content"]
+    assert done["suggestion"] is None and done["proposal_id"] is None
+    assert done["questions"] is not None
+    assert pending_changes(conn) == []
+    assert conn.execute(
+        "SELECT due_date FROM plan_node WHERE id = ?", (task_id,)
+    ).fetchone()["due_date"] == "2026-10-01"  # 计划一个字没动
+
+
+def test_a_bare_yes_to_a_concrete_clarify_lands_the_suggestion(conn):
+    """澄清后的简短确认也算授权（决策 44）：上一句问清了改哪个、改成什么，
+    他回一个「对」——建议照落，仍等他再点一次「确认」才真写。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    clarify = envelope(
+        "你是想把「读 MDN」的截止日改到 10-08 吗？",
+        None,
+        questions=[{"title": "要改截止日吗", "options": ["改到 10-08", "先不动"]}],
+        intent="modify",
+    )
+    confirm = envelope("好，我把「读 MDN」的截止日改到 10-08。", update_due(task_id))
+    transport = ScriptedTransport(clarify, confirm)
+
+    first = dialogue.say(conn, plan_id, "这周好像有点赶", transport=transport)
+    assert first["suggestion"] is None and pending_changes(conn) == []
+
+    second = dialogue.say(conn, plan_id, "对", transport=transport)
+
+    assert second["proposal_id"] is not None
+    landed = pending_changes(conn)
+    assert len(landed) == 1 and landed[0]["payload"]["node_id"] == task_id
+    assert conn.execute(
+        "SELECT due_date FROM plan_node WHERE id = ?", (task_id,)
+    ).fetchone()["due_date"] == "2026-10-01"  # 还没点「确认」，库里不动
+
+
+def test_a_bare_yes_without_a_concrete_clarify_lands_nothing(conn):
+    """没有紧邻的具体澄清（或选项里没写清改什么）时，一个「对」不构成授权。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    task_id = node_id_of(conn, "读 MDN")
+    vague = envelope("最近节奏还行的话就继续。", None, intent="discuss")
+    pushy = envelope("那我把它改了。", update_due(task_id))
+    transport = ScriptedTransport(vague, pushy, pushy, pushy)
+
+    first = dialogue.say(conn, plan_id, "最近有点忙", transport=transport)
+    assert first["suggestion"] is None  # 上一句是闲聊，不是「要改什么」的具体澄清
+
+    with pytest.raises(dialogue.DialogueError):
+        dialogue.say(conn, plan_id, "对", transport=transport)
+
+    assert pending_changes(conn) == []

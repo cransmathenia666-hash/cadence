@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +24,14 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+class Connection(sqlite3.Connection):
+    _atomic: bool = False
+
+    def commit(self) -> None:
+        if not self._atomic:
+            super().commit()
+
+
 def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,10 +44,34 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     # 关掉这道检查是安全的：连接**每条请求一条**（见 `main.get_conn`），不跨请求共享，
     # 线程之间只是先后使用、不是同时使用；本机 sqlite3 的 threadsafety 是 3（串行模式），
     # 底层自己会加锁。
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, factory=Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+@contextmanager
+def atomic(conn: sqlite3.Connection) -> Iterator[None]:
+    """Serialize a write unit even when ledger helpers commit internally.
+
+    A savepoint alone cannot contain those commits. Defer commit on this connection
+    until the outer unit finishes; rollback the whole unit if any operation fails.
+    BEGIN IMMEDIATE makes the read/replace decision serial across connections.
+    """
+    if conn.in_transaction:
+        raise RuntimeError("atomic requires a connection without an open transaction")
+    conn.execute("BEGIN IMMEDIATE")
+    conn._atomic = True
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn._atomic = False
+        conn.commit()
+    finally:
+        conn._atomic = False
 
 
 def init(db_path: Path | str | None = None) -> Path:
@@ -84,6 +118,18 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-26（工作台问答卡）：计划对话助手这轮带出的结构化追问（JSON 数组）。
     # 可空：不问就不存；历史消息刷新后还要能渲染成问答卡，所以必须落库。
     ("plan_dialogue", "questions", "TEXT"),
+    # 2026-09-28（双入口对话整改 I-01）：「找方向」探索线程身份。线程 = 线程头请求的 id：
+    # 新线程第一行 thread_id = 自己的 id，同线程后续行都记头请求的 id。可空——加列之前的
+    # 旧记录没有线程归属，各自算独立线程，**禁止**靠原话相同猜成同一线程（方案 §6）。
+    ("learning_request", "thread_id", "INTEGER"),
+    # 2026-09-28（复核整改②）：模型提出的形态切换提案落库（JSON：{from,to,reason}）。
+    # 「用户确认切换」不能只凭客户端布尔值放行——后端要能核实这段线程里确有一份待确认的
+    # 提案、且确认那轮模型给的形态与提案目标一致。可空：没提过切换就是 NULL。
+    ("learning_request", "shape_change", "TEXT"),
+    ("learning_request", "utterance", "TEXT"),
+    ("learning_request", "intent", "TEXT"),
+    ("learning_request", "reply", "TEXT"),
+    ("learning_request", "turn_status", "TEXT"),
 )
 
 

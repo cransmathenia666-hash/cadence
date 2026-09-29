@@ -4,7 +4,9 @@
 ① 对话：前提（必须已采纳）、轮数与历史字符两个上限、每轮只调 1 次不重试；
 ② 蓝图：落成 `pending` 提案、payload 形状、**树 = 版本**（新版把旧版标 superseded）；
 ③ 批准 = 按勾选建树：只建勾中的、没勾的直接丢弃；同名阶段**复用**（采纳时自动建的那条）；
-④ 建树前的查重：蓝图内任务重名、撞上已有同名任务、下标超界，一律在建之前拦下。
+④ 建树前的查重：蓝图内任务重名、撞上已有同名任务、下标超界，一律在建之前拦下；
+⑤ 生成门槛与预检（2026-09-28 整改 III-01/III-02）：最后一轮必须聊成、待批稿只给
+   出它的那条候选看、任务撞现有计划里开着的同名任务在生成期拦下带原因重试。
 
 一律用假上游打桩（同 `test_candidates.py`），不打真实接口、不花钱。
 """
@@ -113,7 +115,7 @@ def ready_thread(conn, title: str = "学 HTTP", *, transport=None) -> tuple[int,
     """一条已经聊过一轮的对话（`generate_blueprint` 的前置条件）。"""
     candidate_id, plan_id = adopted_candidate(conn, title)
     blueprint.say(
-        conn, candidate_id, "我想先把 HTTP 弄明白", transport=transport or ScriptedTransport(chat_reply(["每周几小时？"]))
+        conn, candidate_id, "我想先把 HTTP 弄明白", transport=transport or ScriptedTransport(chat_reply([], ready=True))
     )
     return candidate_id, plan_id
 
@@ -210,10 +212,11 @@ def test_one_turn_records_both_sides_and_carries_the_context(conn):
 
     done = blueprint.say(conn, candidate_id, "我想先把 HTTP 弄明白", transport=transport)
 
-    assert done["turns_used"] == 1 and done["can_generate"] is True
+    assert done["turns_used"] == 1 and done["can_generate"] is False
     assert done["reply"]["questions"] == ["你每周能稳定投入几小时？", "先做哪一块？"]
     rows = blueprint.thread(conn, candidate_id, plan_id)
     assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert blueprint.view(conn, candidate_id)["can_generate"] is False
     assert rows[0]["content"] == "我想先把 HTTP 弄明白"
     assert json.loads(rows[1]["content"])["ready"] is False  # 助手那侧存 JSON 原文
 
@@ -276,7 +279,7 @@ def test_blueprint_without_plan_id_falls_back_to_the_recorded_thread(conn):
     plan_id = ledger.create_active(conn, "plan", {"goal": "轻量后端与数据库入门"}, actor="user")
     candidate_id = free_candidate_adopted_into(conn, plan_id)
     transport = ScriptedTransport(
-        chat_reply(["每周几小时？"]),
+        chat_reply([], ready=True),
         blueprint_json(stage("轻量后端入门", tasks=[task("读 MDN")])),
     )
 
@@ -399,7 +402,7 @@ def test_blueprint_lands_as_a_pending_proposal(conn):
     make_provider(conn)
     add_profile(conn)
     transport = ScriptedTransport(
-        chat_reply(["每周几小时？"]),
+        chat_reply([], ready=True),
         blueprint_json(
             stage("学 HTTP", tasks=[task("读 MDN", due="2026-10-01"), task("写一个接口")]),
             stage("上线", deliverable="一个能访问的地址"),
@@ -428,7 +431,7 @@ def test_a_new_version_supersedes_the_old_one_and_leaves_a_trace(conn):
     make_provider(conn)
     add_profile(conn)
     transport = ScriptedTransport(
-        chat_reply(["每周几小时？"]),
+        chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN"), task("写接口")])),
     )
@@ -457,7 +460,7 @@ def test_invalid_due_date_gets_one_retry(conn):
     make_provider(conn)
     add_profile(conn)
     transport = ScriptedTransport(
-        chat_reply(["每周几小时？"]),
+        chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN", due="下周三")])),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN", due="2026-10-01")])),
     )
@@ -723,3 +726,298 @@ def test_a_new_direction_candidate_remembers_where_it_landed(conn):
 
     transport = ScriptedTransport(chat_reply(["每周几小时？"]))
     assert blueprint.say(conn, candidate_id, "先打基础", transport=transport)["plan_id"] == plan_id
+
+
+# ---------- 归属闸 · 有效轮门槛 · 生成期校验前移（2026-09-28 整改 III-01 / III-02） ----------
+
+def test_view_refuses_a_plan_id_that_disagrees_with_the_recorded_thread(conn):
+    """view 传的 plan_id 也要过 say/generate 那道闸：与已记归属对不上就 409——
+    不然待批蓝图会错挂到同计划另一条候选的对话里展示。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    other = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+    transport = ScriptedTransport(chat_reply(["第一问？"]))
+    blueprint.say(conn, candidate_id, "第一句", plan_id=plan_id, transport=transport)
+
+    with pytest.raises(blueprint.BlueprintConflict):
+        blueprint.view(conn, candidate_id, other)
+
+    seen = blueprint.view(conn, candidate_id, plan_id)  # 传对的照常看
+    assert seen["plan_id"] == plan_id and seen["turns_used"] == 1
+
+
+def test_view_checks_the_callers_plan_against_the_landing_before_any_chat(conn):
+    """还没聊过也一样：调用方说明与候选落点冲突，view 不再直接照单全收。"""
+    plan_id = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    other = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+    candidate_id = free_candidate_adopted_into(conn, plan_id)
+
+    with pytest.raises(blueprint.BlueprintConflict):
+        blueprint.view(conn, candidate_id, other)
+
+    assert blueprint.view(conn, candidate_id, plan_id)["plan_id"] == plan_id
+    assert blueprint.view(conn, candidate_id)["plan_id"] == plan_id  # 不带 plan_id 也认得
+
+
+def test_a_failed_reply_does_not_count_as_a_valid_turn(conn):
+    """III-01：模型没接住的那轮不算「聊成」——不能拿一句留下的失败消息凑数出蓝图。"""
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn)
+    transport = ScriptedTransport(
+        json.dumps({"questions": [], "ready": False}),  # 这轮回话不合格 → say 报错
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+    )
+
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.say(conn, candidate_id, "我还是想学这个", transport=transport)
+
+    seen = blueprint.view(conn, candidate_id)
+    assert seen["turns_used"] == 1  # 界面显示：你发过一句
+    assert seen["valid_turns_used"] == 0  # 但没聊成
+    assert seen["can_generate"] is False
+    with pytest.raises(blueprint.BlueprintConflict):  # 出方案被拦下
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert len(transport.seen) == 1  # 蓝图生成一次模型都没调
+
+    blueprint.say(conn, candidate_id, "每周 6 小时", transport=transport)  # 聊成一轮
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert created["plan_id"] == plan_id
+    seen = blueprint.view(conn, candidate_id)
+    assert seen["valid_turns_used"] == 1 and seen["can_generate"] is True
+
+
+def test_pending_blueprint_summary_carries_its_candidate(conn):
+    """III-02：待批稿只给**出它的那条候选**看——摘要带 candidate_id，同计划别的候选不外显。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+    )
+    candidate_id, plan_id = ready_thread(conn, transport=transport)
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    summary = blueprint.view(conn, candidate_id)["blueprint"]
+
+    assert summary["id"] == created["proposal_id"]
+    assert summary["candidate_id"] == candidate_id
+
+    # 同计划另一条候选的对话里**看不到**这份待批稿（查看与候选绑定）——免得那边把它当
+    # 自己的稿子批了；A 自己再看，那份还在
+    other_id = free_candidate_adopted_into(conn, plan_id)
+    assert blueprint.view(conn, other_id)["blueprint"] is None
+    assert blueprint.view(conn, candidate_id)["blueprint"]["id"] == created["proposal_id"]
+    # 计划级口径（不传候选）照旧能用：版本更替（_supersede_previous）那半边走的就是它
+    assert blueprint.pending_blueprint(conn, plan_id)["id"] == created["proposal_id"]
+
+
+def test_generation_retries_when_a_stage_title_is_blank(conn):
+    """III-02 前移：纯空白标题 Pydantic 的 min_length 挡不住——生成时就拦下带原因重试。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("   ")),  # 阶段标题全是空白
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert created["attempts"] == 2
+    assert [item["title"] for item in created["stages"]] == ["学 HTTP"]
+
+
+def test_generation_retries_when_a_task_title_is_blank(conn):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("   ")])),  # 任务标题全是空白
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert created["attempts"] == 2
+    assert created["stages"][0]["tasks"][0]["title"] == "读 MDN"
+
+
+def test_generation_retries_when_one_stage_has_duplicate_task_titles(conn):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN"), task("读 MDN")])),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert created["attempts"] == 2  # 同一阶段里重名 → 判不合格重试
+
+
+def test_same_task_title_in_different_stages_is_allowed(conn):
+    """跨阶段同名任务合法——不同父节点在计划树里本来就互不冲突。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(
+            stage("学 HTTP", tasks=[task("读 MDN")]),
+            stage("上线", tasks=[task("读 MDN")]),
+        ),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert created["attempts"] == 1
+    assert [item["tasks"][0]["title"] for item in created["stages"]] == ["读 MDN", "读 MDN"]
+
+
+def test_two_invalid_blueprints_land_nothing(conn):
+    """两次都不合格：报错不落——一条明知批不了的提案都不该留在库里。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("   ")),  # 第一次：阶段标题空白
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN"), task("读 MDN")])),  # 第二次：重名
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)
+    ).fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("reply", [
+    chat_reply(["每周几小时？"]),
+    chat_reply(["还要确认哪一步？"], ready=True),
+])
+def test_generation_requires_latest_ready_reply_without_questions(conn, reply):
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn)
+    transport = ScriptedTransport(reply)
+    said = blueprint.say(conn, candidate_id, "先聊聊", transport=transport)
+    assert said["can_generate"] is False
+    assert blueprint.view(conn, candidate_id)["can_generate"] is False
+    with pytest.raises(blueprint.BlueprintConflict):
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert len(transport.seen) == 1
+    assert blueprint.valid_turns_used(conn, candidate_id, plan_id) == 1
+
+
+def test_later_unready_reply_revokes_previous_readiness(conn):
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, _ = adopted_candidate(conn)
+    transport = ScriptedTransport(chat_reply([], ready=True), chat_reply(["再确认一下？"]))
+    assert blueprint.say(conn, candidate_id, "足够了", transport=transport)["can_generate"] is True
+    assert blueprint.say(conn, candidate_id, "还有个疑问", transport=transport)["can_generate"] is False
+    assert blueprint.view(conn, candidate_id)["can_generate"] is False
+    with pytest.raises(blueprint.BlueprintConflict):
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert len(transport.seen) == 2
+
+
+@pytest.mark.parametrize("bad", [
+    blueprint_json(stage("学 HTTP"), goal="   "),
+    blueprint_json(stage("学 HTTP", deliverable="  ")),
+])
+def test_generation_retries_blank_goal_or_deliverable_and_lands_nothing(conn, bad):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(chat_reply([], ready=True), bad, bad)
+    candidate_id, _ = ready_thread(conn, transport=transport)
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert len(transport.seen) == 3
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal").fetchone()["n"] == 0
+
+
+# ---------- 生成门槛 · 与现有计划的冲突预检（2026-09-28 整改 III-01 / III-02） ----------
+#
+# 生成要过三道：聊成的轮数至少一轮（既有）、**最后一轮必须是它答的那句**（新）、
+# 蓝图任务不撞现有计划里开着的同名任务（新——这道原先要等批准按钮才炸，留下明知
+# 批不了的稿子；现在生成期就拦下、带原因重试一次）。
+
+def test_generation_retries_when_a_task_clashes_with_an_open_one(conn):
+    """蓝图给同名开着的阶段排了撞名任务 → 生成期判不合格重试；第二次改掉才落提案。"""
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn)
+    stage_row = plan.get_stages(conn, plan_id)[0]  # 采纳时自动建的同名阶段
+    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=int(stage_row["id"]))
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),  # 撞上开着的同名任务
+        blueprint_json(stage("学 HTTP", tasks=[task("写一个请求客户端")])),  # 第二次改掉
+    )
+    blueprint.say(conn, candidate_id, "我想先把 HTTP 弄明白", transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert created["attempts"] == 2
+    assert created["stages"][0]["tasks"][0]["title"] == "写一个请求客户端"
+    # 重试原因点名了撞车的阶段与任务，并说清后果
+    hint = transport.seen[2]["payload"]["messages"][-1]["content"]
+    assert "学 HTTP" in hint and "读 MDN" in hint and "防重名闸" in hint
+
+
+def test_generation_lands_nothing_when_both_attempts_clash(conn):
+    """两次都撞：报错不落——一条明知批不了的提案都不该留在库里。"""
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn)
+    stage_row = plan.get_stages(conn, plan_id)[0]
+    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=int(stage_row["id"]))
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN"), task("写个 demo")])),
+    )
+    blueprint.say(conn, candidate_id, "我想先把 HTTP 弄明白", transport=transport)
+
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)
+    ).fetchone()["n"] == 0
+
+
+def test_generation_is_blocked_while_the_last_turn_is_unanswered(conn):
+    """最后一轮只留下你的话（它的回话失败或还没回）→ 409 拦下；补聊成一轮后才可出方案。"""
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),                    # 第一轮聊成
+        json.dumps({"questions": [], "ready": False}),   # 第二轮它没答成 → say 报错
+        chat_reply([], ready=True),                     # 补聊的那一轮
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+    )
+    blueprint.say(conn, candidate_id, "我想先把 HTTP 弄明白", transport=transport)
+    with pytest.raises(blueprint.BlueprintError):  # 回话失败，只留下你的话
+        blueprint.say(conn, candidate_id, "每周 6 小时，先抓基础", transport=transport)
+
+    with pytest.raises(blueprint.BlueprintConflict) as conflict:
+        blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert "上一轮还没聊成" in str(conflict.value)
+    assert len(transport.seen) == 2  # 被拦下时生成一次模型都没调
+
+    blueprint.say(conn, candidate_id, "每周 6 小时，先抓基础", transport=transport)  # 补聊成
+    created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
+    assert created["plan_id"] == plan_id

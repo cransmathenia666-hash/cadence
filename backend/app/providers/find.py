@@ -56,6 +56,7 @@ class Brief:
     # 整改：已答清单原来只埋在反馈流水里，会被字符上限从最旧挤掉，也压不过「缺信息就追问」
     # 的主指令——追问重复就是这么来的。现在单独成段、当禁区用，并在验收里拦下重问。
     clarified_lines: list[str] = field(default_factory=list)
+    conversation_lines: list[str] = field(default_factory=list)
 
 
 class Source(Protocol):
@@ -120,6 +121,10 @@ class RouteOnlySource:
         lines += [f"- {line}" for line in brief.depth_guide_lines]
 
         # ---------- 层三：纪律（表态流水 / 已答追问禁区；否决禁区清单在契约之后） ----------
+        if brief.conversation_lines:
+            lines += ["", "【本线程最近的对话】按时间从早到晚；接住我前面说的话，不要只看最初的问题："]
+            lines += brief.conversation_lines
+
         if brief.feedback_lines:
             lines += [
                 "",
@@ -140,27 +145,48 @@ class RouteOnlySource:
             lines += [f"- {line}" for line in brief.clarified_lines]
 
         # ---------- 层一落地：语气段（把理由说成人话；只管怎么说，不管说什么） ----------
+        # V-01（2026-09-28）：原「档案编号收进句尾括号」作废——正文（why / reply）一律不写
+        # #数字 编号，依据只通过 profile_item_ids 字段表达，界面按字段单独展示。
         lines += [
             "",
             "【推荐理由怎么写】why 是说给「我」听的，不是填表：",
             "- 每条 3–5 句成段，像懂行的朋友给建议：先说这条路对我哪里有用，再说为什么现在",
             "  正合适，可以有一句对症的关照（比如贴合我的精力、伤情或作息），不要写成条款罗列。",
-            "- 档案编号收进句尾括号，一处带一两个就够（如「……贴合你晚上的节律（#7）」），",
-            "  别把（#6）（#7）（#13）一路插满正文。",
+            "- 正文（why / reply）里不写「#数字」这类档案编号——依据只通过 profile_item_ids"
+            " 字段表达，",
+            "  界面会按字段单独展示依据；编号混进正文对我是噪音。",
             "- 引用我的原话是为了对题，不是固定开头——别每条都「你原话是……」，换着方式接话。",
             "- 语气像人：可以口语，但别堆「赋能 / 抓手 / 闭环」这类词。",
         ]
 
         # ---------- 层四：输出契约（与 advisor 校验一一咬合；语气层不许碰这里的措辞） ----------
+        # 意图出口（2026-09-28 II-01）：先自报这一轮是给候选、问一句还是只是说话；
+        # 旧的两条规则——「每轮给满清单」「追问不能替代清单」——已按决策 44 删除。
         lines += [
             "",
             "【硬性要求】",
+            "- 先判断这一轮属于哪种**意图**，写进 `intent`，只能三选一：",
+            "  · `candidates`：信息足够、我在请求推荐——包括明确说「重新找 / 再来一版」，"
+            "也包括回答上一轮追问时信息已经足够、直接给出最终候选（这不算擅自重做）。"
+            "**只有我明确要求推荐或重做时才给候选**：寒暄续问、闲聊接话的那一轮不要自行产候选。"
+            "只有这一种意图才给候选，下面关于 shape / candidates / steps / recommended_start"
+            " 的规则只在它下面生效。",
+            "  · `need_info`：问题是真实的，但档案信息不足以给出负责任的推荐——"
+            "这一轮**只问一句**关于我的事实（给 `clarify`，规则见下），`candidates` 与 `steps`"
+            " 给空数组，**不为凑数硬推**。",
+            "  · `chat`：寒暄 / 问候 / 与找方向无关的闲聊，或你认为有了新事实、"
+            "原先的「多方向 / 一路径」形态判断站不住了、要先向我解释——用 `reply` 说人话，"
+            "不给候选也不给 clarify。解释形态冲突时可带 `shape_change`："
+            '`{"from": "directions 或 path", "to": "directions 或 path", "reason": "为什么"}。',
+            "- `intent` 为 `need_info` 或 `chat` 时，`reply` 必须写一句给我的话；"
+            "`intent` 为 `candidates` 时 `reply` 给空字符串即可。",
             "- **本次原话是第一硬约束**：每条候选都必须直接回应【这次的问题】，"
             "`why` 里要能看出它怎么回应（用上原话里的词）；"
             "跟这次问题无关的方向，哪怕档案显示它再值，也不许混进清单——"
             "想推别的方向，等我自己开一轮「不知道学什么」再说。",
-            "- 先自己判断这一轮给的是哪种**形状**，只能选一种，写进 `shape`：",
-            "  · `directions`（默认）：几条**互相竞争**的方向，每条都能单独采纳或否决。"
+            "- `intent` 为 `candidates` 时，先自己判断这一轮给的是哪种**形状**，"
+            "只能选一种，写进 `shape`：",
+            "  · `directions`：几条**互相竞争**的方向，每条都能单独采纳或否决。"
             "我的困惑是「不知道往哪走」时用它。",
             "  · `path`：**只有当这几条明显是同一条路上的先后步骤**（缺了前面那步就走不到后面那步）"
             "时才用它——这时只给**一条伞候选**（标题是这条路本身，例如「从零到部署学通 agent 开发」），"
@@ -180,10 +206,12 @@ class RouteOnlySource:
             "只能从上面出现过的 id 里选；编一个不存在的 id 会被判为不合格。",
             "- 某一类方向在我档案里确实找不到依据时，`why` 要明说「依据不足」并说清缺哪类信息，"
             "`profile_item_ids` 给空数组。宁可说依据不足，也不许编造依据。",
-            "- `recommended_start`：从上面这些候选里挑一条作为起点，**一字不差**复制它的 `title`"
-            "（复制错一个字会被判为不合格）。",
-            "- `start_reason`：为什么先从这个开始，一句话。",
-            "- 可选 `clarify`：如果你觉得档案里缺了某类信息、先问一句能让我下一轮答得更好，"
+            "- `intent` 为 `candidates` 时还要给 `recommended_start`：从上面这些候选里挑一条"
+            "作为起点，**一字不差**复制它的 `title`（复制错一个字会被判为不合格）；"
+            "并给 `start_reason`：为什么先从这个开始，一句话。",
+            "- `clarify`（追问槽位）：`intent` 为 `need_info` 时**必须**给；"
+            "`intent` 为 `candidates` 时也可以带（清单照给）。"
+            "如果你觉得档案里缺了某类信息、先问一句能让我下一轮答得更好，"
             '就加上 `{"question": "你要问我的那一句", "missing": "缺的是哪一类档案信息"}`。'
             "`missing` 必须点名其中一类（"
             + " / ".join(brief.clarify_keys)
@@ -195,15 +223,18 @@ class RouteOnlySource:
             "（例如「你现在每周能稳定投入几小时」）。**不许问「这条路怎么走」**"
             "（先学哪个 / 怎么排顺序 / 用什么节奏 / 想先交出什么）——那是采纳之后的规划对话该问的，"
             "在这里问会被判为不合格。`question` 写一句话，别写成一段、别一次问好几件事。",
-            f"- **`clarify` 不能替代清单**：带追问的这一轮照样按上面的形状给满候选。"
-            "没有要追问的就不要给这个字段。",
-            "- 只输出一个 JSON 对象，不要解释、不要 Markdown 代码块。形状："
-            '{"shape": "directions", "candidates": [{"title": "...", "kind": "...", "why": "...",'
+            "- 只输出一个 JSON 对象，不要解释、不要 Markdown 代码块。三种意图的形状："
+            '{"intent": "candidates", "reply": "", "shape": "directions",'
+            ' "candidates": [{"title": "...", "kind": "...", "why": "...",'
             ' "depth_target": "...", "profile_item_ids": [数字, ...]}, ...], "steps": [],'
             ' "recommended_start": "...", "start_reason": "..."'
             '[, "clarify": {"question": "...", "missing": "..."}]}；'
             "`shape` 为 `path` 时是同一个形状，只是 `candidates` 只有 1 条、"
-            '`steps` 给 [{"title": "...", "deliverable": "...", "why": "..."}, ...]。',
+            '`steps` 给 [{"title": "...", "deliverable": "...", "why": "..."}, ...]；'
+            '需要追问时是 {"intent": "need_info", "reply": "...",'
+            ' "clarify": {"question": "...", "missing": "..."}}；'
+            '只是说话时是 {"intent": "chat", "reply": "..."}'
+            '（解释形态冲突时再加 "shape_change": {"from": "...", "to": "...", "reason": "..."}）。',
         ]
 
         if brief.banned_titles:

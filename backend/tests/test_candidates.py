@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -82,8 +83,10 @@ def list_json(
     shape: str = "directions",
     steps: list[dict] | None = None,
 ) -> str:
-    """一份「找」的输出。`shape` 必填（T34），默认是「几条互相竞争的方向」。"""
+    """一份「找」的输出。`intent` 必填（2026-09-28 双入口整改），候选轮默认 candidates；
+    `shape` 必填（T34），默认是「几条互相竞争的方向」。"""
     payload: dict = {
+        "intent": "candidates",
         "shape": shape,
         "candidates": candidates,
         "recommended_start": start or candidates[0]["title"],
@@ -94,6 +97,24 @@ def list_json(
     if clarify is not None:
         payload["clarify"] = clarify
     return json.dumps(payload, ensure_ascii=False)
+
+
+def chat_json(reply: str = "你好呀，我在呢——想聊点什么？", **extra) -> str:
+    """一份 intent=chat 的输出：只有 reply，不落候选不落追问。"""
+    return json.dumps({"intent": "chat", "reply": reply, **extra}, ensure_ascii=False)
+
+
+def need_info_json(question: str, missing: str, *, reply: str = "先问你一句", **extra) -> str:
+    """一份 intent=need_info 的输出：一句 reply + 一条追问，无候选。"""
+    return json.dumps(
+        {
+            "intent": "need_info",
+            "reply": reply,
+            "clarify": {"question": question, "missing": missing},
+            **extra,
+        },
+        ensure_ascii=False,
+    )
 
 
 def four(ids: list[int], *, clarify: dict | None = None, **overrides) -> str:
@@ -493,6 +514,7 @@ def test_list_candidates_without_any_search_is_empty_not_an_error(conn):
         "request_id": None,
         "raw_text": None,
         "plan_id": None,
+        "thread_id": None,
         "candidates": [],
         "recommended": None,
     }
@@ -615,7 +637,7 @@ def test_feedback_ignores_four_question_rounds(conn):
 # ---------- 追问槽位（T25：SPEC 决策 35 ②） ----------
 
 def test_clarify_rides_along_without_replacing_the_list(conn):
-    """追问不能替代清单：带追问的那一轮照样给满候选，且它**不落库**。"""
+    """candidates 轮可带追问（清单照给），它记在本轮请求行上、清单照常落库。"""
     make_provider(conn)
     axis = add_profile(conn, "long_axis", "主线")
     asked = {"question": "你现在每周能稳定投入几小时？", "missing": "当前状态"}
@@ -888,13 +910,15 @@ def test_clarify_answer_keeps_the_original_direction(conn, monkeypatch):
     monkeypatch.setattr(advisor, "find_candidates", fake_find)
     with pytest.raises(HTTPException):
         main.post_request(
-            RequestIn(kind="search", raw_text=original, clarify_answer="现在已经正常"),
+            RequestIn(kind="search", raw_text=original, clarify_answer="现在已经正常",
+                      clarify_request_id=first_id),
             conn,
         )
 
     assert seen["raw_text"].startswith(original)  # 原话在场，模型才有得直接回应
     assert "医生预计" in seen["raw_text"] and "现在已经正常" in seen["raw_text"]
-    assert advisor.pending_clarify(conn, None) is None  # 这条追问已标成已答
+    # 失败的轮次不消费回答（I-03 原子化）：追问保持待答，可原样重试
+    assert advisor.pending_clarify(conn, None) is not None
 
 
 def test_prompt_layers_keep_contract_and_voice_separate(conn):
@@ -1065,6 +1089,7 @@ def test_missing_shape_is_unqualified(conn):
     axis = add_profile(conn, "long_axis", "主线")
     no_shape = json.dumps(
         {
+            "intent": "candidates",
             "candidates": [candidate(f"方向 {index}", [axis]) for index in range(3)],
             "recommended_start": "方向 0",
             "start_reason": "先做这个",
@@ -1258,3 +1283,1044 @@ def test_old_accepted_candidate_without_landing_still_resolves(conn):
     row = fresh_row(conn, candidate_id)
     assert row["landing_plan_id"] is None  # 老数据就是没有
     assert advisor.landing_plan(conn, row, None) == plan_id
+
+
+# 流程闭环合并：明确轮次不得串到同计划的另一条追问。
+def test_explicit_clarify_request_targets_only_that_round(conn, monkeypatch):
+    first = advisor.record_request(conn, "search", "线性代数")
+    second = advisor.record_request(conn, "search", "高等数学")
+    advisor.record_clarify(conn, first, {"question": "线代基础如何？", "missing": "基础"})
+    advisor.record_clarify(conn, second, {"question": "高数基础如何？", "missing": "基础"})
+    seen = {}
+
+    def fake_find(conn_, raw_text, **kwargs):
+        seen["text"] = raw_text
+        raise advisor.AdvisorError("停止于假上游")
+
+    monkeypatch.setattr(advisor, "find_candidates", fake_find)
+    with pytest.raises(HTTPException):
+        main.post_request(RequestIn(kind="search", raw_text="线性代数", clarify_answer="零基础", clarify_request_id=first), conn)
+    assert "线代基础如何？" in seen["text"]
+    assert "高数基础如何？" not in seen["text"]
+    assert advisor.pending_clarify(conn, None)["request_id"] == second
+    # 失败的轮次不消费回答（I-03 原子化）：first 的追问仍待答，回答没有落库
+    requests = main.get_learning_requests(conn=conn)["requests"]
+    assert next(row for row in requests if row["request_id"] == first)["clarify"]["answer"] is None
+
+
+@pytest.mark.parametrize("target", ["missing", "other_plan", "answered"])
+def test_explicit_invalid_clarify_never_consumes_latest(conn, target):
+    first = advisor.record_request(conn, "search", "旧问题", plan_id=7 if target == "other_plan" else None)
+    advisor.record_clarify(conn, first, {"question": "旧追问？", "missing": "基础"})
+    if target == "answered":
+        advisor.mark_clarify_answered(conn, first, "已答")
+    latest = advisor.record_request(conn, "search", "新问题")
+    advisor.record_clarify(conn, latest, {"question": "新追问？", "missing": "基础"})
+    text = advisor.compose_clarify_round(conn, "原问题", "补充内容", None, 99999 if target == "missing" else first)
+    assert text.splitlines() == ["原问题", "补充：补充内容"]
+    assert advisor.pending_clarify(conn, None)["request_id"] == latest
+
+
+def test_search_history_contract_filters_orders_and_bounds(conn):
+    first = advisor.record_request(conn, "search", "新方向")
+    own = advisor.record_request(conn, "search", "计划方向", plan_id=7)
+    advisor.record_request(conn, "evaluate", "不是找方向", plan_id=7)
+    advisor.record_clarify(conn, own, {"question": "基础如何？", "missing": "基础"})
+    history = main.get_learning_requests(conn=conn)["requests"]
+    assert [row["request_id"] for row in history] == [own, first]
+    assert set(history[0]) == {"request_id", "raw_text", "utterance", "intent", "reply", "status", "plan_id", "thread_id", "created_at", "clarify", "shape_change", "candidate_count", "has_candidates"}
+    assert history[0]["candidate_count"] == 0 and history[0]["has_candidates"] is False
+    assert [row["request_id"] for row in main.get_learning_requests(plan_id=7, conn=conn)["requests"]] == [own]
+    assert len(advisor.list_search_requests(conn, limit=0)) == 1
+
+
+# ---------- 探索线程与意图出口（2026-09-28 双入口整改，SPEC 决策 44） ----------
+#
+# 这一段用**手工驱动的新链路**打整条线：resolve_thread → build_round_input → record_request
+# → find_candidates(thread=…) → propose_candidates(thread_id=…) → commit_round——正是集成
+# 负责人要在 main.py 里接的那条线。假上游的输出一律带 intent。
+
+
+def drive_round(
+    conn,
+    raw_text: str,
+    transport,
+    *,
+    thread_id: int | None = None,
+    clarify_request_id: int | None = None,
+    plan_id: int | None = None,
+    answer: str | None = None,
+    allow_shape_switch: bool = False,
+    redo: bool = False,
+    expected_shape: str | None = None,
+):
+    """按新链路跑一轮，返回 (thread, request_id, result)。
+
+    新线程（resolve 返回 thread_id=None）在 record_request 回填后把身份补进 thread dict，
+    这也是集成接线时 main.py 要做的事：落库后线程 id = 本行 id。
+    集成契约（2026-09-28 复核整改）：resolve_thread 要拿到 answer（答追问轮原子占用）；
+    失败路径必须 release_clarify_claim 放锁；expected_shape 由调用方查
+    pending_shape_change 后塞入（形态切换的放行凭据，不是客户端布尔值）；
+    propose_candidates 的 redo 来自 find 结果的透传。
+    """
+    thread = advisor.resolve_thread(
+        conn,
+        thread_id=thread_id,
+        plan_id=plan_id,
+        clarify_request_id=clarify_request_id,
+        answer=answer,
+    )
+    text_in = advisor.build_round_input(conn, utterance=raw_text, answer=answer, thread=thread)
+    request_id = advisor.record_request(conn, "search", text_in, plan_id, thread["thread_id"])
+    thread["request_id"] = request_id
+    thread["allow_shape_switch"] = allow_shape_switch
+    thread["redo"] = redo
+    if expected_shape is not None:
+        thread["expected_shape"] = expected_shape
+    if thread["thread_id"] is None:
+        thread["thread_id"] = thread["thread_head"] = request_id
+    try:
+        result = advisor.find_candidates(
+            conn, text_in, plan_id=plan_id, thread=thread, transport=transport
+        )
+    except Exception:
+        # 与 main.py 同一契约：模型失败必须放锁，否则原样重试会被自己的残留占用挡住
+        pending = thread.get("pending_clarify")
+        if pending is not None and answer:
+            advisor.release_clarify_claim(conn, int(pending["request_id"]), thread.get("claim_token"))
+        raise
+    if result["intent"] == "candidates" and result["candidates"]:
+        advisor.propose_candidates(
+            conn,
+            request_id=request_id,
+            result=result,
+            thread_id=thread["thread_id"],
+            redo=result["redo"],
+        )
+    advisor.commit_round(
+        conn,
+        request_id=request_id,
+        thread=thread,
+        answer=answer,
+        clarify=result["clarify"],
+        shape_change=result["shape_change"],
+    )
+    return thread, request_id, result
+
+
+def candidate_ids_of(conn, request_id: int) -> list[int]:
+    return [
+        int(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM candidate WHERE request_id = ? ORDER BY rank", (request_id,)
+        ).fetchall()
+    ]
+
+
+def statuses_of(conn, ids: list[int]) -> dict[int, str]:
+    placeholders = ",".join("?" * len(ids))
+    return {
+        int(row["id"]): row["status"]
+        for row in conn.execute(
+            f"SELECT id, status FROM candidate WHERE id IN ({placeholders})", ids
+        ).fetchall()
+    }
+
+
+# ---------- ① 意图出口：chat / need_info 不落候选 ----------
+
+def test_chat_greeting_lands_no_candidate_and_returns_reply(conn):
+    make_provider(conn)
+    add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(chat_json("你好呀！今天想聊点什么？"))
+
+    thread, request_id, result = drive_round(conn, "hi", transport)
+
+    assert result["intent"] == "chat"
+    assert result["reply"] == "你好呀！今天想聊点什么？"
+    assert result["candidates"] == [] and result["clarify"] is None
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"] == 0
+    row = conn.execute(
+        "SELECT thread_id, clarify FROM learning_request WHERE id = ?", (request_id,)
+    ).fetchone()
+    assert row["thread_id"] == request_id  # 新线程：身份 = 自己
+    assert row["clarify"] is None  # chat 轮不落追问
+
+
+@pytest.mark.parametrize(
+    ("extra", "fragment"),
+    [
+        ({"shape": "directions", "candidates": None}, "不该给候选"),
+        ({"clarify": {"question": "每周几小时？", "missing": "当前状态"}}, "不要给 clarify"),
+    ],
+)
+def test_chat_with_candidates_or_clarify_is_unqualified(conn, extra, fragment):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    extra = dict(extra)
+    if extra.get("candidates") is None and "candidates" in extra:
+        extra["candidates"] = [candidate(f"方向 {i}", [axis]) for i in range(3)]
+    chatty = chat_json("在呢", **extra)
+    transport = ScriptedTransport(chatty, chat_json("在呢"))
+
+    result = advisor.find_candidates(conn, "hi", transport=transport)
+
+    assert result["attempts"] == 2  # chat 轮夹带候选 / 追问都被拦下重试
+    assert result["intent"] == "chat" and result["candidates"] == []
+    assert fragment in transport.seen[1]["payload"]["messages"][-1]["content"]
+
+
+def test_need_info_asks_then_the_answer_marks_it_answered(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    question = "你现在每周能稳定投入几小时？"
+    transport = ScriptedTransport(need_info_json(question, "当前状态"), four([axis]))
+
+    thread, first_id, first = drive_round(conn, "想学点东西提升一下", transport)
+
+    assert first["intent"] == "need_info"
+    assert first["clarify"]["question"] == question
+    assert first["candidates"] == []
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"] == 0  # 追问轮不落候选
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (first_id,)).fetchone()["clarify"]
+    )
+    assert stored["answer"] is None  # 问题记下了，还没答
+
+    # 回答该追问：同一线程续问，commit_round 之后才标已答
+    _, second_id, second = drive_round(
+        conn,
+        "想学点东西提升一下",
+        transport,
+        thread_id=thread["thread_id"],
+        clarify_request_id=first_id,
+        answer="每周 5 小时左右",
+    )
+
+    assert second["intent"] == "candidates"
+    sent = transport.seen[1]["payload"]["messages"][-1]["content"]
+    # 原话打头（拼在【这次的问题】段首），追问与回答缀在后面
+    assert "想学点东西提升一下\n【追问】" in sent
+    assert question in sent and "【我的回答】每周 5 小时左右" in sent
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (first_id,)).fetchone()["clarify"]
+    )
+    assert stored["answer"] == "每周 5 小时左右"
+    assert (
+        advisor.resolve_thread(
+            conn, thread_id=thread["thread_id"], plan_id=None, clarify_request_id=None
+        )["pending_clarify"]
+        is None
+    )
+    assert {
+        int(row["request_id"]) for row in conn.execute("SELECT request_id FROM candidate")
+    } == {second_id}
+
+
+# ---------- ③ 原子性：失败的轮不消费回答，但请求行留痕 ----------
+
+def test_failed_round_keeps_clarify_unanswered_but_records_the_request(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    transport1 = ScriptedTransport(need_info_json("你现在每周能稳定投入几小时？", "当前状态"))
+    thread, first_id, _ = drive_round(conn, "想学点东西", transport1)
+
+    too_few = list_json([candidate("只有一条", [axis])])
+    transport2 = ScriptedTransport(too_few, too_few)
+    with pytest.raises(advisor.AdvisorError):
+        drive_round(
+            conn,
+            "想学点东西",
+            transport2,
+            thread_id=thread["thread_id"],
+            clarify_request_id=first_id,
+            answer="每周 5 小时",
+        )
+
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (first_id,)).fetchone()["clarify"]
+    )
+    assert stored["answer"] is None  # 失败不提前消费回答——可原样重试
+    assert "claimed_at" not in stored  # 失败路径放锁（F4）：重试不会被自己的残留占用挡住
+    retry_row = conn.execute(
+        "SELECT thread_id, clarify FROM learning_request WHERE id = ?", (first_id + 1,)
+    ).fetchone()
+    assert retry_row["thread_id"] == thread["thread_id"]  # 本轮已留痕、归属正确
+    assert retry_row["clarify"] is None  # 没落新追问
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"] == 0
+
+
+# ---------- ④ 同句新问题 = 两条独立线程，不合并 ----------
+
+def test_same_text_twice_without_thread_are_two_independent_threads(conn):
+    first = advisor.record_request(conn, "search", "我不知道该学什么")
+    advisor.record_clarify(conn, first, {"question": "第一段问的事？", "missing": "当前状态"})
+    second = advisor.record_request(conn, "search", "我不知道该学什么")
+
+    r1 = conn.execute("SELECT thread_id FROM learning_request WHERE id = ?", (first,)).fetchone()
+    r2 = conn.execute("SELECT thread_id FROM learning_request WHERE id = ?", (second,)).fetchone()
+    assert r1["thread_id"] == first and r2["thread_id"] == second and first != second
+
+    # 互不合并：第二段的线程看不到第一段的未答追问，也不靠原话相同认亲
+    t2 = advisor.resolve_thread(conn, thread_id=second, plan_id=None, clarify_request_id=None)
+    assert t2["thread_head"] == second and t2["pending_clarify"] is None
+    t1 = advisor.resolve_thread(conn, thread_id=first, plan_id=None, clarify_request_id=None)
+    assert t1["pending_clarify"]["request_id"] == first
+
+
+# ---------- ⑤ 反馈流水与否决禁区的作用域（I-04） ----------
+
+def test_feedback_and_banned_stay_in_their_own_thread(conn):
+    """F2（复核整改）：同计划两个线程，A 线程的否决/表态不出现在 B 线程的反馈流水与
+    禁区；同线程续问才可见。旧口径「否决在同计划内生效」废止——计划归属只是行内展示
+    信息，不再参与圈选；这是有意的行为变更，测试钉住。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    plan_a = ledger.create_active(conn, "plan", {"goal": "计划 A"}, actor="user")
+    plan_b = ledger.create_active(conn, "plan", {"goal": "计划 B"}, actor="user")
+
+    # 线程 TA（计划 A）：否决一条 + 答过一条追问
+    transport_ta = ScriptedTransport(four([axis]))
+    ta, ta_round, _ = drive_round(conn, "A 计划想学什么", transport_ta, plan_id=plan_a)
+    ta_ids = candidate_ids_of(conn, ta_round)
+    advisor.decide_candidate(conn, ta_ids[0], accept=False, reason="A 线程里否掉的")
+    advisor.record_clarify(conn, ta_round, {"question": "A 线程问过的事？", "missing": "当前状态"})
+    advisor.mark_clarify_answered(conn, ta_round, "答了")
+
+    # 计划 B 的新线程：TA 的否决、TA 线程的已答，一样都不过来
+    transport_b = ScriptedTransport(four([axis]))
+    _, _, result_b = drive_round(conn, "B 计划想学什么", transport_b, plan_id=plan_b)
+    prompt_b = transport_b.seen[0]["payload"]["messages"][-1]["content"]
+    assert result_b["banned_titles"] == [] and result_b["feedback_lines"] == []
+    assert "A 线程里否掉的" not in prompt_b and "A 线程问过的事" not in prompt_b
+
+    # 同计划 A 的另一条线程：TA 的表态同样不夹带（复核拍板的有意变更）
+    other = list_json([candidate(f"换思路方向 {i}", [axis]) for i in range(3)])
+    transport_a2 = ScriptedTransport(other)
+    _, _, result_a2 = drive_round(conn, "A 计划换个思路再问", transport_a2, plan_id=plan_a)
+    assert result_a2["banned_titles"] == []
+    assert "A 线程里否掉的" not in transport_a2.seen[0]["payload"]["messages"][-1]["content"]
+
+    # 同线程续问：自己的否决与已答可见（禁区 + 反馈流水 + 已答追问段）
+    transport_same = ScriptedTransport(other)
+    _, _, result_same = drive_round(
+        conn, "A 线程接着聊", transport_same, thread_id=ta["thread_id"], plan_id=plan_a
+    )
+    prompt_same = transport_same.seen[0]["payload"]["messages"][-1]["content"]
+    assert "Python 基础与工程实践" in result_same["banned_titles"]  # TA 否掉的那条
+    assert "A 线程里否掉的" in prompt_same and "A 线程问过的事" in prompt_same
+
+    # 无计划的新方向线程：别的线程的否决不追过来（全局禁区退场，既有口径保持）
+    transport_free = ScriptedTransport(four([axis]))
+    _, _, result_free = drive_round(conn, "新方向随便看看", transport_free)
+    assert result_free["banned_titles"] == [] and result_free["feedback_lines"] == []
+
+
+# ---------- ⑥ 形态锁（II-02） ----------
+
+def test_shape_lock_holds_path_until_the_user_confirms_a_switch(conn):
+    """F5 全流程：形态锁拦下漂移 → 模型按规矩 chat 说明冲突（提案落库）→ 用户确认那轮
+    凭 pending_shape_change 的目标放行 → 新形态落库、锁随之移动、提案随之失效。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(path_json([axis]))
+    thread, _, first = drive_round(conn, "学 agent 开发怎么学", transport)
+
+    assert first["shape"] == "path"
+    assert advisor._thread_shape(conn, thread["thread_head"]) == "path"
+
+    # 下一轮模型硬给 directions：判不合格，重试理由指路 chat + shape_change
+    wrong = list_json([candidate(f"方向 {i}", [axis]) for i in range(3)])
+    transport2 = ScriptedTransport(wrong, wrong)
+    with pytest.raises(advisor.AdvisorError) as err:
+        drive_round(conn, "我每周大概有 10 小时", transport2, thread_id=thread["thread_id"])
+    assert "形态已定为 path" in str(err.value) and 'intent="chat"' in str(err.value)
+    retry = transport2.seen[1]["payload"]["messages"][-1]["content"]
+    assert "形态已定为 path" in retry and "shape_change" in retry
+
+    # 这一次模型按规矩说明冲突（chat + shape_change）：提案落在本轮请求行上，等用户确认
+    explanation = chat_json(
+        "你补充的情况让它更像几个互不依赖的方向",
+        shape_change={"from": "path", "to": "directions", "reason": "几个方向没有先后依赖"},
+    )
+    _, _, second = drive_round(
+        conn, "其实我想要几个方向挑挑", ScriptedTransport(explanation), thread_id=thread["thread_id"]
+    )
+    assert second["intent"] == "chat"
+    proposal = advisor.pending_shape_change(conn, thread["thread_head"])
+    assert proposal is not None
+    assert proposal["to"] == "directions" and proposal["from"] == "path"
+
+    # 用户确认切换（allow_shape_switch + 后端查出的提案目标）：放行，锁随之移动
+    transport3 = ScriptedTransport(four([axis]))
+    _, _, third = drive_round(
+        conn,
+        "好，就按几个方向来",
+        transport3,
+        thread_id=thread["thread_id"],
+        allow_shape_switch=True,
+        expected_shape="directions",
+    )
+
+    assert third["shape"] == "directions"
+    assert advisor._thread_shape(conn, thread["thread_head"]) == "directions"
+    # 出了新形态的候选，提案就有了答案：再查就该是 None（陈旧凭据不回收）
+    assert advisor.pending_shape_change(conn, thread["thread_head"]) is None
+
+
+def test_shape_switch_without_a_pending_proposal_is_rejected(conn):
+    """F5：没有待确认提案却要求放行切换——请求本身错了，而且一次模型都不该调。"""
+    make_provider(conn)
+    add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(four([1]))  # 一旦被调就说明没拦住
+
+    with pytest.raises(advisor.ThreadConflict) as err:
+        drive_round(conn, "给我换个形态", transport, allow_shape_switch=True)
+
+    assert "没有待确认的形态切换" in str(err.value)
+    assert transport.seen == []  # 在调模型之前就拦下
+
+
+def test_shape_switch_proposal_expires_when_the_old_shape_keeps_winning(conn):
+    """F5：提案之后用户保持旧形态又出了一版候选——提案失效（「有候选出，提案就算被回答」）。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    explanation = chat_json(
+        "你说的更像一条固定的路",
+        shape_change={"from": "directions", "to": "path", "reason": "这几步有先后依赖"},
+    )
+    thread, chat_id, _ = drive_round(conn, "其实我想走一条固定的路", ScriptedTransport(explanation))
+
+    proposal = advisor.pending_shape_change(conn, thread["thread_head"])
+    assert proposal is not None and proposal["to"] == "path"
+    stored = conn.execute(
+        "SELECT shape_change FROM learning_request WHERE id = ?", (chat_id,)
+    ).fetchone()
+    assert json.loads(stored["shape_change"]) == {
+        "from": "directions",
+        "to": "path",
+        "reason": "这几步有先后依赖",
+        "decision": "pending",
+    }
+
+    # 用户没点头，按旧形态（线程尚无形态，这轮首次定形 directions）继续出了候选
+    _, _, result = drive_round(
+        conn, "先按几个方向来吧", ScriptedTransport(four([axis])), thread_id=thread["thread_id"]
+    )
+    assert result["shape"] == "directions"
+    assert advisor.pending_shape_change(conn, thread["thread_head"]) is None
+
+
+# ---------- ⑦ 过期改同线程版本更替（C4④） ----------
+
+def test_expiry_replaces_only_the_same_thread(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    plan_id = ledger.create_active(conn, "plan", {"goal": "计划"}, actor="user")
+
+    transport1 = ScriptedTransport(four([axis]))
+    t1, r1, _ = drive_round(conn, "第一版", transport1, plan_id=plan_id)
+    ids1 = candidate_ids_of(conn, r1)
+    advisor.decide_candidate(conn, ids1[0], accept=True)  # 采纳一条（落进计划归属）
+
+    transport2 = ScriptedTransport(four([axis]))
+    t2, r2, _ = drive_round(conn, "同计划的另一条线程", transport2, plan_id=plan_id)
+    ids2 = candidate_ids_of(conn, r2)
+
+    # 同线程**明确重做**（redo=True）：第一版未裁定的过期，已采纳的不动
+    transport3 = ScriptedTransport(four([axis]))
+    _, r3, _ = drive_round(
+        conn, "同线程再来一版", transport3, thread_id=t1["thread_id"], plan_id=plan_id, redo=True
+    )
+    ids3 = candidate_ids_of(conn, r3)
+
+    statuses = statuses_of(conn, ids1 + ids2 + ids3)
+    assert statuses[ids1[0]] == "accepted"  # 已采纳不受新版影响
+    assert all(statuses[cid] == "expired" for cid in ids1[1:])
+    assert all(statuses[cid] == "proposed" for cid in ids2)  # 跨线程（哪怕同计划）不自动过期
+    assert all(statuses[cid] == "proposed" for cid in ids3)
+
+    # 空手的轮（chat / need_info）不触发过期：propose 拿到空清单就该原样返回
+    before = statuses_of(conn, ids2 + ids3)
+    assert advisor.propose_candidates(
+        conn,
+        request_id=r3,
+        result={"intent": "chat", "reply": "在呢", "candidates": []},
+        thread_id=t1["thread_id"],
+    ) == []
+    assert statuses_of(conn, ids2 + ids3) == before
+
+
+def test_list_candidates_by_thread_finds_that_thread_not_the_global_latest(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    t1, r1, _ = drive_round(conn, "第一段", ScriptedTransport(four([axis])))
+    t2, r2, _ = drive_round(conn, "第二段", ScriptedTransport(four([axis])))  # 全局最新的候选在第二段
+
+    listed = advisor.list_candidates(conn, thread_id=t1["thread_id"])
+    assert listed["request_id"] == r1 and listed["thread_id"] == t1["thread_id"]
+    assert listed["candidates"][0]["title"] == "Python 基础与工程实践"
+
+    # 一条从没出过候选的独立线程（chat 轮开的新线程）：按线程查拿不到清单，也不许捞别的线程的
+    chat_transport = ScriptedTransport(chat_json("好呀"))
+    chat_thread, chat_request, _ = drive_round(conn, "嗨", chat_transport)
+    empty = advisor.list_candidates(conn, thread_id=chat_thread["thread_id"])
+    assert empty["request_id"] is None and empty["candidates"] == []
+    assert chat_thread["thread_id"] == chat_request
+
+
+# ---------- ⑧ 反馈窗口：先筛后限（I-05） ----------
+
+def test_feedback_window_keeps_answered_rounds_and_skips_empty_ones(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    head = advisor.record_request(conn, "search", "线程头")
+    # 线程头那轮：问过且答过（它后面跟着一串只问没答的轮——旧行为会把它挤出窗口）
+    advisor.record_clarify(conn, head, {"question": "第一批答的事？", "missing": "当前状态"})
+    advisor.mark_clarify_answered(conn, head, "答了")
+    for index in range(1, 5):  # 连续四轮只问没答
+        only_asked = advisor.record_request(conn, "search", f"只问没答 {index}", None, head)
+        advisor.record_clarify(
+            conn, only_asked, {"question": f"没答的问题 {index}？", "missing": "当前状态"}
+        )
+    verdict_round = advisor.record_request(conn, "search", "有表态的一轮", None, head)
+    settle(conn, verdict_round, "方向五", "rejected", "第五轮的理由")
+
+    transport = ScriptedTransport(four([axis]))
+    _, _, result = drive_round(conn, "这一轮的问题", transport, thread_id=head)
+
+    assert len(result["feedback_lines"]) == 2
+    assert "我问过「第一批答的事？」" in result["feedback_lines"][0]  # 已答没被未答挤出窗口
+    assert "方向五（已否决：第五轮的理由）" in result["feedback_lines"][1]
+    prompt = prompt_of(transport)
+    assert all(f"没答的问题 {index}" not in prompt for index in range(1, 5))  # 只问没答的不算反馈
+
+
+# ---------- ⑩ resolve_thread 的冲突分支与旧记录兜底 ----------
+
+def test_resolve_thread_rejects_conflicts_and_falls_back_for_legacy_rows(conn):
+    plan_a = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    plan_b = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+
+    head = advisor.record_request(conn, "search", "线程头", plan_a)
+
+    # 线程不存在
+    with pytest.raises(advisor.ThreadConflict):
+        advisor.resolve_thread(conn, thread_id=999, plan_id=None, clarify_request_id=None)
+    # 换计划续问（两个方向都拦）
+    with pytest.raises(advisor.ThreadConflict) as err:
+        advisor.resolve_thread(conn, thread_id=head, plan_id=plan_b, clarify_request_id=None)
+    assert f"这段探索属于计划 #{plan_a}" in str(err.value)
+    assert "回到原线程" in str(err.value)
+    free_head = advisor.record_request(conn, "search", "新方向线程")
+    with pytest.raises(advisor.ThreadConflict) as err:
+        advisor.resolve_thread(conn, thread_id=free_head, plan_id=plan_a, clarify_request_id=None)
+    assert "新方向" in str(err.value)
+
+    # 追问不属于该线程
+    stranger = advisor.record_request(conn, "search", "别的线程的一轮")
+    with pytest.raises(advisor.ThreadConflict):
+        advisor.resolve_thread(conn, thread_id=head, plan_id=plan_a, clarify_request_id=stranger)
+
+    # 未答追问：点名哪条拿哪条；已答：不算错，pending 记 None（回答按「补充」拼）
+    advisor.record_clarify(conn, head, {"question": "线程头问的？", "missing": "当前状态"})
+    pending = advisor.resolve_thread(conn, thread_id=head, plan_id=plan_a, clarify_request_id=head)
+    assert pending["pending_clarify"]["request_id"] == head
+    advisor.mark_clarify_answered(conn, head, "答了")
+    answered = advisor.resolve_thread(conn, thread_id=head, plan_id=plan_a, clarify_request_id=head)
+    assert answered["pending_clarify"] is None
+
+    # 同线程续问（thread_id = 头）也能取到线程内最近未答
+    follower = advisor.record_request(conn, "search", "续问一轮", plan_a, head)
+    advisor.record_clarify(conn, follower, {"question": "续问问的？", "missing": "生活记录"})
+    by_head = advisor.resolve_thread(conn, thread_id=head, plan_id=plan_a, clarify_request_id=None)
+    assert by_head["pending_clarify"]["request_id"] == follower
+
+    # 旧客户端兜底：只带 clarify_request_id → 线程从那一轮反推（新契约：计划归属也要对上）
+    legacy = advisor.resolve_thread(conn, thread_id=None, plan_id=plan_a, clarify_request_id=follower)
+    assert legacy["thread_head"] == head and legacy["pending_clarify"]["request_id"] == follower
+
+    # 兼容路径换计划同样要拒（F3：反推出的头行计划归属也要与本轮核对）
+    with pytest.raises(advisor.ThreadConflict) as err:
+        advisor.resolve_thread(conn, thread_id=None, plan_id=plan_b, clarify_request_id=follower)
+    assert f"这段探索属于计划 #{plan_a}" in str(err.value)
+
+    # 旧行（thread_id NULL，这里手工把列清空模拟）：独立成段，线程就是它自己
+    conn.execute("UPDATE learning_request SET thread_id = NULL WHERE id = ?", (follower,))
+    conn.commit()
+    legacy_old = advisor.resolve_thread(conn, thread_id=None, plan_id=plan_a, clarify_request_id=follower)
+    assert legacy_old["thread_head"] == follower
+    assert legacy_old["pending_clarify"]["request_id"] == follower
+
+    # 全新线程：三个键都是 None，等 record_request 回填
+    fresh = advisor.resolve_thread(conn, thread_id=None, plan_id=None, clarify_request_id=None)
+    assert fresh == {"thread_id": None, "thread_head": None, "pending_clarify": None}
+
+
+# ---------- build_round_input 的「补充」分支（无待答追问时不吞话） ----------
+
+def test_build_round_input_appends_supplement_without_touching_state(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    transport = ScriptedTransport(need_info_json("你现在每周能稳定投入几小时？", "当前状态"))
+    thread, first_id, _ = drive_round(conn, "想学点东西", transport)
+
+    # 无待答追问的场景：回答按「补充」缀在原话后面，且不写任何状态
+    thread["pending_clarify"] = None
+    composed = advisor.build_round_input(
+        conn, utterance="想学点东西", answer="顺便说一句我周末有空", thread=thread
+    )
+    assert composed == "想学点东西\n补充：顺便说一句我周末有空"
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (first_id,)).fetchone()["clarify"]
+    )
+    assert stored["answer"] is None  # build 不落状态——「已答」只能由 commit_round 写
+
+
+# ---------- 形态切换请求（II-02）：shape_change 用 "from" 键解析、按 alias 回传 ----------
+
+def test_shape_change_parses_the_from_key_and_returns_it_back(conn):
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    explanation = json.dumps(
+        {
+            "intent": "chat",
+            "reply": "你说的这个新方向更像一条固定的路，我想把它换成一条路来推。",
+            "shape_change": {"from": "directions", "to": "path", "reason": "这几步有先后依赖"},
+        },
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(explanation)
+
+    result = advisor.find_candidates(conn, "其实我想走一条固定的路", transport=transport)
+
+    assert result["intent"] == "chat" and result["candidates"] == []
+    # 回传给界面时还原成模型用的 "from" 键
+    assert result["shape_change"] == {
+        "from": "directions",
+        "to": "path",
+        "reason": "这几步有先后依赖",
+    }
+    # 非法取值照常拦下：from 不是两种形态之一 → 不合格重试
+    bad = json.dumps(
+        {"intent": "chat", "reply": "换", "shape_change": {"from": "别的", "to": "path", "reason": "想换"}},
+        ensure_ascii=False,
+    )
+    transport2 = ScriptedTransport(bad, chat_json("那我们聊聊"))
+    assert advisor.find_candidates(conn, "换个形态", transport=transport2)["attempts"] == 2
+
+
+
+# ---------- ⑬ 路由编排（main.post_request）：线程接线、意图分流与失败回执 ----------
+
+def fake_find_result(**overrides) -> dict:
+    """一份「已经过了 advisor 验收」的 find_candidates 返回（路由只负责编排与透传）。"""
+    base = {
+        "intent": "chat",
+        "reply": "你好呀！想聊点什么方向，还是随便说说话？",
+        "plan_id": None,
+        "shape": None,
+        "steps": [],
+        "candidates": [],
+        "recommended_start": None,
+        "start_reason": None,
+        "clarify": None,
+        "shape_change": None,
+        "source": {"name": "route_only", "networked": False},
+        "profile_basis": {"total": 1, "missing_categories": []},
+        "banned_titles": [],
+        "feedback_lines": [],
+        "attempts": 1,
+        "calls": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_route_search_returns_thread_identity_and_intent(conn, monkeypatch):
+    """路由把线程身份与意图带回：新探索带回头请求 id；chat 轮不落候选、不记追问。"""
+    add_profile(conn, "long_axis", "主线")
+    seen: dict = {}
+
+    def fake_find(conn_, raw_text, **kwargs):
+        seen["raw_text"] = raw_text
+        assert kwargs["thread"]["request_id"] > 0
+        return fake_find_result()
+
+    monkeypatch.setattr(advisor, "find_candidates", fake_find)
+    response = main.post_request(RequestIn(kind="search", raw_text="hi"), conn)
+
+    assert response["thread_id"] == response["request_id"]  # 新线程身份 = 本行 id
+    assert response["intent"] == "chat" and response["reply"]
+    assert response["candidate_ids"] == []
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"] == 0
+
+
+def test_route_persists_reply_and_replays_only_same_thread_success(conn, monkeypatch):
+    add_profile(conn, "long_axis", "主线")
+    monkeypatch.setattr(advisor, "find_candidates", lambda *a, **k: fake_find_result(reply="前一轮助手回复"))
+    first = main.post_request(RequestIn(kind="search", raw_text="第一问"), conn)
+    other = main.post_request(RequestIn(kind="search", raw_text="另一段"), conn)
+    history = main.get_learning_requests(conn=conn)["requests"]
+    assert history[1]["utterance"] == "第一问"
+    assert history[1]["intent"] == "chat"
+    assert history[1]["reply"] == "前一轮助手回复"
+    assert history[1]["status"] == "success"
+    assert other["thread_id"] != first["thread_id"]
+    conversation = advisor._thread_conversation(conn, first["thread_id"], None)
+    assert conversation == ["我：第一问", "助手（chat）：前一轮助手回复"]
+
+
+def test_keep_shape_route_exact_target_and_refresh_decision(conn):
+    thread = advisor.record_request(conn, "search", "一段探索")
+    proposal_id = advisor.record_request(conn, "search", "解释形态", thread_id=thread)
+    advisor.commit_round(
+        conn, request_id=proposal_id, thread={"thread_head": thread}, answer=None,
+        clarify=None, intent="chat", reply="建议切换",
+        shape_change={"from": "directions", "to": "path", "reason": "有先后关系"},
+    )
+    with pytest.raises(HTTPException) as wrong:
+        main.post_keep_shape(main.KeepShapeIn(thread_id=thread, shape_change_request_id=thread), conn)
+    assert wrong.value.status_code == 409
+    result = main.post_keep_shape(main.KeepShapeIn(thread_id=thread, shape_change_request_id=proposal_id), conn)
+    assert result["decision"] == "keep" and result["shape"] == "directions"
+    assert advisor.list_search_requests(conn)[0]["shape_change"]["decision"] == "keep"
+    with pytest.raises(HTTPException) as repeated:
+        main.post_keep_shape(main.KeepShapeIn(thread_id=thread, shape_change_request_id=proposal_id), conn)
+    assert repeated.value.status_code == 409
+
+
+def test_route_thread_plan_mismatch_is_409(conn):
+    """线程归属锁在头请求上：换计划续问要 409，不悄悄换线（I-02）。"""
+    add_profile(conn, "long_axis", "主线")
+    plan_a = ledger.create_active(conn, "plan", {"goal": "学 A"}, actor="user")
+    plan_b = ledger.create_active(conn, "plan", {"goal": "学 B"}, actor="user")
+    head = advisor.record_request(conn, "search", "关于 A 的问题", plan_a)
+
+    with pytest.raises(HTTPException) as excinfo:
+        main.post_request(
+            RequestIn(kind="search", raw_text="接着聊", plan_id=plan_b, thread_id=head), conn
+        )
+    assert excinfo.value.status_code == 409
+
+
+def test_route_failure_reports_input_saved_and_retry(conn, monkeypatch):
+    """模型失败的回执契约（V-02）：400、输入已记录、追问未消费、可原样重试。"""
+    add_profile(conn, "long_axis", "主线")
+    head = advisor.record_request(conn, "search", "学什么好")
+    advisor.record_clarify(conn, head, {"question": "每周几小时？", "missing": "生活习惯"})
+
+    monkeypatch.setattr(
+        advisor, "find_candidates", lambda *a, **k: (_ for _ in ()).throw(advisor.AdvisorError("两次不合格"))
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.post_request(
+            RequestIn(kind="search", raw_text="学什么好", clarify_answer="每周 5 小时",
+                      clarify_request_id=head, thread_id=head),
+            conn,
+        )
+    assert excinfo.value.status_code == 400
+    assert "已记录" in excinfo.value.detail and "重试" in excinfo.value.detail
+    row = conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (head,)).fetchone()
+    assert advisor._stored_clarify(row["clarify"])["answer"] is None  # 回答没被消费
+
+
+def test_route_success_closes_the_clarify_after_candidates(conn, monkeypatch):
+    """成功路径的收尾顺序：候选落库之后才把追问置为已答（I-03 原子化的路由侧证明）。"""
+    add_profile(conn, "long_axis", "主线")
+    head = advisor.record_request(conn, "search", "学什么好")
+    advisor.record_clarify(conn, head, {"question": "每周几小时？", "missing": "生活习惯"})
+
+    monkeypatch.setattr(
+        advisor, "find_candidates",
+        lambda *a, **k: fake_find_result(intent="chat", reply="明白了，那我按这个来。"),
+    )
+    response = main.post_request(
+        RequestIn(kind="search", raw_text="学什么好", clarify_answer="每周 5 小时",
+                  clarify_request_id=head, thread_id=head),
+        conn,
+    )
+    assert response["thread_id"] == head
+    row = conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (head,)).fetchone()
+    assert advisor._stored_clarify(row["clarify"])["answer"] == "每周 5 小时"
+
+
+def test_same_batch_duplicate_titles_are_unqualified(conn):
+    """同批重复（II-04）：一份清单里两条同一件事＝拿重复凑条数，判不合格带原因重试。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    first = list_json(
+        [candidate("学 FastAPI", [axis]), candidate("学 SQL", [axis]), candidate("学 Linux", [axis])]
+    )
+    dup = list_json(
+        [candidate("学 FastAPI", [axis]), candidate("学  FastAPI", [axis]), candidate("学 SQL", [axis])]
+    )
+    transport = ScriptedTransport(dup, first)
+
+    result = advisor.find_candidates(conn, "学什么", transport=transport)
+
+    assert result["attempts"] == 2  # 第一次同批重复被判不合格、带原因重说后通过
+
+
+# ---------- 复核整改回归（F1–F6，2026-09-28） ----------
+#
+# 上一轮 E-61 落了线程/意图/形态锁，独立复核发现六处行为缺口；这一段把它们逐条钉住。
+
+# ---------- F1：续聊保留原题（不信任客户端） ----------
+
+def test_continuation_input_keeps_the_head_utterance_without_the_client(conn):
+    """F1：续聊的原题由后端从线程头取——客户端只发新话时原题不丢；重发原题时不重复拼。"""
+    make_provider(conn)
+    add_profile(conn, "long_axis", "主线")
+    original = "我想在入冬前养成跑步的习惯"
+    transport1 = ScriptedTransport(need_info_json("你现在每周能稳定投入几次？", "生活习惯"))
+    thread, first_id, _ = drive_round(conn, original, transport1)
+
+    # 客户端续聊只发新话（没带原题）：基底仍是线程头原题，新话以【这轮要说】缀在后面
+    transport2 = ScriptedTransport(chat_json("好，记下了"))
+    _, second_id, _ = drive_round(
+        conn, "另外我还想练核心力量", transport2, thread_id=thread["thread_id"]
+    )
+    stored = conn.execute(
+        "SELECT raw_text FROM learning_request WHERE id = ?", (second_id,)
+    ).fetchone()
+    assert stored["raw_text"] == f"{original}\n【这轮要说】另外我还想练核心力量"
+    prompt = transport2.seen[0]["payload"]["messages"][-1]["content"]
+    assert original in prompt and "另外我还想练核心力量" in prompt
+
+    # 客户端把原题原样重发一遍（无新话无回答）：不重复拼
+    transport3 = ScriptedTransport(chat_json("嗯嗯"))
+    _, third_id, _ = drive_round(conn, original, transport3, thread_id=thread["thread_id"])
+    stored = conn.execute(
+        "SELECT raw_text FROM learning_request WHERE id = ?", (third_id,)
+    ).fetchone()
+    assert stored["raw_text"] == original
+
+    # 答追问轮：基底仍是原题，追问与回答缀在后面（原话永远在场）
+    transport4 = ScriptedTransport(four([1]))
+    _, fourth_id, fourth = drive_round(
+        conn,
+        original,
+        transport4,
+        thread_id=thread["thread_id"],
+        clarify_request_id=first_id,
+        answer="每周 3 次",
+    )
+    assert fourth["intent"] == "candidates"
+    stored = conn.execute(
+        "SELECT raw_text FROM learning_request WHERE id = ?", (fourth_id,)
+    ).fetchone()
+    assert stored["raw_text"] == (
+        f"{original}\n【追问】你现在每周能稳定投入几次？\n【我的回答】每周 3 次"
+    )
+
+
+# ---------- F3：线程头严核 ----------
+
+def test_thread_head_must_be_a_search_head_row(conn):
+    """F3：后续轮 id / 四问 id 冒充线程号、兼容路径换计划——一律 ThreadConflict。"""
+    plan_a = ledger.create_active(conn, "plan", {"goal": "A"}, actor="user")
+    plan_b = ledger.create_active(conn, "plan", {"goal": "B"}, actor="user")
+    head = advisor.record_request(conn, "search", "线程头", plan_a)
+    follower = advisor.record_request(conn, "search", "后续一轮", plan_a, head)
+    evaluate_id = advisor.record_request(conn, "evaluate", "这是一次四问")
+
+    # 后续轮的 id 不是线程头（它的 thread_id 指向头，不等于自己）
+    with pytest.raises(advisor.ThreadConflict) as err:
+        advisor.resolve_thread(conn, thread_id=follower, plan_id=plan_a, clarify_request_id=None)
+    assert "不是一段探索的开头" in str(err.value)
+    # 四问行的 id 更不能当线程号
+    with pytest.raises(advisor.ThreadConflict):
+        advisor.resolve_thread(conn, thread_id=evaluate_id, plan_id=None, clarify_request_id=None)
+    # 兼容路径：R 是四问行 → 拒；反推出的头行换计划 → 拒（F3 补的校验）
+    with pytest.raises(advisor.ThreadConflict):
+        advisor.resolve_thread(conn, thread_id=None, plan_id=None, clarify_request_id=evaluate_id)
+    with pytest.raises(advisor.ThreadConflict) as err:
+        advisor.resolve_thread(conn, thread_id=None, plan_id=plan_b, clarify_request_id=follower)
+    assert f"这段探索属于计划 #{plan_a}" in str(err.value)
+    # 正路仍通：头号 + 同计划
+    ok = advisor.resolve_thread(conn, thread_id=head, plan_id=plan_a, clarify_request_id=None)
+    assert ok["thread_head"] == head
+    legacy_ok = advisor.resolve_thread(
+        conn, thread_id=None, plan_id=plan_a, clarify_request_id=follower
+    )
+    assert legacy_ok["thread_head"] == head
+
+
+# ---------- F4：并发回答的原子占用 ----------
+
+def test_concurrent_answers_claim_the_clarify_atomically(conn):
+    """F4：同一追问被两路并发回答——后到的被挡下，回答不许被重复消费；放锁后可重试。"""
+    head = advisor.record_request(conn, "search", "学什么好")
+    advisor.record_clarify(conn, head, {"question": "每周几小时？", "missing": "生活习惯"})
+
+    first = advisor.resolve_thread(
+        conn, thread_id=head, plan_id=None, clarify_request_id=head, answer="每周 5 小时"
+    )
+    assert first["pending_clarify"]["request_id"] == head
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (head,)).fetchone()["clarify"]
+    )
+    assert stored["claimed_at"]  # 占用已记下
+
+    with pytest.raises(advisor.ThreadConflict) as err:
+        advisor.resolve_thread(
+            conn, thread_id=head, plan_id=None, clarify_request_id=head, answer="每周 5 小时"
+        )
+    assert "另一轮回答接管" in str(err.value)
+
+    # 失败路径放锁之后，原样重试能接回同一条追问
+    advisor.release_clarify_claim(conn, head, first["claim_token"])
+    again = advisor.resolve_thread(
+        conn, thread_id=head, plan_id=None, clarify_request_id=head, answer="每周 5 小时"
+    )
+    assert again["pending_clarify"]["request_id"] == head
+
+
+def test_stale_claim_from_a_crashed_round_can_be_taken_over(conn):
+    """F4：占用带时间戳——超过保鲜期的残留占用（进程崩溃留下的）可重新接管，不会永久锁死。"""
+    head = advisor.record_request(conn, "search", "学什么好")
+    advisor.record_clarify(conn, head, {"question": "每周几小时？", "missing": "生活习惯"})
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+    raw = json.dumps(
+        {"question": "每周几小时？", "missing": "生活习惯", "answer": None, "claimed_at": stale},
+        ensure_ascii=False,
+    )
+    conn.execute("UPDATE learning_request SET clarify = ? WHERE id = ?", (raw, head))
+    conn.commit()
+
+    thread = advisor.resolve_thread(
+        conn, thread_id=head, plan_id=None, clarify_request_id=head, answer="现在 5 小时"
+    )
+    assert thread["pending_clarify"]["request_id"] == head
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (head,)).fetchone()["clarify"]
+    )
+    assert stored["claimed_at"] != stale  # 旧占用被刷新成现在
+
+
+def test_success_round_replaces_the_claim_with_the_answer(conn):
+    """F4：成功收尾把占用换成「已答」——JSON 里既有 answer 又没有 claimed_at。"""
+    make_provider(conn)
+    add_profile(conn, "long_axis", "主线")
+    head = advisor.record_request(conn, "search", "学什么好")
+    advisor.record_clarify(conn, head, {"question": "每周几小时？", "missing": "生活习惯"})
+
+    drive_round(
+        conn,
+        "学什么好",
+        ScriptedTransport(four([1])),
+        thread_id=head,
+        clarify_request_id=head,
+        answer="每周 5 小时",
+    )
+
+    stored = json.loads(
+        conn.execute("SELECT clarify FROM learning_request WHERE id = ?", (head,)).fetchone()["clarify"]
+    )
+    assert stored["answer"] == "每周 5 小时"
+    assert "claimed_at" not in stored  # 「已答」取代「作答中」
+    assert advisor.resolve_thread(
+        conn, thread_id=head, plan_id=None, clarify_request_id=None
+    )["pending_clarify"] is None
+
+
+# ---------- F6：redo 才更替旧候选 ----------
+
+def test_non_redo_candidate_round_keeps_the_previous_version_decidable(conn):
+    """F6：普通候选轮不动旧未裁定候选——两版并存，旧的仍可裁定；已采纳的永不过期。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    t1, r1, _ = drive_round(conn, "第一版", ScriptedTransport(four([axis])))
+    ids1 = candidate_ids_of(conn, r1)
+    _, r2, _ = drive_round(
+        conn, "续聊里模型又给了清单", ScriptedTransport(four([axis])), thread_id=t1["thread_id"]
+    )
+    ids2 = candidate_ids_of(conn, r2)
+
+    statuses = statuses_of(conn, ids1 + ids2)
+    assert all(status == "proposed" for status in statuses.values())  # 两版并存，谁也没动谁
+    # 旧版仍可裁定（「新方向」的候选采纳要指明落点计划，SPEC 决策 33 ②）
+    landing = ledger.create_active(conn, "plan", {"goal": "承接采纳"}, actor="user")
+    advisor.decide_candidate(conn, ids1[0], accept=True, plan_id=landing)
+    statuses = statuses_of(conn, ids1 + ids2)
+    assert statuses[ids1[0]] == "accepted"
+
+    # 明确重做（redo=True）才更替：未裁定的全过期，已采纳的永不过期
+    _, r3, _ = drive_round(
+        conn, "明确重做一版", ScriptedTransport(four([axis])),
+        thread_id=t1["thread_id"], redo=True,
+    )
+    ids3 = candidate_ids_of(conn, r3)
+    statuses = statuses_of(conn, ids1 + ids2 + ids3)
+    assert statuses[ids1[0]] == "accepted"
+    assert all(statuses[cid] == "expired" for cid in ids1[1:] + ids2)
+    assert all(statuses[cid] == "proposed" for cid in ids3)
+
+
+def test_explicit_redo_replaces_the_same_thread_only(conn):
+    """F6：redo=True 只更替本线程旧候选；跨线程（哪怕同计划）依旧不动。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+    plan_id = ledger.create_active(conn, "plan", {"goal": "计划"}, actor="user")
+    t1, r1, _ = drive_round(conn, "第一版", ScriptedTransport(four([axis])), plan_id=plan_id)
+    ids1 = candidate_ids_of(conn, r1)
+    t2, r2, _ = drive_round(conn, "另一条线程", ScriptedTransport(four([axis])), plan_id=plan_id)
+    ids2 = candidate_ids_of(conn, r2)
+
+    _, r3, _ = drive_round(
+        conn, "重做第一版", ScriptedTransport(four([axis])),
+        thread_id=t1["thread_id"], plan_id=plan_id, redo=True,
+    )
+    ids3 = candidate_ids_of(conn, r3)
+    statuses = statuses_of(conn, ids1 + ids2 + ids3)
+    assert all(statuses[cid] == "expired" for cid in ids1)
+    assert all(statuses[cid] == "proposed" for cid in ids2)  # 跨线程不自动过期
+    assert all(statuses[cid] == "proposed" for cid in ids3)
+
+
+# ---------- 模型错误自报的完整失败链路 ----------
+
+def test_model_self_report_failures_get_one_reason_carrying_retry_then_error(conn):
+    """模型错误自报走全链路（不许只测理想输出）：判不合格 → 带原因重试 → 第二次仍错就
+    报错、不落任何候选。三个场景：该给 chat 的轮硬给 candidates、path 线程硬给
+    directions、确认切形态时给错目标。"""
+    make_provider(conn)
+    axis = add_profile(conn, "long_axis", "主线")
+
+    # ① 寒暄轮硬给 candidates（自报 chat 却塞了清单）
+    chatty = chat_json("在呢", candidates=[candidate(f"方向 {i}", [axis]) for i in range(3)])
+    transport1 = ScriptedTransport(chatty, chatty)
+    with pytest.raises(advisor.AdvisorError) as err1:
+        advisor.find_candidates(conn, "hi", transport=transport1)
+    assert "不该给候选" in transport1.seen[1]["payload"]["messages"][-1]["content"]
+    assert "连着 2 次" in str(err1.value)
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"] == 0
+
+    # ② path 线程硬给 directions（形态锁拦下，重试理由指路 chat + shape_change）
+    thread, _, _ = drive_round(conn, "学 agent 开发怎么学", ScriptedTransport(path_json([axis])))
+    directions = list_json([candidate(f"方向 {i}", [axis]) for i in range(3)])
+    transport2 = ScriptedTransport(directions, directions)
+    with pytest.raises(advisor.AdvisorError):
+        drive_round(conn, "接着聊", transport2, thread_id=thread["thread_id"])
+    assert "形态已定为 path" in transport2.seen[1]["payload"]["messages"][-1]["content"]
+    before = conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"]
+
+    # ③ 确认切形态却给错目标（要 directions，模型咬死 path）——两次都错就报错
+    explanation = chat_json(
+        "你想挑着学", shape_change={"from": "path", "to": "directions", "reason": "没有先后依赖"}
+    )
+    drive_round(
+        conn, "给我几个方向挑挑", ScriptedTransport(explanation), thread_id=thread["thread_id"]
+    )
+    stubborn = path_json([axis])
+    transport3 = ScriptedTransport(stubborn, stubborn)
+    with pytest.raises(advisor.AdvisorError) as err3:
+        drive_round(
+            conn, "确认切换", transport3, thread_id=thread["thread_id"],
+            allow_shape_switch=True, expected_shape="directions",
+        )
+    assert "切换到 directions" in transport3.seen[1]["payload"]["messages"][-1]["content"]
+    assert "没有落任何候选" in str(err3.value)
+    # 三轮失败都没落新候选：库里还是 path 那一轮的 1 条伞候选
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate").fetchone()["n"] == before

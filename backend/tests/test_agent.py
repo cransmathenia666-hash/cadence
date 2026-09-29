@@ -466,7 +466,9 @@ def test_it_still_cannot_write_anything(conn):
         ),
     )
 
-    done = dialogue.say(conn, plan_id, "下周我要出差", transport=transport)
+    # 原话从「下周我要出差」改成带明确修改要求的说法：只陈述事件不再算修改授权
+    # （决策 44 的第二道闸，2026-09-28），改哪里、改成什么说出来了才许提建议。
+    done = dialogue.say(conn, plan_id, "下周我要出差，把读 MDN 的截止日改到 10-08", transport=transport)
 
     landed = pending_changes(conn)
     assert done["suggestion"] is not None and len(landed) == 1

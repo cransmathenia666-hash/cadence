@@ -167,6 +167,16 @@ def main() -> int:
         checker.expect("任务状态", checked["node_status"], "done")
         checker.expect("只打勾时还不产提案（差交付物）", checked["proposal_id"], None)
 
+        # 放回（2026-09-28 补的出口）：打勾是一键动作，手滑要能退回来，理由进台账。
+        # 走完这两条再打回去，后面几步看到的连还是一样的（落后量、交付物判定都不受影响）。
+        status, reopened = request(base, "POST", f"/api/plan/nodes/{task['id']}/reopen",
+                                   {"reason": "冒烟：手滑打勾了"})
+        checker.expect("放回后回到进行中", (status, reopened["node_status"]), (200, "in_progress"))
+        status, no_reason = request(base, "POST", f"/api/plan/nodes/{task['id']}/reopen",
+                                    {"reason": "   "})
+        checker.expect("放回缺理由被拒（业务拒绝 400）", status, 400)
+        request(base, "POST", f"/api/plan/nodes/{task['id']}/check")  # 打回完成，接着往下走
+
         status, delivered = request(base, "POST", f"/api/plan/nodes/{stage['id']}/deliverable", {
             "url": "https://example.com/smoke", "note": "冒烟：交付物提交",
         })

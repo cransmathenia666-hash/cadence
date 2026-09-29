@@ -36,6 +36,7 @@ from . import (
     profile,
     proposals,
 )
+from .db import atomic
 
 app = FastAPI(
     title="cadence",
@@ -123,6 +124,9 @@ _FIELD_LABELS: dict[str, str] = {
     "accept": "是否采纳",
     "kind": "类型",
     "clarify_answer": "对追问的回答",
+    "clarify_request_id": "追问所属轮次",
+    "thread_id": "探索线程",
+    "allow_shape_switch": "形态切换确认",
 }
 
 # Pydantic 的错误类型 → 中文说明。没登记的类型回退用原始的英文 msg——
@@ -608,6 +612,31 @@ class RequestIn(BaseModel):
             "没有待答的追问时，这句话会作为补充缀在 raw_text 后面，不会被丢掉"
         ),
     )
+    clarify_request_id: int | None = Field(
+        default=None,
+        description="回答哪一轮的追问；前端有明确轮次时传入，避免同计划多轮串台",
+    )
+    thread_id: int | None = Field(
+        default=None,
+        description=(
+            "延续哪段探索线程（线程头请求的 id，search 用，决策 44 ①）。"
+            "不传 = 开一段新探索：同句原话的两次提问也是两段独立线程，不会被合并"
+        ),
+    )
+    allow_shape_switch: bool = Field(
+        default=False,
+        description=(
+            "用户已确认切换「多方向 / 一路径」形态的那一轮置 true（search 用，决策 44 ③）："
+            "后端会核对这段线程确有待确认的切换提案，且模型给的形态与提案目标一致才放行"
+        ),
+    )
+    redo: bool = Field(
+        default=False,
+        description=(
+            "用户明确要求重做推荐的那一轮置 true（search 用，决策 44 ①）：只有 redo 轮落新候选"
+            "才让同线程上一版未裁定候选过期；普通续聊里模型给的候选照常落库、旧版原样保留"
+        ),
+    )
 
 
 class VerdictIn(BaseModel):
@@ -638,67 +667,177 @@ def get_profile(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     return advisor.read_profile(conn)
 
 
+def _search_round(conn: sqlite3.Connection, payload: RequestIn) -> dict:
+    """「找方向」一轮的完整编排（决策 44 ①，I-01～I-05 + 复核整改）。
+
+    顺序就是失败契约（V-02）：线程确认（答追问时原子占用）→ 拼输入（不落状态，续聊的
+    原题由后端从线程头取，不信任客户端重发）→ 落输入行 → 调模型 → 候选落库 →
+    追问状态收尾（置已答 + 记新追问 + 记形态切换提案）。
+
+    - 线程确认失败 / 并发抢占失败（409）：什么都没写（或占用根本没抢到），用户回原线程或稍后重试。
+    - 形态切换确认（allow_shape_switch）**不是客户端说了算**：放行前核对本段线程确有
+      待确认的切换提案，模型给的形态还要与提案目标一致，否则 409 / 判不合格。
+    - 模型失败（400）：**占用释放、输入行已留痕、要答的追问仍未算已答、候选没有落**——
+      可原样重试（失败必须放锁，否则重试会被自己的残留占用挡住）。
+    - 意图分流（II-01）：chat / need_info 轮不落候选；candidates 轮只有 `redo`（用户明确
+      要求重做）才更替同线程旧未裁定候选，普通轮落了候选也不动旧版（复核整改）。
+    """
+    # 回答要先算出来：resolve_thread 靠它判断「这轮要不要原子占用那条追问」
+    answer = str(payload.clarify_answer or "").strip() or None
+    try:
+        thread = advisor.resolve_thread(
+            conn,
+            thread_id=payload.thread_id,
+            plan_id=payload.plan_id,
+            clarify_request_id=payload.clarify_request_id,
+            answer=answer,
+        )
+    except advisor.ThreadConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    pending = thread.get("pending_clarify")
+    # 「答追问」这轮从 resolve_thread 起就原子占用了那条追问；以下任何失败路径都要放锁
+    claimed = pending is not None and answer is not None
+
+    def _release() -> None:
+        if claimed:
+            advisor.release_clarify_claim(conn, int(pending["request_id"]), thread.get("claim_token"))
+
+    # 形态切换的放行核验在调模型**之前**：客户端布尔值只算申请，凭据是线程里那份
+    # 待确认提案（它还给出了切换的目标形态，模型给的必须一致）。
+    thread["request_id"] = None
+    thread["allow_shape_switch"] = bool(payload.allow_shape_switch)
+    thread["redo"] = bool(payload.redo)
+    if payload.allow_shape_switch:
+        proposal = advisor.pending_shape_change(conn, thread.get("thread_head"))
+        if proposal is None:
+            _release()
+            raise HTTPException(
+                status_code=409,
+                detail="这段探索里没有待确认的形态切换——先让模型说明它为什么想换，再决定切不切",
+            )
+        thread["expected_shape"] = proposal["to"]
+
+    try:
+        model_input = advisor.build_round_input(
+            conn, utterance=payload.raw_text, answer=answer, thread=thread
+        )
+        request_id = advisor.record_request(
+            conn, "search", model_input, payload.plan_id, thread_id=thread["thread_id"], utterance=payload.raw_text
+        )
+        # 新线程：身份刚刚定为本次输入行（record_request 里回填）；后续调用用同一份上下文
+        thread["request_id"] = request_id
+        if thread["thread_id"] is None:
+            thread["thread_id"] = thread["thread_head"] = request_id
+
+        found = advisor.find_candidates(
+            conn, model_input, plan_id=payload.plan_id, thread=thread
+        )
+    except advisor.ThreadConflict as error:
+        _release()
+        if thread["request_id"] is not None:
+            advisor.fail_round(conn, thread["request_id"])
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (advisor.AdvisorError, llm.LlmError) as error:
+        _release()
+        if thread["request_id"] is not None:
+            advisor.fail_round(conn, thread["request_id"])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{error}——你的这一轮输入已记录；要答的追问还没算已答、候选没有落库，"
+                "可原样重试"
+            ),
+        ) from error
+
+    # 候选、更替、追问消费和回话同属一轮成功结果。台账 helper 会 commit，
+    # 因此在连接级原子单元里统一延迟提交，任何中途异常都不会留半轮结果。
+    try:
+        with atomic(conn):
+            candidate_ids = advisor._propose_candidates_locked(
+                conn,
+                request_id=request_id,
+                result=found,
+                thread_id=thread["thread_id"],
+                redo=bool(found.get("redo", payload.redo)),
+            )
+            advisor.commit_round(
+                conn,
+                request_id=request_id,
+                thread=thread,
+                answer=answer,
+                clarify=found["clarify"],
+                shape_change=found.get("shape_change"),
+                intent=found["intent"],
+                reply=found["reply"],
+            )
+    except advisor.ThreadConflict as error:
+        _release()
+        advisor.fail_round(conn, request_id)
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception:
+        _release()
+        advisor.fail_round(conn, request_id)
+        raise
+    return {
+        "request_id": request_id,
+        "kind": "search",
+        # 本轮归属的探索线程（新探索这里带回头请求 id，前端记下来后续带着它续问）
+        "thread_id": thread["thread_id"],
+        # 意图出口（II-01）：candidates=候选清单；chat/need_info=纯回应，看 reply
+        "intent": found["intent"],
+        # 本轮是否按「明确重做」处理（只有它才更替同线程旧未裁定候选）
+        "redo": bool(found.get("redo", payload.redo)),
+        "reply": found["reply"],
+        "plan_id": found["plan_id"],
+        "shape": found["shape"],
+        "steps": found["steps"],
+        "candidate_ids": candidate_ids,
+        "candidates": found["candidates"],
+        "recommended_start": found["recommended_start"],
+        "start_reason": found["start_reason"],
+        "clarify": found["clarify"],
+        # 形态切换请求（II-02）：模型认为新事实推翻原判断时的说明，切不切由用户确认
+        "shape_change": found["shape_change"],
+        "source": found["source"],
+        "profile_basis": found["profile_basis"],
+        "banned_titles": found["banned_titles"],
+        "feedback_lines": found["feedback_lines"],
+        "calls": found["calls"],
+    }
+
+
 @app.post("/api/requests", status_code=201)
 def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     """提交每轮输入。两种形态按 `kind` 分流，都不写档案、不写计划。
 
     - `evaluate`（B 入口）：记一行输入 → 跑四问（最多调 2 次模型）→ 落一条 `pending` 提案。
-    - `search`（A 入口，T13）：记一行输入 → 生成 3–5 条带排序的候选（最多调 2 次模型）
-      → 落成 `proposed` 候选，等你在界面上采纳 / 否决。
+    - `search`（A 入口，T13）：先确认探索线程（`thread_id`，决策 44 ①）→ 记一行输入 →
+      模型自报意图（chat / need_info / candidates）→ 只有 candidates 轮落候选
+      （同线程版本更替）；need_info 轮的追问在本轮请求行上，**模型成功后才置已答**，
+      失败可原样重试。
 
     `plan_id` 是这一轮针对的计划（SPEC 决策 33 ①）：带上它，「找」会把该计划的当前阶段
-    当上下文；不传 = 「新方向（不属于任何计划）」。
-
-    `clarify` 是「找」的追问槽位（SPEC 决策 35 ②）：模型觉得档案缺了某类信息时会先问一句，
-    你回答的那句话就是下一轮的输入。
+    当上下文；不传 = 「新方向（不属于任何计划）」。线程归属锁在它的头请求上——
+    换计划续问会被 409 拒绝，不悄悄替你换线。
 
     `shape` 与 `steps` 是 2026-09-20 T34 新增的（SPEC 决策 41）：这一轮它给的是一条路
-    （`path`：1 条伞候选 + 2–8 个先后步骤）还是几个互相竞争的方向（`directions`）。
-    `path` 时那一轮只落**一行**伞候选，步骤进它的 payload——步骤不单独裁定、不进禁区。
+    还是几个互相竞争的方向；形态在线程上锁定，模型要改判先说明、由你确认
+    （`allow_shape_switch`）后才会重算（决策 44 ③）。
 
-    回答追问走 `clarify_answer`（T36）：原话保留在输入最前，追问与回答缀在后面
-    （2026-09-26 走查整改——原来只拼「原问题 + 回答」，原话第二轮起就丢了），并把那条
-    追问标成已答（进反馈流水，后续轮次不再重复问同一件事）。
+    回答追问走 `clarify_answer`（T36）：原话保留在输入最前，追问与回答缀在后面。
     """
-    raw_text = payload.raw_text
-    if payload.kind == "search" and str(payload.clarify_answer or "").strip():
-        raw_text = advisor.compose_clarify_round(
-            conn, payload.raw_text, str(payload.clarify_answer), payload.plan_id
-        )
+    if payload.kind == "search":
+        return _search_round(conn, payload)
 
-    request_id = advisor.record_request(conn, payload.kind, raw_text, payload.plan_id)
     try:
-        if payload.kind == "search":
-            found = advisor.find_candidates(conn, raw_text, plan_id=payload.plan_id)
-            candidate_ids = advisor.propose_candidates(
-                conn, request_id=request_id, result=found
-            )
-            if found["clarify"] is not None:
-                # 追问落库（T36）：只记「问了什么、缺哪类」，answer 等你下一轮回答时补上
-                advisor.record_clarify(conn, request_id, found["clarify"])
-            return {
-                "request_id": request_id,
-                "kind": "search",
-                "plan_id": found["plan_id"],
-                "shape": found["shape"],
-                "steps": found["steps"],
-                "candidate_ids": candidate_ids,
-                "candidates": found["candidates"],
-                "recommended_start": found["recommended_start"],
-                "start_reason": found["start_reason"],
-                "clarify": found["clarify"],
-                "source": found["source"],
-                "profile_basis": found["profile_basis"],
-                "banned_titles": found["banned_titles"],
-                "feedback_lines": found["feedback_lines"],
-                "calls": found["calls"],
-            }
-        result = advisor.judge(conn, raw_text)
+        result = advisor.judge(conn, payload.raw_text)
     except advisor.AdvisorError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except llm.LlmError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+    request_id = advisor.record_request(conn, payload.kind, payload.raw_text, payload.plan_id)
     proposal_id = advisor.propose(
         conn, request_id=request_id, raw_text=payload.raw_text, result=result
     )
@@ -712,17 +851,52 @@ def post_request(payload: RequestIn, conn: sqlite3.Connection = Depends(get_conn
     }
 
 
+class KeepShapeIn(BaseModel):
+    thread_id: int = Field(description="探索线程头请求的 id")
+    shape_change_request_id: int = Field(description="要保持原形态的确切提案轮次 id")
+
+
+@app.post("/api/find/shape/keep")
+def post_keep_shape(payload: KeepShapeIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    try:
+        advisor.resolve_thread(
+            conn, thread_id=payload.thread_id, plan_id=_thread_plan_id(conn, payload.thread_id),
+            clarify_request_id=None,
+        )
+        return advisor.keep_shape_change(conn, payload.thread_id, payload.shape_change_request_id)
+    except advisor.ThreadConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def _thread_plan_id(conn: sqlite3.Connection, thread_id: int) -> int | None:
+    row = conn.execute("SELECT plan_id FROM learning_request WHERE id = ?", (thread_id,)).fetchone()
+    return None if row is None else row["plan_id"]
+
+
+@app.get("/api/learning-requests")
+def get_learning_requests(
+    plan_id: int | None = None,
+    limit: int = 50,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict:
+    """读取「找方向」历史轮次，供候选页恢复原问题与追问状态。"""
+    return {"requests": advisor.list_search_requests(conn, plan_id=plan_id, limit=limit)}
+
+
 @app.get("/api/candidates")
 def get_candidates(
-    request_id: int | None = None, conn: sqlite3.Connection = Depends(get_conn)
+    request_id: int | None = None,
+    thread_id: int | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict:
-    """取候选清单。不传 `request_id` 就取最近一轮有候选的那次「找」。
+    """取候选清单。`request_id` 指定看哪一轮；`thread_id` 指定看哪段探索线程
+    （取该线程内最近一条有候选的请求）；都不传就取最近一轮有候选的那次「找」。
 
     没有候选时返回 `request_id: null` 与空列表——「还没问过」不是错误，前端不必先探一次。
     返回里带每条候选的状态：界面要能看出哪些是自己已经否掉过的（去重是「不再推荐」，
     不是「假装它没发生过」）。
     """
-    return advisor.list_candidates(conn, request_id)
+    return advisor.list_candidates(conn, request_id, thread_id)
 
 
 @app.post("/api/candidates/{candidate_id}/verdict",

@@ -73,9 +73,11 @@ def found_json(*titles: str) -> str:
     """一份合格的「找」输出（依据 id 由调用方保证存在）。
 
     `shape` 是必填的（T34）：这几个用例要的都是「几条互相竞争的方向」，所以写 directions。
+    `intent` 也是必填的（决策 44 ①）：这些用例走的就是候选轮。
     """
     return json.dumps(
         {
+            "intent": "candidates",
             "shape": "directions",
             "candidates": [
                 {

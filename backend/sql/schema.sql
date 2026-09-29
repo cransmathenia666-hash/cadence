@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS learning_request (
   raw_text   TEXT    NOT NULL,
   plan_id    INTEGER,
   clarify    TEXT,
+  thread_id  INTEGER,
+  shape_change TEXT,
+  utterance  TEXT,
+  intent     TEXT,
+  reply      TEXT,
+  turn_status TEXT,
   created_at TEXT    NOT NULL
 );
 

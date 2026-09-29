@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import ledger, llm, plan
-from .db import now_iso
+from .db import atomic, now_iso
 from .providers import find
 from .providers.find import Brief
 
@@ -40,6 +42,15 @@ class CandidateNotFound(AdvisorError):
 class CandidateConflict(AdvisorError):
     """候选已裁定过，或采纳的前提不满足（没有 active 计划 / 有同名未收尾阶段）
     → 接口层翻成 409（与现状冲突，不是参数写错）。"""
+
+
+class ThreadConflict(AdvisorError):
+    """线程归属校验失败：线程不存在 / 属于别的计划 / 追问不属于该线程 → 接口层翻 409。
+
+    为什么要专门一类：线程归属错了不该悄悄退化成「当作新问题」或「当作补充」——
+    那正是 I-02 要修的「刷新、切计划后回答生成错误归属」的口子。归属错了就要人挡下来，
+    让用户回到原线程去答。
+    """
 
 
 # 记在 llm_call.task 里的任务名，和 connectivity_test 之类区分开
@@ -128,22 +139,39 @@ def read_profile(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def record_request(
-    conn: sqlite3.Connection, kind: str, raw_text: str, plan_id: int | None = None
+    conn: sqlite3.Connection,
+    kind: str,
+    raw_text: str,
+    plan_id: int | None = None,
+    thread_id: int | None = None,
+    utterance: str | None = None,
 ) -> int:
     """把你的这一轮输入记一行。
 
     `plan_id` = 这一轮针对哪个计划；为空表示「新方向（不属于任何计划）」（SPEC 决策 33 ①）。
     候选随请求继承这个归属，采纳时才知道该落进哪个计划。
 
+    `thread_id` = 这一轮属于哪条探索线程（决策 44 ①）：线程身份 = 线程头请求的 id。
+    `search` 且不传 `thread_id` 就是**新线程**——在同一事务里把该列回填成自己的 id，
+    这样「新线程」与「续线程」落库后长得一样，读侧不用再猜。传了就按传入记（同线程续问）。
+    旧记录该列为 NULL，各自算独立线程——**禁止**靠原话相同把它们合并成一段（I-01）。
+
     这张表是**追加式日志**、不是带状态机业务表，所以不经台账（`ledger` 只管有状态的
     对象）；和 `llm.record_call` 直接插一行记账是同一个道理。
     """
     cursor = conn.execute(
-        "INSERT INTO learning_request (kind, raw_text, plan_id, created_at) VALUES (?, ?, ?, ?)",
-        (kind, raw_text, plan_id, now_iso()),
+        "INSERT INTO learning_request (kind, raw_text, plan_id, thread_id, utterance, turn_status, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (kind, raw_text, plan_id, thread_id, utterance, "pending" if utterance is not None else None, now_iso()),
     )
+    request_id = int(cursor.lastrowid)
+    if kind == "search" and thread_id is None:
+        # 新线程：身份 = 自己的 id。回填与 INSERT 同事务，中途失败就不会留下「无主」的一行。
+        conn.execute(
+            "UPDATE learning_request SET thread_id = ? WHERE id = ?", (request_id, request_id)
+        )
     conn.commit()
-    return int(cursor.lastrowid)
+    return request_id
 
 
 def record_clarify(conn: sqlite3.Connection, request_id: int, clarify: dict[str, Any]) -> None:
@@ -208,40 +236,555 @@ def pending_clarify(conn: sqlite3.Connection, plan_id: int | None) -> dict[str, 
     return {"request_id": int(row["id"]), **stored}
 
 
-def mark_clarify_answered(conn: sqlite3.Connection, request_id: int, answer: str) -> None:
-    """把某一轮问出的追问标记成「已答」（T36）：`answer` 进库，反馈流水因此看得见。"""
+def mark_clarify_answered(
+    conn: sqlite3.Connection, request_id: int, answer: str, owner_token: str | None = None
+) -> bool:
+    """把某一轮问出的追问标记成「已答」（T36）：`answer` 进库，反馈流水因此看得见。
+
+    写入是 CAS（旧值比对，F4 复核整改）：置上 answer 的同时清掉 `claimed_at` 占用标记
+    ——「已答」取代「作答中」。旧值比对失败说明别路刚改过这条 JSON（抢先接管了占用），
+    此刻覆盖别人的写入就是并发重复消费——不覆盖，静默返回。
+    """
     row = conn.execute(
         "SELECT clarify FROM learning_request WHERE id = ?", (request_id,)
     ).fetchone()
-    if row is None:
-        return
-    stored = _stored_clarify(row["clarify"])
-    if stored is None:
-        return
-    stored["answer"] = str(answer).strip()
-    conn.execute(
-        "UPDATE learning_request SET clarify = ? WHERE id = ?",
-        (json.dumps(stored, ensure_ascii=False), request_id),
+    if row is None or not row["clarify"]:
+        return False
+    try:
+        data = json.loads(row["clarify"])
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("owner_token") != owner_token:
+        return False
+    if data.get("answer"):
+        return False
+    data["answer"] = str(answer).strip()
+    data.pop("claimed_at", None)  # 「已答」取代「作答中」
+    data.pop("owner_token", None)
+    cursor = conn.execute(
+        "UPDATE learning_request SET clarify = ? WHERE id = ? AND clarify = ?",
+        (json.dumps(data, ensure_ascii=False), request_id, row["clarify"]),
     )
+    if cursor.rowcount == 0:
+        return False  # 别路刚写入过：不覆盖
     conn.commit()
+    return True
+
+
+# 追问占用的保鲜期（F4 复核整改），单位秒。占用记的是「有一路正在答这一条」：正常它要么
+# 被成功轮次以「已答」取代，要么被失败路径的 release 摘掉；只有进程崩溃才会留下残留占用。
+# 给它一个期限、到期视为无主可重新抢占——否则一次崩溃就把这条追问永久锁死。
+CLAIM_TTL_SECONDS = 15 * 60
+
+# 并发抢占失败的固定文案（F4）：不许含糊地说「出错」，要告诉用户该刷新看最新状态。
+_CLAIM_TAKEN_MESSAGE = "这条追问刚被另一轮回答接管，刷新后看最新状态"
+
+
+def _claim_is_stale(claimed_at: str, now: datetime) -> bool:
+    """占用时间戳是否已过保鲜期。解不开的时间戳按残留处理（可抢占）——宁可多放行一次，
+    也不让一条解不开时间的占用把追问变成永久锁。"""
+    try:
+        claimed = datetime.fromisoformat(str(claimed_at))
+    except ValueError:
+        return True
+    if claimed.tzinfo is None:
+        claimed = claimed.astimezone()
+    return (now - claimed).total_seconds() >= CLAIM_TTL_SECONDS
+
+
+def _claim_clarify(conn: sqlite3.Connection, request_id: int) -> str:
+    """对一条待答追问做 CAS 原子占用（F4 复核整改）。
+
+    占用记在 clarify JSON 的 `claimed_at` 字段上（不加列）：读出原 JSON → 写回带占用
+    时间戳的 JSON，UPDATE 带旧值比对——同一追问被两路并发回答时只有一路写得进去，
+    另一路拿到 ThreadConflict，回答不会被重复消费。已有 answer 的没有「作答中」可言。
+    """
+    row = conn.execute(
+        "SELECT clarify FROM learning_request WHERE id = ?", (request_id,)
+    ).fetchone()
+    if row is None or not row["clarify"]:
+        return
+    try:
+        data = json.loads(row["clarify"])
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict) or data.get("answer"):
+        return
+    now = datetime.now().astimezone()
+    claimed_at = data.get("claimed_at")
+    if claimed_at is not None and not _claim_is_stale(str(claimed_at), now):
+        raise ThreadConflict(_CLAIM_TAKEN_MESSAGE)
+    fresh = dict(data)
+    fresh["claimed_at"] = now.isoformat()
+    fresh["owner_token"] = uuid.uuid4().hex
+    cursor = conn.execute(
+        "UPDATE learning_request SET clarify = ? WHERE id = ? AND clarify = ?",
+        (json.dumps(fresh, ensure_ascii=False), request_id, row["clarify"]),
+    )
+    if cursor.rowcount == 0:
+        # 旧值比对失败 = 别路刚刚抢先写入（占了或已答）——CAS 的失败就是它的意义
+        raise ThreadConflict(_CLAIM_TAKEN_MESSAGE)
+    conn.commit()
+    return fresh["owner_token"]
+
+
+def release_clarify_claim(
+    conn: sqlite3.Connection, request_id: int, owner_token: str | None = None
+) -> None:
+    """把占用标记摘掉（CAS 摘，摘不掉就算了）——main.py 的模型失败路径**必须**调它。
+
+    契约（F4）：失败必须放锁，原样重试才能接回同一条追问；不放锁，重试会被自己上一轮
+    的残留占用挡住。摘不掉（别路已接管或已置答）就保留现状——那种情况下保留别人的
+    写入才是对的，不能拿自己的旧快照盖回去。
+    """
+    row = conn.execute(
+        "SELECT clarify FROM learning_request WHERE id = ?", (request_id,)
+    ).fetchone()
+    if row is None or not row["clarify"]:
+        return
+    try:
+        data = json.loads(row["clarify"])
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict) or "claimed_at" not in data:
+        return
+    if data.get("owner_token") != owner_token:
+        return
+    fresh = dict(data)
+    fresh.pop("claimed_at", None)
+    fresh.pop("owner_token", None)
+    cursor = conn.execute(
+        "UPDATE learning_request SET clarify = ? WHERE id = ? AND clarify = ?",
+        (json.dumps(fresh, ensure_ascii=False), request_id, row["clarify"]),
+    )
+    if cursor.rowcount:
+        conn.commit()
 
 
 def compose_clarify_round(
-    conn: sqlite3.Connection, raw_text: str, answer: str, plan_id: int | None
+    conn: sqlite3.Connection,
+    raw_text: str,
+    answer: str,
+    plan_id: int | None,
+    clarify_request_id: int | None = None,
 ) -> str:
     """回答追问的下一轮输入：**最初那句原话必须仍在场**，追问与回答缀在后面。
 
-    2026-09-26 走查抓到：原来只拼「追问问题 + 我的回答」，原话从第二轮追问起就从输入里
-    消失，模型只能拿档案里的旧主线当方向，产出一堆无关候选。现在原话打头，本轮回答的
-    追问紧随其后；更早的已答追问由 `_answered_clarifies` 的背景段补上。
+    有明确轮次时只接受该轮的未回答追问；没有明确轮次时保留旧的最近轮次兜底，
+    兼容旧客户端，但新客户端不再依赖“同计划最近一条”猜测。
     """
     answer = answer.strip()
-    asked = pending_clarify(conn, plan_id)
+    asked: dict[str, Any] | None
+    if clarify_request_id is None:
+        asked = pending_clarify(conn, plan_id)
+    else:
+        row = conn.execute(
+            "SELECT id, plan_id, clarify FROM learning_request "
+            "WHERE id = ? AND kind = 'search'",
+            (clarify_request_id,),
+        ).fetchone()
+        stored = None if row is None else _stored_clarify(row["clarify"])
+        if row is None or row["plan_id"] != plan_id or stored is None or stored["answer"]:
+            asked = None
+        else:
+            asked = {"request_id": int(row["id"]), **stored}
     if asked is None:
         # 没有待答的追问（页面刷新过、或已经答过一遍）：不吞掉你的话，缀在后面
         return f"{raw_text}\n补充：{answer}"
     mark_clarify_answered(conn, asked["request_id"], answer)
     return f"{raw_text}\n【追问】{asked['question']}\n【我的回答】{answer}"
+
+
+# ---------- 探索线程（2026-09-28 双入口整改，SPEC 决策 44 ①） ----------
+#
+# 一段「找方向」的连续对话 = 一条探索线程：线程身份 = 线程头请求的 id，同线程后续行都记
+# 这个 id（`learning_request.thread_id`）。线程为什么必须显式建模：此前「这轮接着上轮吗」
+# 全靠猜——同句原文、同计划最近一条追问，猜错就生成错误归属的候选（I-01/I-02）。
+# 旧记录该列为 NULL，各自算独立线程；不靠原话相同合并，认不准的关系就不认。
+
+
+def _thread_rows_where(thread_id: int | None, alias: str | None = None) -> tuple[str, list[Any]]:
+    """线程范围的一对（WHERE 片段, 参数）：`thread_id = T OR id = T`。
+
+    为什么要 `OR id = T`：线程头自己那行 `thread_id` 就是自己的 id，但**成为线程头的旧记录**
+    该列是 NULL——按 id 把它一并圈进来，旧记录才能作为线程头被新客户端续上。
+    `thread_id` 传 None（全新线程、还没有任何行）时两个等式都不命中，天然得空集，
+    不需要调用方特判。`alias` 给出时列名带表前缀（JOIN 查询里 `id` 有歧义）。
+    """
+    prefix = f"{alias}." if alias else ""
+    return f"({prefix}thread_id = ? OR {prefix}id = ?)", [thread_id, thread_id]
+
+
+def _thread_pending_clarify(conn: sqlite3.Connection, thread_id: int | None) -> dict[str, Any] | None:
+    """这条线程内最近一条**未答**追问；没有就 None。形状同 `pending_clarify` 的返回。
+
+    线程版取代「同计划最近一条」的猜测：追问的归属跟着线程走，不被页面上当前选中的
+    计划带偏（I-02）。取一小批从新往旧找，跳过已答的——线程里问过又答过的行不该挡住
+    更早的未答追问。
+    """
+    where, params = _thread_rows_where(thread_id)
+    rows = conn.execute(
+        f"SELECT id, clarify FROM learning_request"
+        f" WHERE kind = 'search' AND {where} AND clarify IS NOT NULL"
+        f" ORDER BY id DESC LIMIT 20",
+        params,
+    ).fetchall()
+    for row in rows:  # 从最新往回，第一条未答的就是
+        stored = _stored_clarify(row["clarify"])
+        if stored is not None and not stored["answer"]:
+            return {"request_id": int(row["id"]), **stored}
+    return None
+
+
+def _thread_shape(conn: sqlite3.Connection, thread_head: int | None) -> str | None:
+    """线程的形态锁（II-02）：线程内最近一条**有候选**的请求的候选形状。
+
+    形态由线程保持、不由每次模型输出决定——第一次出候选时定形，之后模型想换
+    `directions`↔`path` 必须走用户确认（`allow_shape_switch`），不能靠自报字段漂移。
+    线程还没出过候选（或 `thread_head` 为 None 的全新线程）→ None = 无锁，首轮自由定形。
+    形状从 `candidate.payload` 解（与渲染同一把尺），旧候选没 payload 按 directions。
+    """
+    if thread_head is None:
+        return None
+    where, params = _thread_rows_where(thread_head, alias="r")
+    row = conn.execute(
+        f"SELECT c.payload FROM candidate c"
+        f" JOIN learning_request r ON r.id = c.request_id"
+        f" WHERE {where}"
+        f" ORDER BY r.id DESC, c.rank ASC, c.id ASC LIMIT 1",
+        params,
+    ).fetchone()
+    if row is None:
+        return None
+    return _shape_and_steps(row["payload"])[0]
+
+
+def resolve_thread(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: int | None,
+    plan_id: int | None,
+    clarify_request_id: int | None,
+    answer: str | None = None,
+) -> dict[str, Any]:
+    """确定本轮输入属于哪条探索线程。返回 `{"thread_id", "thread_head", "pending_clarify"}`。
+
+    - `thread_id=None` 且无 `clarify_request_id` → **新线程**：thread_id 返回 None，
+      由 `record_request` 回填成本行自己的 id。
+    - `thread_id=None` 但带了 `clarify_request_id=R`（旧客户端兜底）→ R 必须真是一轮
+      「找」（`kind='search'`，四问行冒充不了）；线程 = R 的 thread_id，R 自己是旧记录
+      （该列 NULL）时线程 = R 自身、独立成段。反推出的**头行**计划归属也要与本轮
+      plan_id 一致（F3 复核整改补的校验，此前漏了）——换计划回答旧追问要明确拒绝。
+    - `thread_id=T` → T 必须是**一段探索的开头**（F3 复核整改）：存在 `id = T AND
+      kind = 'search'` 的行，且它不是后续轮——后续轮的 thread_id 指向头、不等于自己，
+      头自己的 thread_id 就是自己的 id（成为头的旧记录该列是 NULL，也按头认）。
+      后续轮 id / 四问 id 冒充线程号一律 ThreadConflict，不再「查到一行就算数」。
+      头行计划归属与本轮不一致（含 None ↔ 非 None）→ ThreadConflict（I-02）。
+
+    `clarify_request_id` 给了就校验它属于该线程；它的追问已答不算错——`pending_clarify`
+    记 None，回答会被 `build_round_input` 拼成「补充」。`pending_clarify` 是本轮要接的
+    那条未答追问：用户点名了哪条就用哪条，没点名才取线程内最近一条。
+
+    `answer` 非空且确有待答追问时（F4）：本轮要作答，先对那条追问做 **CAS 原子占用**
+    ——同一条追问被两路并发回答时，后到的被明确挡下，回答不会被重复消费。
+    """
+    if thread_id is None:
+        if clarify_request_id is None:
+            return {"thread_id": None, "thread_head": None, "pending_clarify": None}
+        # 旧客户端兜底：只带了「我在回答哪一轮」。那一轮必须真是一轮「找」，
+        # 线程身份从它反推，不再按计划猜。
+        row = conn.execute(
+            "SELECT id, thread_id, plan_id FROM learning_request"
+            " WHERE id = ? AND kind = 'search'",
+            (clarify_request_id,),
+        ).fetchone()
+        if row is None:
+            raise ThreadConflict(
+                f"要回答的那一轮（请求 #{clarify_request_id}）不存在（或不是一轮「找」）"
+            )
+        head = int(row["thread_id"]) if row["thread_id"] is not None else int(row["id"])
+        # F3：反推出的头行的计划归属也要核——不核的话，「换一个计划去答旧线程的追问」
+        # 就会悄悄成立，回答生成错误归属的候选（I-02 的口子从兼容路径又开回来）。
+        head_row = conn.execute(
+            "SELECT plan_id FROM learning_request WHERE id = ?", (head,)
+        ).fetchone()
+        if head_row is None:
+            raise ThreadConflict(f"探索线程 #{head} 不存在")
+        head_plan = head_row["plan_id"]
+        if row["plan_id"] != head_plan or head_plan != plan_id:
+            scope = "新方向" if head_plan is None else f"计划 #{head_plan}"
+            raise ThreadConflict(f"这段探索属于{scope}，请回到原线程再答，不要换计划续问")
+        result = {
+            "thread_id": head,
+            "thread_head": head,
+            "pending_clarify": None,
+        }
+        stored = _stored_clarify(conn.execute(
+            "SELECT clarify FROM learning_request WHERE id = ?", (clarify_request_id,)
+        ).fetchone()["clarify"])
+        if stored is None and str(answer or "").strip():
+            raise ThreadConflict(f"请求 #{clarify_request_id} 没有追问，不能作为回答目标")
+        if stored is not None and not stored["answer"]:
+            result["pending_clarify"] = {"request_id": clarify_request_id, **stored}
+        _claim_pending_if_answering(conn, result, answer)
+        return result
+
+    # F3 严核：T 必须是一段探索的**开头**——行存在、是「找」、且不是后续轮。
+    # 只查「有没有这个 id」会放过两类坏输入：后续轮的 id（拿它当线程号会把线程根挪到
+    # 中间某轮上）、evaluate 类请求的 id（四问混进探索线程）。头的 thread_id 就是自己
+    # 的 id（record_request 回填）；成为头的旧记录该列是 NULL，也按头认。
+    head_row = conn.execute(
+        "SELECT id, plan_id, thread_id FROM learning_request WHERE id = ? AND kind = 'search'",
+        (thread_id,),
+    ).fetchone()
+    if head_row is None or (
+        head_row["thread_id"] is not None and int(head_row["thread_id"]) != int(thread_id)
+    ):
+        raise ThreadConflict(f"探索线程 #{thread_id} 不存在（或不是一段探索的开头）")
+
+    # 计划归属锁在线程头上：头请求属于哪个计划，这段探索就一直在那个计划里。
+    # 含 None ↔ 非 None 的两个方向——「新方向」线程也不该被顺手挂到某个计划上续问。
+    if head_row["plan_id"] != plan_id:
+        scope = "新方向" if head_row["plan_id"] is None else f"计划 #{head_row['plan_id']}"
+        raise ThreadConflict(f"这段探索属于{scope}，请回到原线程再答，不要换计划续问")
+
+    pending: dict[str, Any] | None
+    if clarify_request_id is not None:
+        asked = conn.execute(
+            "SELECT id, thread_id, kind, clarify FROM learning_request WHERE id = ?",
+            (clarify_request_id,),
+        ).fetchone()
+        if asked is None or asked["kind"] != "search" or (
+            asked["thread_id"] != thread_id and int(asked["id"]) != thread_id
+        ):
+            raise ThreadConflict(
+                f"要回答的追问（请求 #{clarify_request_id}）不属于探索线程 #{thread_id}"
+            )
+        stored = _stored_clarify(asked["clarify"])
+        if stored is not None and not stored["answer"]:
+            pending = {"request_id": int(asked["id"]), **stored}  # 用户点名了这条，就用这条
+        elif stored is not None:
+            pending = None  # 已答过：不算错，回答按「补充」拼（build_round_input 负责）
+        else:
+            if str(answer or "").strip():
+                raise ThreadConflict(f"请求 #{clarify_request_id} 没有追问，不能作为回答目标")
+            pending = None
+    else:
+        pending = _thread_pending_clarify(conn, thread_id)
+
+    result = {"thread_id": thread_id, "thread_head": thread_id, "pending_clarify": pending}
+    _claim_pending_if_answering(conn, result, answer)
+    return result
+
+
+def _claim_pending_if_answering(
+    conn: sqlite3.Connection, thread: dict[str, Any], answer: str | None
+) -> None:
+    """本轮要作答（`answer` 非空）且确有待答追问时，先原子占用那条追问（F4）。
+
+    只挂「要作答」的轮：纯续问轮不碰占用——它不消费回答，拦它没有意义。
+    占用失败抛 ThreadConflict，由接口层翻 409。
+    """
+    pending = thread.get("pending_clarify")
+    if pending is not None and str(answer or "").strip():
+        thread["claim_token"] = _claim_clarify(conn, int(pending["request_id"]))
+
+
+def build_round_input(
+    conn: sqlite3.Connection, *, utterance: str, answer: str | None, thread: dict[str, Any]
+) -> str:
+    """拼这一轮的模型输入：**原题永远在场，且不信任客户端**（F1 复核整改）。
+
+    基底（打头的那段）：
+    - 续聊轮（`thread["thread_head"]` 非 None）→ 一律从库里取**线程头请求的 raw_text**。
+      此前拿调用方传的 raw_text 打头——续聊轮前端只发新话时原题就丢了；现在原题由
+      后端自己取，客户端重发原题也不会拼出两份。
+    - 新线程（thread_head 为 None）→ 基底就是本轮 utterance。
+
+    本轮内容（缀在基底后面，三选一或都不缀）：
+    - `answer` 非空且 `thread["pending_clarify"]` 非空 → 「【追问】…【我的回答】…」
+      （格式沿用 `compose_clarify_round`）；
+    - `answer` 非空但无待答追问 → 「补充：…」——那句话不该被吞掉（页面刷新过、
+      追问已被人答过，都照缀）；
+    - 无 `answer` 且 utterance 去空白后非空、又与基底不同 → 「【这轮要说】…」
+      （客户端可能只发新话，也可能重发原题——重发就不缀，两种都要对）；
+    - 都没有 → 原样返回基底。
+
+    **不落任何状态**：「已答」标记挪到 `commit_round`（I-03），占用标记由
+    `resolve_thread` 写（F4）——这一步只负责拼输入。
+    """
+    pending = (thread or {}).get("pending_clarify")
+    head = (thread or {}).get("thread_head")
+    text = str(answer or "").strip()
+    if head is None:
+        base = utterance
+    else:
+        row = conn.execute(
+            "SELECT raw_text FROM learning_request WHERE id = ?", (int(head),)
+        ).fetchone()
+        if row is None:
+            # resolve_thread 刚核过线程头存在，走到这里说明库被旁路改坏了：明说，别猜
+            raise AdvisorError(f"线程头请求 #{head} 不存在，拼不出这一轮的输入")
+        base = str(row["raw_text"] or "")
+        if not base.strip():
+            base = utterance  # 防御：头的原话不该是空的；真空了就用本轮的话，别拼出空基底
+    if text:
+        if pending:
+            return f"{base}\n【追问】{pending['question']}\n【我的回答】{text}"
+        return f"{base}\n补充：{text}"
+    if utterance.strip() and utterance.strip() != base.strip():
+        return f"{base}\n【这轮要说】{utterance}"
+    return base
+
+
+def commit_round(
+    conn: sqlite3.Connection,
+    *,
+    request_id: int,
+    thread: dict[str, Any],
+    answer: str | None,
+    clarify: dict[str, Any] | None,
+    shape_change: dict[str, Any] | None = None,
+    intent: str | None = None,
+    reply: str | None = None,
+) -> None:
+    """一轮**成功收尾**后的状态落库——只在模型成功、结果落库之后调用。
+
+    ① 线程里有待答追问、本轮也带了回答 → 把那条追问标成已答（CAS 写入，同时清掉
+       F4 的占用标记——「已答」取代「作答中」）；answer 为空就跳过 ①——失败的轮次
+       不该产生任何状态变化，追问保持待答、可以原样重试（I-03）；
+    ② 本轮模型问出了新追问 → 记在本轮请求行上；
+    ③ 本轮模型在 chat 轮提出了**形态切换请求**（F5 复核整改）→ 把
+       `{"from", "to", "reason"}` 记在本轮请求行的 `shape_change` 列上。它只是提案，
+       真正的形态移动发生在用户确认那一轮出了新候选之后；放行核验走
+       `pending_shape_change`。
+    """
+    text = str(answer or "").strip()
+    pending = (thread or {}).get("pending_clarify")
+    if pending and text:
+        if not mark_clarify_answered(
+            conn, int(pending["request_id"]), text, thread.get("claim_token")
+        ):
+            raise ThreadConflict(_CLAIM_TAKEN_MESSAGE)
+    if clarify:
+        conn.execute(
+            "UPDATE learning_request SET clarify = ? WHERE id = ?",
+            (json.dumps({**clarify, "answer": None}, ensure_ascii=False), request_id),
+        )
+    conn.execute(
+        "UPDATE learning_request SET shape_change = ?, intent = ?, reply = ?, turn_status = 'success' WHERE id = ?",
+        (
+            json.dumps({**shape_change, "decision": "pending"}, ensure_ascii=False) if shape_change else None,
+            intent,
+            reply,
+            request_id,
+        ),
+    )
+    conn.commit()
+
+
+def fail_round(conn: sqlite3.Connection, request_id: int) -> None:
+    """Mark a recorded but unsuccessful search turn; it must not enter model history."""
+    conn.execute(
+        "UPDATE learning_request SET turn_status = 'failed' WHERE id = ? AND turn_status = 'pending'",
+        (request_id,),
+    )
+    conn.commit()
+
+
+def _stored_shape_change(raw: Any) -> dict[str, Any] | None:
+    """解 `learning_request.shape_change` 那一列；解不开当没有。"""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not str(data.get("to") or "").strip():
+        return None
+    return {
+        "from": str(data.get("from") or "").strip() or None,
+        "to": str(data["to"]).strip(),
+        "reason": str(data.get("reason") or "").strip(),
+        "decision": data.get("decision") or "pending",
+    }
+
+
+def pending_shape_change(
+    conn: sqlite3.Connection, thread_head: int | None
+) -> dict[str, Any] | None:
+    """线程内**最近一份**还没失效的形态切换提案（F5 复核整改）；没有就 None。
+
+    提案是 chat 轮写在本轮请求行 `shape_change` 列上的一句「我认为该换形态，理由如下」
+    （见 `commit_round`）。它的有效期只到**下一次出候选**为止：那之后线程内最近一条
+    「有候选的请求」的 id 落在提案后面——无论是按确认切了形态、还是用户保持旧形态
+    继续要了新版候选，提案都已经有了答案，再拿它当放行凭据就是陈旧凭据。
+
+    返回 `{"request_id", "from", "to", "reason"}`；`to` 就是确认那一轮要求模型对齐的
+    目标形态（main.py 查到提案后把它塞进 thread dict 的 `"expected_shape"`）。
+    """
+    if thread_head is None:
+        return None
+    where, params = _thread_rows_where(thread_head)
+    row = conn.execute(
+        f"SELECT id, shape_change FROM learning_request"
+        f" WHERE kind = 'search' AND {where} AND shape_change IS NOT NULL"
+        f" ORDER BY id DESC LIMIT 1",
+        params,
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        data = json.loads(row["shape_change"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("to") or data.get("decision") in ("keep", "switch"):
+        return None
+    where_r, params_r = _thread_rows_where(thread_head, alias="r")
+    latest_candidates = conn.execute(
+        f"SELECT r.id FROM learning_request r"
+        f" JOIN candidate c ON c.request_id = r.id"
+        f" WHERE r.kind = 'search' AND {where_r}"
+        f" ORDER BY r.id DESC LIMIT 1",
+        params_r,
+    ).fetchone()
+    if latest_candidates is not None and int(latest_candidates["id"]) > int(row["id"]):
+        return None  # 提案之后线程里又出过候选：提案已被回答（切了或没切），失效
+    return {
+        "request_id": int(row["id"]),
+        "from": data.get("from"),
+        "to": data.get("to"),
+        "reason": data.get("reason"),
+        "decision": "pending",
+    }
+
+
+def keep_shape_change(
+    conn: sqlite3.Connection, thread_id: int, shape_change_request_id: int
+) -> dict[str, Any]:
+    """Resolve the exact pending proposal; duplicate/stale decisions cannot consume another one."""
+    with atomic(conn):
+        proposal = pending_shape_change(conn, thread_id)
+        if proposal is None or proposal["request_id"] != shape_change_request_id:
+            raise ThreadConflict("这条形态切换提案已失效或不属于当前线程，请刷新后重试")
+        row = conn.execute(
+            "SELECT shape_change FROM learning_request WHERE id = ?", (shape_change_request_id,)
+        ).fetchone()
+        data = json.loads(row["shape_change"])
+        data["decision"] = "keep"
+        cursor = conn.execute(
+            "UPDATE learning_request SET shape_change = ? WHERE id = ? AND shape_change = ?",
+            (json.dumps(data, ensure_ascii=False), shape_change_request_id, row["shape_change"]),
+        )
+        if not cursor.rowcount:
+            raise ThreadConflict("形态切换提案已被另一轮处理，请刷新")
+        conn.commit()
+    return {
+        "thread_id": thread_id,
+        "shape_change_request_id": shape_change_request_id,
+        "decision": "keep",
+        "shape": proposal["from"],
+    }
 
 
 # 已答追问单独进 prompt 的上限（条）。2026-09-26 走查抓到「答过的换个说法又问」：
@@ -252,24 +795,45 @@ def compose_clarify_round(
 ANSWERED_CLARIFIES = 5
 
 
-def _answered_clarifies(conn: sqlite3.Connection, plan_id: int | None) -> list[tuple[str, str]]:
-    """这一计划归属下**已经答过**的追问（问题, 回答），时间正序、最多最近几轮。
+def _answered_clarifies(
+    conn: sqlite3.Connection,
+    plan_id: int | None = None,
+    thread_id: int | None = None,
+    *,
+    thread_scoped: bool = False,
+) -> list[tuple[str, str]]:
+    """**已经答过**的追问（问题, 回答），时间正序、最多最近几轮。
 
-    与 `pending_clarify` 同一把尺：只看同一个计划范围，两段「找」互不串台。只问没答的
-    不算——那类事实还不成立，下一轮它该继续问，不该被当成已答禁区。
+    两种取法（C4③）：
+    - 线程上下文（`thread_scoped=True`）：按线程取（`thread_id = T OR id = T`，含旧头）——
+      已答事实跟着对话走，不被页面当前选中的计划带偏；
+    - 兼容路径（`thread_scoped=False`）：沿用按计划归属取的旧口径（thread=None 的旧调用方）。
+
+    与 `pending_clarify` 同一把尺：只问没答的不算——那类事实还不成立，下一轮它该继续问，
+    不该被当成已答禁区。**先筛已答、再限条数**（I-05）：反过来先截 5 行会把已答的从
+    窗口里挤出去，重问就是这么漏进来的。
     """
-    rows = conn.execute(
-        "SELECT clarify FROM learning_request"
-        " WHERE kind = 'search' AND plan_id IS ? AND clarify IS NOT NULL"
-        " ORDER BY id DESC LIMIT ?",
-        (plan_id, ANSWERED_CLARIFIES),
-    ).fetchall()
+    if thread_scoped:
+        where, params = _thread_rows_where(thread_id)
+        rows = conn.execute(
+            f"SELECT clarify FROM learning_request"
+            f" WHERE kind = 'search' AND {where} AND clarify IS NOT NULL"
+            f" ORDER BY id DESC LIMIT {FEEDBACK_SCAN_LIMIT}",
+            params,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT clarify FROM learning_request"
+            " WHERE kind = 'search' AND plan_id IS ? AND clarify IS NOT NULL"
+            f" ORDER BY id DESC LIMIT {FEEDBACK_SCAN_LIMIT}",
+            (plan_id,),
+        ).fetchall()
     pairs: list[tuple[str, str]] = []
     for row in reversed(rows):  # 时间正序
         stored = _stored_clarify(row["clarify"])
         if stored is not None and stored["answer"]:
             pairs.append((stored["question"], stored["answer"]))
-    return pairs
+    return pairs[-ANSWERED_CLARIFIES:]  # 筛完才限：留最近几轮已答的
 
 
 def plan_context(conn: sqlite3.Connection, plan_id: int | None) -> dict[str, Any] | None:
@@ -511,7 +1075,7 @@ def extract_json(text: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-# ---------- 「找」：候选清单（T13） ----------
+# ---------- 「找」：候选清单（T13；2026-09-28 双入口整改） ----------
 #
 # 与四问共用同一套判据（SPEC 第 4 节：「找」与「判」不做两套逻辑），也共用同一条纪律：
 # LLM 只产出提案式的结果，落库要经用户裁定；输出先过 schema 校验，不合格带原因重试一次，
@@ -520,6 +1084,16 @@ def extract_json(text: str) -> dict[str, Any] | None:
 # 与四问不同的只有两点：
 # ① 候选是**一组**而不是一问一答，所以条数（3–5）本身就是校验项；
 # ② 有一份**禁区**：已经否决过的候选一个字都不许再出现——这是成功标准 2 的后半句。
+#
+# 2026-09-28 起按决策 44 重组织（详见本文件「探索线程」一节）：
+# ③ 一段连续的「找方向」是一条**探索线程**，追问归属、反馈流水、否决禁区、候选过期、
+#    形态（directions/path）都跟着线程走，不再按「同计划最近一条」猜；同计划的另一条
+#    线程互不夹带表态（复核整改 F2）；
+# ④ 模型输出先报**意图**（chat / need_info / candidates）——寒暄与信息不足不再被逼出
+#    一份凑数的清单；
+# ⑤ 独立复核后补齐的缺口（F1–F6）：续聊输入的原题由后端从线程头取（不信任客户端）、
+#    线程号必须真是线程头、同追问并发回答有原子占用与 TTL、形态切换提案落库核验、
+#    只有明确重做（redo）才更替同线程旧候选。
 
 TASK_FIND = "find"
 
@@ -550,6 +1124,10 @@ MAX_STEPS = 8
 # 这段是这轮新增的唯一负担，所以卡得比模型上下文紧得多：宁少说，不多烧。
 FEEDBACK_ROUNDS = 5
 FEEDBACK_CHAR_LIMIT = 1200
+
+# 先筛后限的扫描宽度（I-05）：先圈出这多的候选轮、滤掉空轮，再取最近 `FEEDBACK_ROUNDS` 轮。
+# 为什么不能直接 LIMIT 5：只问没答的轮、刚记下的本轮空行都会把真正有表态的旧轮挤出窗口。
+FEEDBACK_SCAN_LIMIT = 40
 
 # 只有这三种状态的候选进反馈流水：`proposed` 是「你还没表态」，喂回去等于让模型
 # 自己给自己打分。过期与否决分开说——过期**不是**否决（决策 34），它只是「上一轮不算数了」。
@@ -617,11 +1195,12 @@ class Candidate(BaseModel):
 
 
 class Clarify(BaseModel):
-    """追问槽位（SPEC 决策 35 ②）：信息不够时先问一句——但清单照给。
+    """追问槽位（SPEC 决策 35 ②，2026-09-28 起按决策 44 收进意图出口）。
 
     `missing` 要说清缺的是哪一类档案信息（校验见 `_clarify_problem`）。
-    **不落库**：它只在当次响应里出现（同 `start_reason` 的处理），你回答的内容就是
-    下一轮的输入，不需要为它建表加列。
+    问出的追问由 `commit_round` 记在本轮请求行上（`learning_request.clarify`），
+    下一轮的回答经 `build_round_input` 拼进输入、`commit_round` 标成已答——
+    「问过的不再问」靠这份落库记录，不靠当次响应。
     """
 
     question: str = Field(min_length=1)
@@ -656,25 +1235,78 @@ class PathStep(BaseModel):
         return str(value or "").strip()
 
 
-class FoundList(BaseModel):
-    """一次「找」的输出。形状与条数越界都会被 Pydantic 或 `_check_find` 拦住（不补齐、不截断）。
+class ShapeChange(BaseModel):
+    """模型请求**切换形态**的说明（II-02）：仅在 `intent="chat"` 那轮合法。
 
-    `shape` 让模型**先自报形状**：它是 `directions`（3–5 条互相竞争的方向）还是
-    `path`（1 条伞候选 + 2–8 个先后步骤）。自报的好处是选错了你一眼能看见——界面把
-    形状标在卡上，而不是让系统默默替你猜。
-
-    `clarify` 可选：**追问不能替代清单**——带追问的那一轮仍必须给满候选。
+    `from` 是 Python 关键字，字段名用 `from_shape` + alias 承接模型输出里的 `"from"` 键；
+    `populate_by_name` 让两种写法都能解析，回传给界面时按 alias 还原成 `"from"`。
+    它只是**说明与请求**，不是切换本身——用户确认后那一轮由 main.py 放行
+    （`allow_shape_switch`），形态锁才随之移动。
     """
 
-    shape: Literal["directions", "path"]
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_shape: Literal["directions", "path"] = Field(alias="from")
+    to: Literal["directions", "path"]
+    reason: str = Field(min_length=1)
+
+
+class FoundList(BaseModel):
+    """一次「找」的输出（2026-09-28 双入口整改：先报意图，再谈清单）。
+
+    `intent` **必填、无默认值**：模型必须自报这一轮是给候选（candidates）、问一句
+    （need_info）还是只是说话（chat）——缺了或取值不对就是不合格。没有这个出口，
+    「hi」和「每周能投入几小时？」也会被逼出一份凑数的清单（II-01）。
+
+    `shape` 与候选字段只在 `intent="candidates"` 那轮有意义（校验见 `_check_find`）；
+    `reply` 在 chat / need_info 轮必须是人话。
+    """
+
+    intent: Literal["chat", "need_info", "candidates"]
+    reply: str = ""
+    shape: Literal["directions", "path"] | None = None
     candidates: list[Candidate] = Field(default_factory=list, max_length=MAX_CANDIDATES)
     steps: list[PathStep] = Field(default_factory=list, max_length=MAX_STEPS)
-    recommended_start: str = Field(min_length=1)
-    start_reason: str = Field(min_length=1)
+    recommended_start: str | None = None
+    start_reason: str | None = None
     clarify: Clarify | None = None
+    shape_change: ShapeChange | None = None
 
 
-def _feedback_lines(conn: sqlite3.Connection) -> list[str]:
+HISTORY_ROUNDS = 8
+HISTORY_CHAR_LIMIT = 3000
+
+
+def _thread_conversation(conn: sqlite3.Connection, thread_id: int | None, exclude_request_id: int | None) -> list[str]:
+    """Recent completed user/assistant turns; oldest trimmed first, never cross threads."""
+    if thread_id is None:
+        return []
+    where, params = _thread_rows_where(thread_id)
+    rows = conn.execute(
+        f"SELECT utterance, raw_text, intent, reply FROM learning_request WHERE kind = 'search' AND {where}"
+        " AND id != ? AND (turn_status = 'success' OR turn_status IS NULL)"
+        " ORDER BY id DESC LIMIT ?",
+        [*params, exclude_request_id or -1, HISTORY_ROUNDS],
+    ).fetchall()
+    lines = []
+    for row in reversed(rows):
+        utterance = row["utterance"] if row["utterance"] is not None else row["raw_text"]
+        lines.append(f"我：{utterance}")
+        if row["reply"]:
+            lines.append(f"助手（{row['intent'] or 'chat'}）：{row['reply']}")
+    while len("\n".join(lines)) > HISTORY_CHAR_LIMIT and len(lines) > 2:
+        lines = lines[2:] if lines[1].startswith("助手") else lines[1:]
+    return lines
+
+
+def _feedback_lines(
+    conn: sqlite3.Connection,
+    plan_id: int | None = None,
+    thread_id: int | None = None,
+    exclude_request_id: int | None = None,
+    *,
+    thread_scoped: bool = False,
+) -> list[str]:
     """最近几轮「找」的流水，按时间正序（最早的一轮在前）。
 
     每行一条请求：时间 / 计划归属 / 这一轮每条候选的标题与裁定结果（否决带理由原文），
@@ -682,15 +1314,39 @@ def _feedback_lines(conn: sqlite3.Connection) -> list[str]:
     别再问第二遍同一件事。只取 `search` 那一类请求——四问（`evaluate`）记录不进这段
     （决策 35 ①）：那问的是「一份资料值不值得学」，和「别给我推什么方向」不是一回事。
     一轮里既没有一句表态、也没有答过的追问，这一轮就没有可说的，跳过。
+
+    作用域（C4①，I-04/I-05；F2 复核整改）：线程上下文（`thread_scoped=True`）下**一律只取
+    本线程**的轮次（`thread_id = T OR id = T`，含旧头）——此前 plan_id 非 None 时按
+    「plan_id = ?」圈同计划全部轮次，同计划另一条独立线程的表态会串进当前线程；现在
+    计划归属只是行内展示信息，不再是圈选范围。并**排除本轮请求行**（它还没有表态，
+    占窗口只会挤掉真有内容的旧轮）。兼容路径（`thread_scoped=False`）沿用旧口径：
+    全量最近几轮。两条路径都**先滤空轮、再取最近 5 轮**——「只问没答的把已答挤出
+    窗口」的毛病就出在反过来的顺序上。
     """
-    rounds = conn.execute(
-        "SELECT id, plan_id, created_at, clarify FROM learning_request"
-        " WHERE kind = 'search' ORDER BY id DESC LIMIT ?",
-        (FEEDBACK_ROUNDS,),
-    ).fetchall()
+    if thread_scoped:
+        # F2：只圈本线程。plan_id 不参与圈选——同计划不同线程互不夹带，是复核拍板的
+        # 有意变更；行内的「计划 #N / 新方向」前缀照旧展示，让模型知道每轮的归属。
+        where, params = _thread_rows_where(thread_id)
+        where = f"kind = 'search' AND {where}"
+        if exclude_request_id is not None:
+            where += " AND id != ?"
+            params = [*params, exclude_request_id]
+        rounds = conn.execute(
+            f"SELECT id, plan_id, created_at, clarify FROM learning_request"
+            f" WHERE {where} ORDER BY id DESC LIMIT {FEEDBACK_SCAN_LIMIT}",
+            params,
+        ).fetchall()
+        ordered = list(reversed(rounds))  # 时间正序
+    else:
+        rounds = conn.execute(
+            "SELECT id, plan_id, created_at, clarify FROM learning_request"
+            " WHERE kind = 'search' ORDER BY id DESC LIMIT ?",
+            (FEEDBACK_ROUNDS,),
+        ).fetchall()
+        ordered = list(reversed(rounds))  # 时间正序
 
     lines: list[str] = []
-    for request in reversed(rounds):  # 时间正序
+    for request in ordered:
         rows = conn.execute(
             f"""SELECT title, status, reject_reason FROM candidate
                 WHERE request_id = ? AND status IN ({', '.join('?' * len(FEEDBACK_STATUSES))})
@@ -709,13 +1365,22 @@ def _feedback_lines(conn: sqlite3.Connection) -> list[str]:
             # 追问**问过也答过**才算数：只问了没答的，下一轮它该继续问，不该当成已知事实
             items.append(f"{CLARIFY_ANSWERED_LABEL}「{asked['question']}」→「{asked['answer']}」")
         if not items:
-            continue
+            continue  # 空轮先滤掉，最后才取最近 5 轮（先筛后限）
         scope = "新方向（不属于任何计划）" if request["plan_id"] is None else f"计划 #{request['plan_id']}"
         lines.append(f"- {_short_time(str(request['created_at']))}｜{scope}｜" + "；".join(items))
+    if thread_scoped:
+        lines = lines[-FEEDBACK_ROUNDS:]  # 滤完空轮才限条数
     return lines
 
 
-def _feedback_block(conn: sqlite3.Connection) -> list[str]:
+def _feedback_block(
+    conn: sqlite3.Connection,
+    plan_id: int | None = None,
+    thread_id: int | None = None,
+    exclude_request_id: int | None = None,
+    *,
+    thread_scoped: bool = False,
+) -> list[str]:
     """反馈流水那一段，已按 `FEEDBACK_CHAR_LIMIT` **从最旧截断**（决策 35 ①）。
 
     从最新往回收，收不下就丢掉更旧的——越近的表态越该被记住。单行就超上限时
@@ -723,7 +1388,9 @@ def _feedback_block(conn: sqlite3.Connection) -> list[str]:
     """
     kept: list[str] = []
     used = 0
-    for line in reversed(_feedback_lines(conn)):
+    for line in reversed(
+        _feedback_lines(conn, plan_id, thread_id, exclude_request_id, thread_scoped=thread_scoped)
+    ):
         if kept and used + len(line) > FEEDBACK_CHAR_LIMIT:
             break
         kept.insert(0, line)
@@ -745,15 +1412,37 @@ def _normalize_title(title: str) -> str:
     return "".join(title.split()).casefold()
 
 
-def _rejected_titles(conn: sqlite3.Connection) -> list[str]:
+def _rejected_titles(
+    conn: sqlite3.Connection,
+    plan_id: int | None = None,
+    thread_id: int | None = None,
+    *,
+    thread_scoped: bool = False,
+) -> list[str]:
     """已经被否决过的候选标题（去重、按 id 序）。
 
     为什么取 `rejected` 而不是所有历史：候选只有三种终态，`rejected` 才是「你别再推这个」，
     `accepted` 是「这个我要了」——后者不该进禁区（但也不该反复推，交给 prompt 里的档案去说）。
+
+    作用域（C4②，I-04；F2 复核整改）：线程上下文（`thread_scoped=True`）下否决只在
+    **本线程**内生效——同计划的另一条线程不被它拦（同计划不同线程互不夹带，有意的行为
+    变更：A 线程否掉的方向不再挡 B 线程，此前按「plan_id = ?」圈选会把表态串进同计划
+    的所有线程）。「以后都别推」的全局偏好按决策 44 ② 另走可核对的通道，不由旧否决
+    静默扩权。兼容路径（`thread_scoped=False`）沿用旧口径：全量禁区。
     """
-    rows = conn.execute(
-        "SELECT DISTINCT title FROM candidate WHERE status = 'rejected' ORDER BY id"
-    ).fetchall()
+    if thread_scoped:
+        # F2：只圈本线程，plan_id 不参与圈选（与 _feedback_lines 同一把尺）
+        where, params = _thread_rows_where(thread_id, alias="r")
+        rows = conn.execute(
+            f"SELECT DISTINCT c.title FROM candidate c"
+            f" JOIN learning_request r ON r.id = c.request_id"
+            f" WHERE c.status = 'rejected' AND {where} ORDER BY c.id",
+            params,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT title FROM candidate WHERE status = 'rejected' ORDER BY id"
+        ).fetchall()
     return [str(row["title"]) for row in rows]
 
 
@@ -764,6 +1453,7 @@ def _brief(
     feedback: list[str],
     context: dict[str, Any] | None = None,
     clarified: list[tuple[str, str]] | None = None,
+    conversation: list[str] | None = None,
 ) -> Brief:
     """把档案与判据组装成来源层要的输入（见 `providers/find.Brief`）。
 
@@ -794,6 +1484,7 @@ def _brief(
         clarified_lines=[
             f"我问「{question}」→ 我答：{answer}" for question, answer in (clarified or [])
         ],
+        conversation_lines=conversation or [],
         depth_guide_lines=[
             f"{QUESTIONS[key]}：主要看 "
             + "、".join(PROFILE_CATEGORIES[name] for name in JUDGE_SOURCES[key])
@@ -815,6 +1506,7 @@ def find_candidates(
     raw_text: str,
     *,
     plan_id: int | None = None,
+    thread: dict[str, Any] | None = None,
     provider_id: int | None = None,
     model: str | None = None,
     transport: llm.Transport | None = None,
@@ -824,6 +1516,20 @@ def find_candidates(
 
     `plan_id` 传了就带该计划的上下文（目标 / 当前阶段 / 还开着的任务）进 prompt，
     候选更贴手头的计划（SPEC 决策 33 ①）；不传 = 「新方向」。
+
+    `thread` 是 `resolve_thread` 的返回（main.py 可以往里塞 `"allow_shape_switch"`、
+    `"expected_shape"`、`"redo"` 与 `"request_id"` 四个键）：给了就按**探索线程**装配本轮
+    输入（C4）——反馈流水、否决禁区、已答追问与形态锁**一律按线程圈选**（F2 复核整改：
+    同计划不同线程互不夹带）；`allow_shape_switch=True` 而 thread 里没有
+    `"expected_shape"`（没有待确认提案）→ 直接 `ThreadConflict`（F5：放行凭据是线程里
+    那份待确认提案，不是客户端布尔值）；确认那一轮模型给的形态还要与 `"expected_shape"`
+    一致，否则判不合格重试。`"redo"` 只透传给结果（F6：落库后更替同线程旧候选与否由
+    它管，普通候选轮两版并存）；不传 `thread`（旧调用方）沿用按计划兜底的现状，保证
+    接线前旧路由照常工作。
+
+    返回新增 `intent`（chat / need_info / candidates）、`reply` 与 `redo` 三键（II-01/F6）：
+    只有 `intent="candidates"` 的结果才带有候选清单，chat / need_info 轮 `candidates` 为空、
+    `reply` 必有人话。
 
     与 `judge` 同一条纪律：不合格带原因重试一次，第二次仍不合格就抛 `AdvisorError`，
     绝不把一份凑合的清单一分成三份端上来。
@@ -838,16 +1544,49 @@ def find_candidates(
     context = plan_context(conn, plan_id)
     chosen_source = source or find.DEFAULT_SOURCE
     allowed_ids = {item["id"] for item in profile["items"]}
-    banned = _rejected_titles(conn)
-    feedback = _feedback_block(conn)
-    answered = _answered_clarifies(conn, plan_id)
+
+    redo = False
+    expected_shape: str | None = None
+    if thread is not None:
+        head = thread.get("thread_head")
+        # 线程上下文：反馈/禁区/已答/形态锁一律按线程圈选（F2 复核整改）——同计划的
+        # 另一条线程不串台；plan_id 只随流水行展示归属，不再是圈选范围
+        feedback = _feedback_block(
+            conn,
+            plan_id,
+            head,
+            exclude_request_id=thread.get("request_id"),
+            thread_scoped=True,
+        )
+        banned = _rejected_titles(conn, plan_id, head, thread_scoped=True)
+        answered = _answered_clarifies(conn, plan_id, head, thread_scoped=True)
+        conversation = _thread_conversation(conn, head, thread.get("request_id"))
+        lock_shape = _thread_shape(conn, head)
+        allow_switch = bool(thread.get("allow_shape_switch"))
+        expected_shape = thread.get("expected_shape")
+        redo = bool(thread.get("redo"))
+        if allow_switch and not expected_shape:
+            # F5：形态切换不是客户端布尔值说了算。放行凭据是线程里那份待确认提案，
+            # main.py 查不到提案就不会塞 expected_shape——没有凭据就是请求本身错了。
+            raise ThreadConflict("没有待确认的形态切换")
+    else:
+        feedback = _feedback_block(conn)
+        banned = _rejected_titles(conn)
+        answered = _answered_clarifies(conn, plan_id)
+        lock_shape, allow_switch = None, False
+        conversation = []
+
     messages = chosen_source.build_messages(
-        _brief(raw_text, profile, banned, feedback, context, clarified=answered)
+        _brief(raw_text, profile, banned, feedback, context, clarified=answered, conversation=conversation)
     )
 
     operation = llm.Operation(conn, TASK_FIND, transport=transport)
     text = operation.chat(messages, provider_id=provider_id, model=model)
-    found, problem = _check_find(text, allowed_ids, banned, answered_questions=answered)
+    found, problem = _check_find(
+        text, allowed_ids, banned, answered_questions=answered,
+        lock_shape=lock_shape, allow_shape_switch=allow_switch,
+        expected_shape=expected_shape,
+    )
 
     attempts = 1
     if problem is not None:
@@ -863,7 +1602,11 @@ def find_candidates(
             },
         ]
         text = operation.chat(messages, provider_id=provider_id, model=model)
-        found, problem = _check_find(text, allowed_ids, banned, answered_questions=answered)
+        found, problem = _check_find(
+            text, allowed_ids, banned, answered_questions=answered,
+            lock_shape=lock_shape, allow_shape_switch=allow_switch,
+            expected_shape=expected_shape,
+        )
         if problem is not None:
             raise AdvisorError(
                 f"模型连着 {attempts} 次都没给出合格的候选清单（{problem}）；"
@@ -875,7 +1618,10 @@ def find_candidates(
 
     return {
         "plan_id": None if context is None else context["plan_id"],
-        # 形状（T34）：`directions` = 几条互相竞争的方向，`path` = 一条路
+        # 意图出口（II-01）：这一轮到底是候选、追问还是说话，由调用方（main.py）分流
+        "intent": found.intent,
+        "reply": found.reply.strip() or None,
+        # 形状（T34）：`directions` = 几条互相竞争的方向，`path` = 一条路；只在 candidates 轮有值
         "shape": found.shape,
         "candidates": [item.model_dump() for item in found.candidates],
         # 步骤草案只在 path 时有内容：它是「这一条路上的先后几步」，随后进伞候选的 payload，
@@ -883,9 +1629,15 @@ def find_candidates(
         "steps": [item.model_dump() for item in found.steps],
         "recommended_start": found.recommended_start,
         "start_reason": found.start_reason,
-        # 追问只在当次响应里给（决策 35 ②）：不落库、下次提问看不到它，
-        # 你回答的那句话本身就是下一轮的输入。
+        # 追问记在本轮请求行上（commit_round 落库）；candidates 轮也可带（清单照给）
         "clarify": None if found.clarify is None else found.clarify.model_dump(),
+        # 形态切换请求（II-02）：只是说明与请求，切不切由用户确认（main.py 放行）
+        "shape_change": (
+            None if found.shape_change is None else found.shape_change.model_dump(by_alias=True)
+        ),
+        # F6：本轮是否按「明确重做」处理——main.py 拿它调 propose_candidates，
+        # 只有 redo 轮落新候选才更替同线程旧未裁定候选（普通轮两版并存）
+        "redo": redo,
         "source": find.describe(chosen_source),
         "profile_basis": {
             "total": len(profile["items"]),
@@ -1017,11 +1769,22 @@ def _check_find(
     allowed_ids: set[int],
     banned: list[str],
     answered_questions: list[tuple[str, str]] = (),
+    lock_shape: str | None = None,
+    allow_shape_switch: bool = False,
+    expected_shape: str | None = None,
 ) -> tuple[FoundList | None, str | None]:
     """验收模型输出：返回（合格的清单, None）或（None, 不合格的原因）。
 
     同 `_check`，刻意不抛异常——不合格的原因要能喂回模型重试一次。
     `answered_questions` 是已经答过的追问（问题, 回答），用来拦「换个说法再问一遍」。
+    `lock_shape` 是线程的形态锁（II-02）：线程已定过形状，模型再报别的形状判不合格，
+    用户确认切换（`allow_shape_switch`）那轮放行。
+    `expected_shape` 是确认切换那轮的目标形态（F5）：用户确认的是「切到 X」，模型给的
+    必须真是 X——自作主张给成别的形态等于偷换了用户的决定，判不合格带原因重试。
+
+    验收按 `intent` 分派（II-01）：chat / need_info 轮**不落候选**，为凑数硬推的输出
+    直接判不合格；candidates 轮走原有全部校验（形状条数 / 依据 id / 起点 / 禁区 / 追问闸）
+    再加形态锁与目标形态核对。
     """
     data = extract_json(text)
     if data is None:
@@ -1036,9 +1799,69 @@ def _check_find(
         )
         return None, f"字段不合格（{details}）"
 
+    if found.intent != "chat" and found.shape_change is not None:
+        return None, "shape_change 只在 intent 为 chat（向用户解释形态冲突）那轮才允许出现"
+
+    if found.intent == "chat":
+        # 只是说话（寒暄 / 解释形态冲突）：带候选、带追问都是跑偏——想出候选就明说 candidates
+        if found.candidates or found.steps:
+            return None, (
+                "intent 是 chat（只是聊一聊 / 解释形态冲突），不该给候选或步骤——"
+                "要给候选请把 intent 改为 candidates；信息不够就改为 need_info"
+            )
+        if found.shape is not None:
+            return None, "intent 是 chat，shape 必须留空——形状只在出候选那一轮才定"
+        if found.clarify is not None:
+            return None, "intent 是 chat，不要给 clarify——要问一句请把 intent 改为 need_info"
+        if not found.reply.strip():
+            return None, "intent 是 chat，reply 必须写一句给我的话，不能是空的"
+        return found, None
+
+    if found.intent == "need_info":
+        # 信息不够先问一句：这一轮不给候选（II-01/II-03），凑数的清单比没有更糟
+        if found.candidates or found.steps:
+            return None, (
+                "intent 是 need_info（先问一句），candidates 与 steps 必须是空数组——"
+                "不要为凑数硬推，信息够了下一轮再出候选"
+            )
+        if not found.reply.strip():
+            return None, "intent 是 need_info，reply 必须写一句说明为什么要问，不能是空的"
+        if found.clarify is None:
+            return None, "intent 是 need_info，就必须给 clarify——问一句关于我的事实"
+        problem = _clarify_problem(found.clarify, answered_questions)
+        if problem is not None:
+            return None, problem
+        return found, None
+
+    # intent == "candidates"：信息足够、在请求推荐——原有全部校验照旧
+    if found.shape is None:
+        return None, (
+            "intent 是 candidates 就必须自报 shape（directions 或 path）——"
+            "不自报没法按形状校验条数与步骤"
+        )
     problem = _shape_problem(found)
     if problem is not None:
         return None, problem
+
+    # 形态锁（II-02）：线程已定的形状不许模型自己漂移。想换就改输出 intent="chat" 说明
+    # 冲突理由，由用户确认——那是「确认那轮」放行（allow_shape_switch）之外唯一的合法路径。
+    if lock_shape is not None and found.shape != lock_shape and not allow_shape_switch:
+        return None, (
+            f"这个探索线程的形态已定为 {lock_shape}；"
+            '若你认为新事实推翻了原判断，请改输出 intent="chat" 并说明冲突理由'
+            "（可带 shape_change），由用户确认后才能切换，不要自行换形态"
+        )
+
+    # F5：确认切换那一轮，模型给的形态必须与提案目标一致——用户确认的是「切到 X」，
+    # 模型自作主张给成别的形态，等于偷换了用户的决定。判不合格带原因重试，
+    # 原因里点明确认的目标形态是什么。
+    if expected_shape is not None and found.shape != expected_shape:
+        return None, (
+            f"用户已确认这次切换到 {expected_shape} 形态；"
+            f"请按 {expected_shape} 的规则重新输出候选"
+            "（directions=3–5 条互相竞争的方向；path=1 条伞候选加先后步骤），"
+            f"你给的还是 {found.shape}"
+        )
 
     if found.clarify is not None:
         problem = _clarify_problem(found.clarify, answered_questions)
@@ -1059,11 +1882,13 @@ def _check_find(
             )
 
     titles = [candidate.title for candidate in found.candidates]
-    if found.recommended_start not in titles:
+    if not found.recommended_start or found.recommended_start not in titles:
         return None, (
             f"recommended_start「{found.recommended_start}」不是候选之一"
             f"（要一字不差复制某条的 title，现有：{titles}）"
         )
+    if not (found.start_reason or "").strip():
+        return None, "start_reason 必须写一句话：为什么先从这条开始"
 
     # 去重的硬保证：禁区里的标题一个字都不许再出现。
     # 为什么是「判不合格重试」而不是「悄悄过滤掉」：过滤会让条数掉到 3 条以下、也不告诉
@@ -1073,24 +1898,54 @@ def _check_find(
     if repeated:
         return None, f"这些是你以前否决过的，不许再出现：{repeated}（换个方向，别再推它们）"
 
+    # 同批重复（II-04）：一份清单里两三条其实是同一件事，等于拿重复凑条数——判不合格
+    # 带原因重试。归一化与禁区同一把尺（去空白转小写）：字面不同的同义改写没有便宜的
+    # 中文判据，靠 prompt 的「宁可少给不许凑数」与真机走查兜。
+    seen_titles: dict[str, str] = {}
+    for title in titles:
+        key = _normalize_title(title)
+        if key in seen_titles:
+            return None, (
+                f"同批候选里有两条是同一件事：「{seen_titles[key]}」和「{title}」——"
+                "拿重复凑数不算多条；给真正不同的方向，或者少给几条如实说"
+            )
+        seen_titles[key] = title
+
     return found, None
 
 
 def expire_previous_candidates(
-    conn: sqlite3.Connection, *, keep_request_id: int, plan_id: int | None
+    conn: sqlite3.Connection,
+    *,
+    keep_request_id: int,
+    plan_id: int | None,
+    thread_id: int | None = None,
 ) -> list[int]:
-    """新一轮「找」落库时，把**同一计划**上一轮还没裁定的候选标记为过期（SPEC 决策 34）。
+    """新一轮「找」落库时，把**还没裁定的**上一版候选标记为过期（SPEC 决策 34）。
 
     过期 ≠ 否决：`_rejected_titles` 只取 `rejected`，所以过期的不进禁区，模型以后还能再推。
-    不传计划归属的那些轮（「新方向」）自成一组，互相之间也这么办。
+
+    作用域（C4④，II-03）：`thread_id` 给了就是**同线程版本更替**——本轮落库后同线程内
+    其它请求下仍 proposed 的候选过期；跨线程（哪怕同计划）不自动过期，明确重做才更替。
+    `thread_id=None`（兼容旧调用方）沿用按计划过期的旧口径。
     """
-    rows = conn.execute(
-        """SELECT c.id FROM candidate c
-           JOIN learning_request r ON r.id = c.request_id
-           WHERE c.status = 'proposed' AND c.request_id != ?
-             AND r.plan_id IS ?""",
-        (keep_request_id, plan_id),
-    ).fetchall()
+    if thread_id is not None:
+        where, params = _thread_rows_where(thread_id, alias="r")
+        rows = conn.execute(
+            f"""SELECT c.id FROM candidate c
+               JOIN learning_request r ON r.id = c.request_id
+               WHERE c.status = 'proposed' AND c.request_id != ?
+                 AND {where}""",
+            [keep_request_id, *params],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT c.id FROM candidate c
+               JOIN learning_request r ON r.id = c.request_id
+               WHERE c.status = 'proposed' AND c.request_id != ?
+                 AND r.plan_id IS ?""",
+            (keep_request_id, plan_id),
+        ).fetchall()
     expired: list[int] = []
     for row in rows:
         ledger.set_status(
@@ -1106,7 +1961,28 @@ def expire_previous_candidates(
 
 
 def propose_candidates(
-    conn: sqlite3.Connection, *, request_id: int, result: dict[str, Any]
+    conn: sqlite3.Connection,
+    *,
+    request_id: int,
+    result: dict[str, Any],
+    thread_id: int | None = None,
+    redo: bool = False,
+) -> list[int]:
+    if not result.get("candidates"):
+        return []
+    with atomic(conn):
+        return _propose_candidates_locked(
+            conn, request_id=request_id, result=result, thread_id=thread_id, redo=redo
+        )
+
+
+def _propose_candidates_locked(
+    conn: sqlite3.Connection,
+    *,
+    request_id: int,
+    result: dict[str, Any],
+    thread_id: int | None = None,
+    redo: bool = False,
 ) -> list[int]:
     """把候选清单落成 `proposed` 候选行，返回候选 id（按优先级顺序）。
 
@@ -1117,10 +1993,19 @@ def propose_candidates(
     `path` 形状（T34）落**一行**伞候选，先后步骤存在它的 `payload` 里（新列，与
     `proposal.payload` 同一用法）——步骤不是候选，不单独裁定、不进禁区。
 
-    落库的最后一步是**让上一轮过期**（SPEC 决策 34）：同一计划下没裁定过的旧候选
-    不再挂着等你，但也不进禁区——过期只是「这轮不算数了」。过期按伞候选走，
-    步骤随 payload 一起失效（伞候选过期 = 这条路这轮不算数了）。
+    没有候选的轮（intent 为 chat / need_info）到这里就该是空手：直接返回、**不触发过期**
+    ——只有新版候选真的落库，旧版才更替（II-03）；一句寒暄不该把挂着的候选清掉。
+
+    落库的最后一步是**版本更替**（决策 34 + C4④ + F6 复核整改）：`thread_id` 给了时，
+    只有 `redo=True`（用户明确要求重做）才做**同线程过期更替**；普通候选轮照常落候选
+    但**不动**旧的未裁定候选——两版并存，旧的仍可裁定（已采纳的永不过期，语义不变）。
+    此前任何候选轮都更替旧版，模型自报一轮候选就能把用户还没表态的旧清单顶掉。
+    `thread_id=None`（兼容旧调用方）沿用按计划过期的旧口径，行为不变。过期不进禁区
+    ——过期只是「这轮不算数了」。过期按伞候选走，步骤随 payload 一起失效
+    （伞候选过期 = 这条路这轮不算数了）。
     """
+    if not result.get("candidates"):
+        return []
     is_path = result.get("shape") == "path"
     steps_payload = (
         json.dumps({"shape": "path", "steps": result["steps"]}, ensure_ascii=False)
@@ -1156,21 +2041,54 @@ def propose_candidates(
     request_row = conn.execute(
         "SELECT plan_id FROM learning_request WHERE id = ?", (request_id,)
     ).fetchone()
-    expire_previous_candidates(
-        conn,
-        keep_request_id=request_id,
-        plan_id=None if request_row is None else request_row["plan_id"],
-    )
+    plan_id = None if request_row is None else request_row["plan_id"]
+    if thread_id is not None:
+        # F6：同线程更替只在明确重做时发生；普通轮两版并存（见 docstring）
+        if redo:
+            expire_previous_candidates(
+                conn, keep_request_id=request_id, plan_id=plan_id, thread_id=thread_id
+            )
+    else:
+        # 旧调用方兜底（thread_id=None）：沿用按计划过期的旧口径
+        expire_previous_candidates(
+            conn, keep_request_id=request_id, plan_id=plan_id, thread_id=None
+        )
     return ids
 
 
-def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> dict[str, Any]:
+def list_candidates(
+    conn: sqlite3.Connection,
+    request_id: int | None = None,
+    thread_id: int | None = None,
+) -> dict[str, Any]:
     """取某轮「找」的候选清单。不传 `request_id` 就取最近一轮有候选的那次请求。
 
+    `thread_id` 给了（且未指定 `request_id`）就取**该探索线程内**最近一轮有候选的请求
+    （C4④的读侧）：恢复会话时按线程找回上一版清单，而不是全局捞最新一轮。
     返回里**带上状态**（`proposed` / `accepted` / `rejected` / `expired`）：界面要能把
     「你已经否掉过哪些」「哪些被新一轮顶掉了」也显示出来——去重是「不再推荐」，
-    不是「假装它没发生过」。同时带上这一轮的计划归属（`plan_id`，为空 = 新方向）。
+    不是「假装它没发生过」。同时带上这一轮的计划归属（`plan_id`，为空 = 新方向）与
+    线程归属（`thread_id`，为空 = 旧记录或未按线程查）。
     """
+    if request_id is None and thread_id is not None:
+        where, params = _thread_rows_where(thread_id, alias="r")
+        latest = conn.execute(
+            f"""SELECT c.request_id FROM candidate c
+                JOIN learning_request r ON r.id = c.request_id
+                WHERE {where} ORDER BY c.id DESC LIMIT 1""",
+            params,
+        ).fetchone()
+        if latest is None:
+            # 这条线程还没出过候选：就此打住——不许回头去捞**别的线程**的最新一轮
+            return {
+                "request_id": None,
+                "raw_text": None,
+                "plan_id": None,
+                "thread_id": thread_id,
+                "candidates": [],
+                "recommended": None,
+            }
+        request_id = int(latest["request_id"])
     if request_id is None:
         latest = conn.execute("SELECT request_id FROM candidate ORDER BY id DESC LIMIT 1").fetchone()
         request_id = int(latest["request_id"]) if latest is not None else None
@@ -1179,12 +2097,13 @@ def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> 
             "request_id": None,
             "raw_text": None,
             "plan_id": None,
+            "thread_id": thread_id,
             "candidates": [],
             "recommended": None,
         }
 
     request_row = conn.execute(
-        "SELECT id, kind, raw_text, plan_id, created_at FROM learning_request WHERE id = ?",
+        "SELECT id, kind, raw_text, plan_id, thread_id, created_at FROM learning_request WHERE id = ?",
         (request_id,),
     ).fetchone()
     rows = conn.execute(
@@ -1195,6 +2114,8 @@ def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> 
     ).fetchall()
     candidates = [dict(row) for row in rows]
     plan_id = None if request_row is None else request_row["plan_id"]
+    # 线程归属 = 该行自己的 thread_id（即线程头 id）；旧记录是 NULL，就按它自己算
+    row_thread_id = None if request_row is None else request_row["thread_id"]
     for item in candidates:
         item["plan_id"] = plan_id  # 候选随请求继承归属（SPEC 决策 33 ①）
         # 形状从 payload 解出来（T34）：老形状的候选 payload 是空的，按 directions 渲染。
@@ -1205,10 +2126,58 @@ def list_candidates(conn: sqlite3.Connection, request_id: int | None = None) -> 
         "request_id": request_id,
         "raw_text": None if request_row is None else request_row["raw_text"],
         "plan_id": plan_id,
+        "thread_id": row_thread_id,
         "created_at": None if request_row is None else request_row["created_at"],
         "candidates": candidates,
         "recommended": recommended,
     }
+
+
+def list_search_requests(
+    conn: sqlite3.Connection,
+    plan_id: int | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """读取「找方向」的历史轮次，供前端恢复会话上下文。每行带线程归属（旧记录为 None）。"""
+    bounded_limit = max(1, min(int(limit), 200))
+    select = "SELECT id, raw_text, utterance, intent, reply, turn_status, plan_id, thread_id, clarify, shape_change, created_at FROM learning_request "
+    if plan_id is None:
+        rows = conn.execute(
+            select + "WHERE kind = 'search' ORDER BY id DESC LIMIT ?",
+            (bounded_limit,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            select + "WHERE kind = 'search' AND plan_id IS ? ORDER BY id DESC LIMIT ?",
+            (plan_id, bounded_limit),
+        ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        request_id = int(row["id"])
+        candidate_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM candidate WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()["count"]
+        result.append(
+            {
+                "request_id": request_id,
+                "raw_text": row["raw_text"],
+                "utterance": row["utterance"] if row["utterance"] is not None else row["raw_text"],
+                "intent": row["intent"] or ("candidates" if candidate_count else "need_info" if row["clarify"] else None),
+                "reply": row["reply"],
+                "status": row["turn_status"] or "success",
+                "plan_id": row["plan_id"],
+                "thread_id": row["thread_id"],
+                "created_at": row["created_at"],
+                "clarify": _stored_clarify(row["clarify"]),
+                # 待确认的形态切换提案（若有）：前端刷新后据此恢复「等用户拍板」的确认条
+                "shape_change": _stored_shape_change(row["shape_change"]),
+                "candidate_count": int(candidate_count),
+                "has_candidates": int(candidate_count) > 0,
+            }
+        )
+    return result
 
 
 def _shape_and_steps(payload: Any) -> tuple[str, list[dict[str, Any]]]:
