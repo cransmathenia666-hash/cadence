@@ -210,7 +210,7 @@ function ContractSummary({
           </div>
           <p className="mt-2 max-w-[75ch] text-[12px] leading-5 text-white/50">
             只有改动过的段落会随批准提交（提案 #{proposalId} 的原稿与最终快照都会留档）。
-            验收条件与证据要求不在这里改——需要调整就退回规划对话，让它重新出一版。
+            验收条件与证据要求不在这里改——需要调整就点下方「补充信息，回规划对话」，让它重新出一版。
           </p>
         </details>
       )}

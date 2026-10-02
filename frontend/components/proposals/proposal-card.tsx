@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, X } from "lucide-react";
 import { isBlueprintV2, type BlueprintPayload, type Proposal } from "@/lib/api";
 import { ActionSwapButton } from "@/components/motion/action-swap";
 import { KIND_CONFIG } from "./types";
@@ -56,6 +56,7 @@ export function ProposalCard({
   onSelection,
   busy,
   onDecide,
+  onReturnBlueprint,
   isRejecting,
   onStartReject,
   onCancelReject,
@@ -74,6 +75,7 @@ export function ProposalCard({
     reason?: string,
     extra?: { confirmContract?: boolean; contractOverrides?: Record<string, unknown> | null },
   ) => Promise<boolean>;
+  onReturnBlueprint?: (reason: string) => Promise<boolean>;
   isRejecting: boolean;
   onStartReject: () => void;
   onCancelReject: () => void;
@@ -84,6 +86,9 @@ export function ProposalCard({
   const [inFlight, setInFlight] = useState<null | "approve" | "reject">(null);
   // v2 蓝图批准的显式确认（OC-07）：没勾就不发批准请求——后端也会拒绝，不半猜。
   const [confirmContract, setConfirmContract] = useState(false);
+  const [returnOpen, setReturnOpen] = useState(false);
+  const [returnReason, setReturnReason] = useState("");
+  const [returnPending, setReturnPending] = useState(false);
   // 契约文字草稿（可选的简单编辑）：页面用 proposal.id 做 key，切提案即重置。
   const [contractDraft, setContractDraft] = useState<ContractTextDraft | null>(() =>
     contractDraftOf(proposal.payload as unknown as BlueprintPayload),
@@ -96,8 +101,14 @@ export function ProposalCard({
   };
 
   const isBlueprint = proposal.kind === "plan_blueprint";
+  const blueprintPayload = proposal.payload as unknown as BlueprintPayload;
   const blueprintV2 = isBlueprint && isBlueprintV2(proposal.payload);
   const blueprintV1 = isBlueprint && !blueprintV2;
+  const canReturnToPlanning =
+    blueprintV2 &&
+    typeof blueprintPayload.candidate_id === "number" &&
+    typeof blueprintPayload.planning_session_id === "number" &&
+    onReturnBlueprint !== undefined;
   const nothingTicked = isBlueprint && selection.length === 0;
   const confirmMissing = blueprintV2 && !confirmContract;
   const contractDraftError = blueprintV2 ? contractDraftErrorOf(contractDraft) : null;
@@ -114,7 +125,7 @@ export function ProposalCard({
   const title = getReadingTitle(proposal);
 
   async function runDecide(approved: boolean, reason?: string) {
-    if (inFlight !== null) return;
+    if (inFlight !== null || returnPending) return;
     // 不满足批准前提就不发请求（就地说明，见页脚提示），也不进「处理中」状态。
     if (approved && approveBlocked) return;
     setInFlight(approved ? "approve" : "reject");
@@ -130,6 +141,18 @@ export function ProposalCard({
         : undefined;
     await onDecide(approved, reason, extra);
     setInFlight(null);
+  }
+
+  async function runReturn() {
+    const reason = returnReason.trim();
+    if (!reason || !onReturnBlueprint || inFlight !== null || returnPending) return;
+    setReturnPending(true);
+    const ok = await onReturnBlueprint(reason);
+    setReturnPending(false);
+    if (ok) {
+      setReturnOpen(false);
+      setReturnReason("");
+    }
   }
 
   // 按钮只承担请求中的状态反馈；成功后切到真实结果，而不是停在一颗按钮上。
@@ -233,10 +256,64 @@ export function ProposalCard({
             )}
           </div>
         )}
+        {canReturnToPlanning && returnOpen && (
+          <div className="mb-4 border-l border-amber-400/70 bg-amber-500/[0.06] px-4 py-3">
+            <label htmlFor={`return-blueprint-${proposal.id}`} className="block text-[13px] font-medium text-white/85">
+              为什么先不批准这版蓝图？
+            </label>
+            <p className="mt-1 text-[12px] leading-5 text-white/55">
+              写清缺少的事实或需要调整的地方；提交后会回到同一条规划对话，蓝图本身不再等待裁定。
+            </p>
+            <textarea
+              id={`return-blueprint-${proposal.id}`}
+              value={returnReason}
+              onChange={(event) => setReturnReason(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void runReturn();
+                }
+              }}
+              rows={2}
+              placeholder="例如：还没有确认跟做材料，以及每周可投入的时间。"
+              disabled={busy || returnPending}
+              className="mt-3 w-full resize-y rounded-md border border-white/[0.12] bg-black/20 px-3 py-2 text-[13px] leading-6 text-primary outline-none placeholder:text-white/35 focus:border-white/35 disabled:opacity-50"
+            />
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => { setReturnOpen(false); setReturnReason(""); }}
+                disabled={busy || returnPending}
+                className="rounded-md border border-white/[0.12] px-4 py-2 text-[12px] text-white/70 hover:border-white/30 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70 disabled:opacity-50"
+              >
+                先不退回
+              </button>
+              <button
+                type="button"
+                onClick={() => void runReturn()}
+                disabled={busy || returnPending || !returnReason.trim()}
+                className="rounded-md bg-amber-500 px-4 py-2 text-[12px] font-medium text-black hover:bg-amber-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:opacity-50"
+              >
+                {returnPending ? "正在回到规划对话…" : "确认退回并补充信息"}
+              </button>
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-3 flex-wrap">
                 {!isRejecting ? (
                   <>
+                    {canReturnToPlanning && !returnOpen && (
+                      <button
+                        type="button"
+                        onClick={() => setReturnOpen(true)}
+                        disabled={busy || returnPending}
+                        className="inline-flex items-center gap-2 rounded-md border border-white/[0.12] px-4 py-2.5 text-[13px] font-medium text-white/75 transition-colors hover:border-white/[0.3] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70 disabled:opacity-50"
+                      >
+                        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+                        补充信息，回规划对话
+                      </button>
+                    )}
                     <ActionSwapButton
                       items={approveItems}
                       value={approveValue}

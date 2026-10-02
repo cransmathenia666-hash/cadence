@@ -7,10 +7,12 @@ import {
   ApiError,
   decideProposal,
   listProposals,
+  returnBlueprintToPlanning,
   type Proposal,
   type ProposalDecision,
 } from "@/lib/api";
 import { selectionOf } from "@/components/blueprint-body";
+import { setActiveFindChat } from "@/components/candidates/find-session";
 import { ProposalCard, getProposalTitle } from "@/components/proposals/proposal-card";
 import { KIND_CONFIG } from "@/components/proposals/types";
 import { ActionResultCard } from "@/components/ui/action-result-card";
@@ -71,6 +73,39 @@ export default function ProposalsPage() {
     setSelectedPlanId(planId);
     void refreshPlans();
     router.push(`/workbench?plan_id=${encodeURIComponent(String(planId))}`);
+  }
+
+  /** 把蓝图退回同一段规划对话；候选页会据此自动恢复右栏。 */
+  async function onReturnBlueprint(proposal: Proposal, reason: string): Promise<boolean> {
+    const payload = proposal.payload as Record<string, unknown>;
+    const candidateId = typeof payload.candidate_id === "number" ? payload.candidate_id : null;
+    const planningSessionId =
+      typeof payload.planning_session_id === "number" ? payload.planning_session_id : null;
+    if (candidateId === null || planningSessionId === null) {
+      setError("这份蓝图没有可恢复的规划会话，请回候选页重新打开规划对话。");
+      return false;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await returnBlueprintToPlanning(proposal.id, { planningSessionId, reason });
+      setActiveFindChat({
+        candidateId,
+        planId: typeof payload.plan_id === "number" ? payload.plan_id : null,
+        planningSessionId,
+      });
+      setProposals((previous) => (previous ?? []).filter((item) => item.id !== proposal.id));
+      setActiveId(null);
+      setResultId(null);
+      refresh();
+      router.push("/candidates");
+      return true;
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "退回规划失败，原因不明");
+      return false;
+    } finally {
+      setBusy(false);
+    }
   }
 
   /** 返回是否成功（成功=true）；失败只落页内错误条，卡上的按钮必须回到可点。 */
@@ -249,6 +284,7 @@ export default function ProposalsPage() {
                 onDecide={(approved, reason, extra) =>
                   onDecide(activeProposal, approved, reason, extra)
                 }
+                onReturnBlueprint={(reason) => onReturnBlueprint(activeProposal, reason)}
                 isRejecting={rejectingId === activeProposal.id}
                 onStartReject={() => { setRejectingId(activeProposal.id); setRejectReason(""); }}
                 onCancelReject={() => { setRejectingId(null); setRejectReason(""); }}
