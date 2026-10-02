@@ -376,8 +376,18 @@ def test_accept_and_the_two_refusals(conn):
         reason="测试用",
     )
 
-    # 「新方向」的候选没有计划归属，采纳时要显式指明落点（SPEC 决策 33 ②）
-    assert advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)["status"] == "accepted"
+    # 「新方向」的候选没有计划归属，采纳时可用 plan_id 指明延续哪个已有计划（规划落点）
+    result = advisor.decide_candidate(conn, candidate_id, accept=True, plan_id=plan_id)
+    assert result["status"] == "accepted"
+    # OC-05：采纳进入规划——创建 planning_session 且不建阶段
+    assert result["planning_session_id"] is not None
+    assert result["created_planning_session"] is True
+    assert result["planning_status"] == "needs_blueprint"
+    assert result["node_id"] is None
+    session = advisor.get_planning_session(conn, result["planning_session_id"])
+    assert session["status"] == "active"
+    assert int(session["landing_plan_id"]) == plan_id
+    assert int(session["candidate_id"]) == candidate_id
 
     # 已经裁定过的不能再改
     with pytest.raises(advisor.CandidateConflict):
@@ -398,9 +408,9 @@ def make_candidate(conn, title: str, plan_id: int | None = None) -> int:
     )
 
 
-# ---------- 采纳落点（2026-09-17 起：落候选归属计划；SPEC 决策 33 ②） ----------
+# ---------- 采纳落点（2026-10-01 OC-05 起：采纳只记规划落点 + 开规划会话，不再建阶段） ----------
 
-def test_accept_lands_in_the_attributed_plan(conn):
+def test_accept_lands_in_the_attributed_plan_without_building_a_stage(conn):
     attributed = ledger.create_active(conn, "plan", {"goal": "被指定的计划"}, actor="user")
     ledger.create_active(conn, "plan", {"goal": "更新的计划"}, actor="user")  # 更新，但不该落它
     candidate_id = make_candidate(conn, "学 HTTP", plan_id=attributed)
@@ -408,29 +418,40 @@ def test_accept_lands_in_the_attributed_plan(conn):
     result = main.post_candidate_verdict(candidate_id, VerdictIn(accept=True), conn)
 
     assert result["status"] == "accepted"
-    assert result["plan_id"] == attributed
-    node = plan.get_node(conn, result["node_id"])
-    assert node["level"] == "stage" and node["title"] == "学 HTTP"
-    assert int(node["plan_id"]) == attributed
-    # 节点自己走台账留痕：一条 create 事件，紧随候选的 accepted 之后
-    events = ledger.history(conn, "plan_node", result["node_id"])
+    assert result["plan_id"] == attributed  # 兼容字段：语义是「规划落点」
+    assert result["landing_plan_id"] == attributed
+    assert result["node_id"] is None  # 采纳不再建阶段
+    # 计划结构一个没动：没有新阶段、没有新节点
+    assert plan.get_stages(conn, attributed) == []
+    assert conn.execute("SELECT COUNT(*) AS n FROM plan_node").fetchone()["n"] == 0
+    # 落点与规划会话都留住了
+    row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
+    assert row["landing_plan_id"] == attributed
+    session = advisor.get_planning_session(conn, result["planning_session_id"])
+    assert session["status"] == "active"
+    events = ledger.history(conn, "planning_session", result["planning_session_id"])
     assert [event["change_type"] for event in events] == ["create"]
 
 
-def test_accept_without_attribution_needs_an_explicit_plan(conn):
-    plan_id = ledger.create_active(conn, "plan", {"goal": "某计划"}, actor="user")
+def test_accept_without_attribution_adopts_as_a_new_direction(conn):
+    """OC-05：「新方向」的候选没有现存 active 计划也能采纳——只开规划会话，不建正式计划。"""
     candidate_id = make_candidate(conn, "学 HTTP")  # 「新方向」：没有计划归属
 
-    with pytest.raises(advisor.CandidateConflict):
-        advisor.decide_candidate(conn, candidate_id, accept=True)  # 不指明就不许采纳
+    result = advisor.decide_candidate(conn, candidate_id, accept=True)
 
-    assert conn.execute(
-        "SELECT status FROM candidate WHERE id = ?", (candidate_id,)
-    ).fetchone()["status"] == "proposed"  # 没动它，可重试
+    assert result["status"] == "accepted"
+    assert result["plan_id"] is None and result["landing_plan_id"] is None
+    assert result["node_id"] is None
+    # 不创建正式计划、更不会出现 plan.status=draft 之类的中间状态
+    assert conn.execute("SELECT COUNT(*) AS n FROM plan").fetchone()["n"] == 0
+    session = advisor.get_planning_session(conn, result["planning_session_id"])
+    assert session["status"] == "active"
+    assert session["landing_plan_id"] is None  # 新方向：转换（蓝图批准）前没有落点
 
-    assert advisor.decide_candidate(
-        conn, candidate_id, accept=True, plan_id=plan_id
-    )["plan_id"] == plan_id
+    # 指明延续某个已有计划的采纳照旧记录落点
+    plan_id = ledger.create_active(conn, "plan", {"goal": "某计划"}, actor="user")
+    other = make_candidate(conn, "学后端")
+    assert advisor.decide_candidate(conn, other, accept=True, plan_id=plan_id)["plan_id"] == plan_id
 
 
 def test_accept_refuses_a_plan_that_contradicts_the_attribution(conn):
@@ -451,28 +472,18 @@ def test_accept_refuses_a_closed_plan(conn):
         advisor.decide_candidate(conn, candidate_id, accept=True)
 
 
-def test_accept_without_any_active_plan_conflicts_and_keeps_candidate_proposed(conn):
-    candidate_id = make_candidate(conn, "学 HTTP")
-
-    with pytest.raises(advisor.CandidateConflict):
-        advisor.decide_candidate(conn, candidate_id, accept=True)
-
-    row = conn.execute("SELECT status FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
-    assert row["status"] == "proposed"  # 没动它，建完计划可重试
-
-
-def test_accept_with_same_title_open_stage_conflicts_and_keeps_candidate_proposed(conn):
+def test_accept_with_same_title_open_stage_keeps_the_plan_untouched(conn):
+    """OC-05：同名开着的阶段不再是采纳的阻碍——采纳只记归属，计划结构一个不碰。"""
     plan_id = ledger.create_active(conn, "plan", {"goal": "计划"}, actor="user")
     plan.add_node(conn, plan_id, "stage", "学 HTTP")
     candidate_id = make_candidate(conn, "学 HTTP")
 
-    with pytest.raises(advisor.CandidateConflict):
-        advisor.decide_candidate(conn, candidate_id, accept=True)
+    result = advisor.decide_candidate(conn, candidate_id, accept=True)
 
-    row = conn.execute("SELECT status FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
-    assert row["status"] == "proposed"
+    assert result["status"] == "accepted"
     stages = plan.get_stages(conn, plan_id)
     assert len(stages) == 1  # 没有第二条同名阶段被建出来
+    assert conn.execute("SELECT COUNT(*) AS n FROM plan_node").fetchone()["n"] == 1
 
 
 def test_list_candidates_defaults_to_the_latest_search(conn):
@@ -1101,7 +1112,7 @@ def test_missing_shape_is_unqualified(conn):
     assert advisor.find_candidates(conn, "我不知道该学什么", transport=transport)["attempts"] == 2
 
 
-def test_accepting_a_path_candidate_builds_the_umbrella_stage_and_returns_steps(conn):
+def test_accepting_a_path_candidate_returns_steps_without_building_stages(conn):
     plan_id = ledger.create_active(conn, "plan", {"goal": "学 agent"}, actor="user")
     request_id = advisor.record_request(conn, "search", "问过", plan_id)
     steps = [step("先把异步基础打牢"), step("写一个能跑通的循环")]
@@ -1124,8 +1135,10 @@ def test_accepting_a_path_candidate_builds_the_umbrella_stage_and_returns_steps(
 
     assert result["shape"] == "path"
     assert [item["title"] for item in result["steps"]] == ["先把异步基础打牢", "写一个能跑通的循环"]
-    node = plan.get_node(conn, result["node_id"])
-    assert node["level"] == "stage" and node["title"] == "从零到部署学通 agent 开发"
+    # OC-05：步骤是规划对话的底稿，采纳不建伞阶段
+    assert result["node_id"] is None
+    assert plan.get_stages(conn, plan_id) == []
+    assert result["planning_session_id"] is not None
 
 
 def test_rejecting_a_path_candidate_returns_no_steps(conn):

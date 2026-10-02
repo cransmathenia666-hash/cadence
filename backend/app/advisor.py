@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -2213,17 +2213,23 @@ def decide_candidate(
     reason: str | None = None,
     plan_id: int | None = None,
 ) -> dict[str, Any]:
-    """采纳或否决一条候选。
+    """采纳或否决一条候选（2026-10-01 成果闭环 OC-05 起：采纳 = 进入规划，不再建阶段）。
 
     与提案裁定同一条口径（SPEC 第 18 节第 22 条）：候选的「不再算数」由自己的业务终态
     表达（`accepted` / `rejected`），不动台账的生命周期列。否决必须写理由——它同时进
     `reject_reason` 列与台账流水，下次「找」把标题当禁区用。
 
-    采纳落点**显式化**（SPEC 决策 33 ②，2026-09-17）：候选是一条学习方向，采纳时落成
-    一个阶段——落进**候选自带的计划归属**；归属为空（「新方向」）时必须由 `plan_id`
-    指明进哪个计划，否则报错，绝不「偷偷落最新」。台账每个操作各自提交、没有请求级事务，
-    所以「计划存在 / 无同名未收尾阶段」都**预检在改候选状态之前**——失败时候选保持
-    proposed 可重试，绝不留下「已采纳却没建阶段」的半截状态。
+    采纳（方案 §3.3）只做三件事，**不再调用 plan.add_node**：
+
+    ① 候选标 `accepted`；
+    ② 解析并记录**规划落点**（`candidate.landing_plan_id`，T37 的列保留，语义从
+       「已建阶段的归属」改为「规划落点」）。「新方向」的候选没有现存 active 计划也能
+       采纳——落点为空，正式计划要等蓝图批准时才创建，**绝不新增 plan.status=draft**；
+       落点定到某个已有计划的只记归属，不改计划结构（不建阶段、不建任务）。
+    ③ 创建（或挂接）这条候选的 `planning_session`，状态 `active`。
+
+    整个采纳包在一个事务（`db.atomic`）里：落点解析不过、会话建不出来，候选都保持
+    proposed 可重试，绝不留下「已采纳却没进规划」的半截状态。
     """
     row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
     if row is None:
@@ -2238,39 +2244,55 @@ def decide_candidate(
         raise AdvisorError("否决必须写明理由——它会被当成禁区，下次「找」不再推荐它")
 
     target_plan_id: int | None = None
+    session_id: int | None = None
+    created_session = False
     if accept:
-        target_plan_id = landing_plan(conn, row, plan_id)
-        try:
-            # add_node 内部还会再查一次重名；这里提前查是为了把失败挡在改状态之前
-            plan.assert_no_open_duplicate(conn, target_plan_id, "stage", str(row["title"]))
-        except plan.DuplicateNode as error:
-            raise CandidateConflict(str(error)) from error
-
-    ledger.set_status(
-        conn,
-        "candidate",
-        candidate_id,
-        target,
-        actor="user",
-        reason=None if reason is None else reason.strip(),
-        # 否决理由与**采纳落点**都并进同一条 UPDATE（T37：落点要留得住，见 `landing_plan`）。
-        # 两者互斥：采纳时记落点、否决时记理由，不会同时出现。
-        extra=(
-            {"reject_reason": reason.strip()} if not accept else {"landing_plan_id": target_plan_id}
-        ),
-    )
-
-    node_id: int | None = None
-    if accept:
-        node_id = plan.add_node(conn, target_plan_id, "stage", str(row["title"]), actor="user")
+        with atomic(conn):
+            # 预检（只读）：落点定不下来就整个不动，候选保持 proposed 可重试
+            target_plan_id = planning_landing(conn, row, plan_id)
+            session_id, created_session = create_planning_session(conn, candidate_id, target_plan_id)
+            ledger.set_status(
+                conn,
+                "candidate",
+                candidate_id,
+                target,
+                actor="user",
+                # 采纳落点并进同一条 UPDATE（T37：落点要留得住）
+                extra={"landing_plan_id": target_plan_id},
+            )
+    else:
+        ledger.set_status(
+            conn,
+            "candidate",
+            candidate_id,
+            target,
+            actor="user",
+            reason=reason.strip(),
+            # 否决理由进同一条 UPDATE：它同时进 reject_reason 列与台账流水
+            extra={"reject_reason": reason.strip()},
+        )
 
     shape, steps = _shape_and_steps(row["payload"])
     return {
         "id": candidate_id,
         "status": target,
         "reject_reason": None if accept else reason,
+        # 兼容字段（方案 §6.1）：plan_id 的语义从「已建阶段的归属」改为「规划落点」，
+        # 旧客户端仍可读取；「新方向」的采纳它为 None。
         "plan_id": target_plan_id,
-        "node_id": node_id,
+        "landing_plan_id": target_plan_id,
+        # 兼容字段：采纳不再建阶段，恒为 None——旧前端读到的一律是「没有阶段」。
+        "node_id": None,
+        # 新流程回执：规划会话与它的状态（方案 §3.3 的响应形状）。
+        "planning_session_id": session_id,
+        "planning_status": "needs_blueprint" if accept else None,
+        "created_planning_session": created_session,
+        "message": (
+            "已选定这个方向，下一步先把成果和验收标准说清楚；"
+            "正式阶段会在蓝图批准后建立。"
+            if accept
+            else None
+        ),
         # 采纳一条路径候选（T34）时把步骤草案一并回带：界面与规划对话要拿它当底稿。
         # 否决时它是空的——否掉的是那条路，没有「剩下的几步」可言。
         "shape": shape,
@@ -2278,25 +2300,70 @@ def decide_candidate(
     }
 
 
-def landing_plan(
+# ---------- 规划会话（成果闭环 OC-05，方案 §5.2 planning_session） ----------
+#
+# 「候选已采纳、蓝图未批准」的临时规划容器。它不占用计划列表、不参与报告 / 落后量 /
+# 收尾，也不新增 plan.status=draft——正式计划与阶段只由蓝图批准建立（OC-07 的原子批准）。
+
+# 无活动期限（天数）：超过它的 active / blueprint_pending 会话可被标成 expired。
+# 写成常量便于按实测调整（方案 §5.2：「超出配置的无活动期限进入 expired」）。
+PLANNING_SESSION_TTL_DAYS = 14
+
+# 「还活着」的会话状态；其余三个（converted / abandoned / expired）都是终态。
+PLANNING_SESSION_ACTIVE: tuple[str, ...] = ("active", "blueprint_pending")
+
+# planning_session 的状态机（方案 §5.2）：正向路径 active → blueprint_pending → converted；
+# abandoned / expired 是两个终态，都不允许重新打开。blueprint_pending → active 是
+# 「蓝图被驳回 / 被退回对话」的回退边——对话历史不丢，接着聊。
+_SESSION_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "active": ("blueprint_pending", "abandoned", "expired"),
+    "blueprint_pending": ("active", "converted", "abandoned", "expired"),
+    "converted": (),
+    "abandoned": (),
+    "expired": (),
+}
+
+
+def get_planning_session(conn: sqlite3.Connection, session_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM planning_session WHERE id = ?", (session_id,)
+    ).fetchone()
+
+
+def active_planning_session(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.Row | None:
+    """这条候选当前**活着**的规划会话（active 或 blueprint_pending）；没有就 None。"""
+    return conn.execute(
+        "SELECT * FROM planning_session WHERE candidate_id = ?"
+        f" AND status IN ({', '.join('?' * len(PLANNING_SESSION_ACTIVE))})"
+        " ORDER BY id DESC LIMIT 1",
+        (candidate_id, *PLANNING_SESSION_ACTIVE),
+    ).fetchone()
+
+
+def latest_planning_session(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.Row | None:
+    """这条候选**最近一条**规划会话（含终态）；从没进过规划就 None。
+
+    用途：判断一条候选是不是「进过规划」——进过的候选，它的对话一律按会话走，
+    不再回落到旧的 (候选, 计划) 线程（免得在会话之外另开一条线程、把树建到落点之外）。
+    """
+    return conn.execute(
+        "SELECT * FROM planning_session WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+        (candidate_id,),
+    ).fetchone()
+
+
+def planning_landing(
     conn: sqlite3.Connection, candidate: sqlite3.Row, explicit_plan_id: int | None
-) -> int:
-    """这条候选该落进哪个计划（SPEC 决策 33 ②）。
+) -> int | None:
+    """采纳时的**规划落点**：显式指定 > 候选自带的归属；都定不下来就是「新方向」→ None。
 
-    顺序：**采纳时已经落定的那个计划**（`landing_plan_id`，T37）> 调用方显式指定 >
-    候选自带的归属；都定不下来就报错（不许偷偷落最新）。
+    与旧 `landing_plan`（严格版）的差别只在最后一档：落不进任何计划**不再报错**——
+    方案 §3.3 采纳只进入规划，新方向的候选没有现存 active 计划也能采纳，正式计划在
+    蓝图批准时才创建。落点定了的仍当场核对（只读预检）：计划必须存在且进行中——
+    往一个已收尾的计划「延续规划」没有意义。
 
-    第一档为什么必须在最前（2026-09-21 T37 补的洞）：「新方向」的候选（那一轮不属于任何
-    计划）落点是**采纳那一刻现选的**——此前这个事实只活在当刻响应与 `plan_chat` 里，
-    刷新一次页面就没了：规划对话会不知道自己在哪个计划里，又让人「先指定注入的计划」，
-    直接聊甚至报「这条候选没有计划归属」。可它明明已经落进去了（阶段都建好了）。
-    所以落点记在候选自己身上（`candidate.landing_plan_id`），它同时是这段对话的归属依据。
-
-    显式指定与它不一致也报错——与「候选归属 vs 显式指定」同一条口径：落点是一个既定事实，
+    显式指定与既定事实（候选归属 / 已落定的落点）不一致照旧报错：落点是一个既定事实，
     不是每次调用都能重新表决的。
-
-    公开（去掉前导下划线）是因为 `blueprint.py` 的对话与蓝图要用**同一套**归属校验：
-    采纳落哪个计划、这段对话属于哪个计划，必须是同一个答案，否则蓝图会建到别的计划里。
     """
     landed = candidate["landing_plan_id"]
     if landed is not None:
@@ -2304,7 +2371,7 @@ def landing_plan(
             raise CandidateConflict(
                 f"这条候选采纳时已经落进计划 #{landed}，不能改成 #{explicit_plan_id}"
             )
-        target = int(landed)
+        target: int | None = int(landed)
     else:
         request_row = conn.execute(
             "SELECT plan_id FROM learning_request WHERE id = ?", (candidate["request_id"],)
@@ -2315,19 +2382,210 @@ def landing_plan(
                 f"这条候选属于计划 #{inherited}，不能落到计划 #{explicit_plan_id}"
             )
         chosen = inherited if inherited is not None else explicit_plan_id
-        if chosen is None:
-            raise CandidateConflict(
-                "这条候选没有计划归属（「新方向」）——采纳时要指明进哪个计划，"
-                "或先建一个新计划再采纳"
-            )
-        target = int(chosen)
+        target = None if chosen is None else int(chosen)
 
-    # 两条路都要当场核对：计划可能在这条候选落进去之后被收尾或作废了
-    plan_row = plan.resolve_plan(conn, target)
-    if plan_row is None:
-        raise CandidateConflict(f"计划 id={target} 不存在")
-    if plan_row["status"] != "active":
+    if target is not None:
+        # 当场核对：计划可能在这条候选落进去之后被收尾或作废了
+        plan_row = plan.resolve_plan(conn, target)
+        if plan_row is None:
+            raise CandidateConflict(f"计划 id={target} 不存在")
+        if plan_row["status"] != "active":
+            raise CandidateConflict(
+                f"计划 id={target} 已不是进行中（{plan_row['status']}），不能往里规划"
+            )
+    return target
+
+
+def landing_plan(
+    conn: sqlite3.Connection, candidate: sqlite3.Row, explicit_plan_id: int | None
+) -> int:
+    """这条候选的规划落点——**严格版**：落不下来就报错（不许偷偷落最新）。
+
+    供既有的规划对话链路（`blueprint.resolve_plan` 的 legacy 路径）用：那段对话必须挂在
+    一个计划名下才能出蓝图。采纳本身的落点解析走 `planning_landing`（允许「新方向」为空）。
+
+    公开（去掉前导下划线）是因为 `blueprint.py` 的对话与蓝图要用**同一套**归属校验：
+    采纳落哪个计划、这段对话属于哪个计划，必须是同一个答案，否则蓝图会建到别的计划里。
+    """
+    target = planning_landing(conn, candidate, explicit_plan_id)
+    if target is None:
         raise CandidateConflict(
-            f"计划 id={target} 已不是进行中（{plan_row['status']}），不能往里落阶段"
+            "这条候选没有计划归属（「新方向」）——规划对话要按会话（planning_session_id）走，"
+            "或先指明落在哪个计划"
         )
     return target
+
+
+def create_planning_session(
+    conn: sqlite3.Connection, candidate_id: int, landing_plan_id: int | None, *, actor: str = "user"
+) -> tuple[int, bool]:
+    """为一条刚采纳的候选创建（或挂接）规划会话。返回 `(session_id, 是否新建)`。
+
+    走台账 `create_active`：创建动作留流水。同一候选同时只有一条活着的会话——重复采纳
+    被候选自己的状态机挡住，这里再兜一层：已有 active / blueprint_pending 的会话就挂接
+    它，不重复建（方案 §5.2：候选再次进入规划时创建新的 session，旧 session 只读保留）。
+    """
+    existing = active_planning_session(conn, candidate_id)
+    if existing is not None:
+        return int(existing["id"]), False
+    now = datetime.now().astimezone()
+    timestamp = now.isoformat(timespec="seconds")
+    session_id = ledger.create_active(
+        conn,
+        "planning_session",
+        {
+            "candidate_id": candidate_id,
+            "landing_plan_id": landing_plan_id,
+            "status": "active",
+            "created_at": timestamp,
+            "last_activity_at": timestamp,
+            "expires_at": (now + timedelta(days=PLANNING_SESSION_TTL_DAYS)).isoformat(
+                timespec="seconds"
+            ),
+        },
+        actor=actor,
+        reason="采纳候选，进入规划（蓝图批准前不建正式阶段）",
+    )
+    return session_id, True
+
+
+def set_session_status(
+    conn: sqlite3.Connection,
+    session_id: int,
+    new_status: str,
+    *,
+    reason: str | None = None,
+    actor: str = "user",
+    extra: dict[str, Any] | None = None,
+) -> str:
+    """规划会话的状态迁移。只允许 `_SESSION_TRANSITIONS` 表里的边，终态不可重开。
+
+    走台账 `set_status`：业务表与流水一次写入。converted / abandoned / expired 是终态，
+    迁过去时把 `closed_at` / `closed_reason` 一并写上——「这个会话什么时候、为什么结束」
+    要能回答。同状态重复设置直接返回（幂等，不产生噪音流水）。
+
+    `extra` 是这次迁移同属一回事的附加字段（如新方向批准时回填 `landing_plan_id`），
+    并入同一条 UPDATE —— 与 ledger.set_status 的 extra 同一口径。
+    """
+    row = get_planning_session(conn, session_id)
+    if row is None:
+        raise AdvisorError(f"规划会话 id={session_id} 不存在")
+    current = str(row["status"])
+    if current == new_status:
+        return current
+    if new_status not in _SESSION_TRANSITIONS[current]:
+        raise AdvisorError(
+            f"规划会话不能从「{current}」变成「{new_status}」——"
+            "终态（converted / abandoned / expired）不可重开"
+        )
+    fields: dict[str, Any] = dict(extra or {})
+    if new_status in ("converted", "abandoned", "expired"):
+        fields.update({"closed_at": now_iso(), "closed_reason": reason})
+    return ledger.set_status(
+        conn, "planning_session", session_id, new_status,
+        actor=actor, reason=reason, extra=fields or None,
+    )
+
+
+def touch_session(conn: sqlite3.Connection, session_id: int) -> None:
+    """用户动作 / 模型成功回复之后，推进规划会话的活动时间（滑动的无活动期限）。
+
+    `last_activity_at` / `expires_at` 是运营账、不是业务状态——同 plan_chat 追加式的
+    先例，不经台账（台账回答「状态为什么变」，不回答「最后一句是什么时候说的」）。
+    """
+    now = datetime.now().astimezone()
+    conn.execute(
+        "UPDATE planning_session SET last_activity_at = ?, expires_at = ? WHERE id = ?",
+        (
+            now.isoformat(timespec="seconds"),
+            (now + timedelta(days=PLANNING_SESSION_TTL_DAYS)).isoformat(timespec="seconds"),
+            session_id,
+        ),
+    )
+    conn.commit()
+
+
+def reopen_planning_session(conn: sqlite3.Connection, candidate_id: int, *, actor: str = "user") -> dict[str, Any]:
+    """给一条**已采纳**的候选重新开一段规划（方案 §5.2：候选再次进入规划时创建新的 session）。
+
+    旧会话（expired / abandoned / converted）一律只读保留，不重开；这段新会话沿用候选
+    自己的规划落点（`landing_plan_id`）。已有活着（active / blueprint_pending）的会话时
+    幂等返回它，不重复建。
+
+    落点核对与采纳同一条口径：落点计划还在且进行中才继续；计划没了或已收尾就如实报错
+    （不悄悄把落点改成「新方向」——那等于替用户重表决了一次落点）。
+    """
+    row = conn.execute("SELECT * FROM candidate WHERE id = ?", (candidate_id,)).fetchone()
+    if row is None:
+        raise CandidateNotFound(f"候选 id={candidate_id} 不存在")
+    if str(row["status"]) != "accepted":
+        raise CandidateConflict(
+            f"候选 id={candidate_id} 还没采纳（当前 {row['status']}）——"
+            "先采纳它，再谈重新开始规划"
+        )
+
+    existing = active_planning_session(conn, candidate_id)
+    if existing is not None:
+        return {
+            "candidate_id": candidate_id,
+            "planning_session_id": int(existing["id"]),
+            "created": False,
+            "landing_plan_id": existing["landing_plan_id"],
+            "planning_status": "blueprint_pending"
+            if str(existing["status"]) == "blueprint_pending"
+            else "needs_blueprint",
+        }
+
+    landing = row["landing_plan_id"]
+    target: int | None = None
+    if landing is not None:
+        plan_row = plan.resolve_plan(conn, int(landing))
+        if plan_row is None:
+            raise CandidateConflict(
+                f"这条候选原先的规划落点是计划 #{landing}，但那个计划已经不在了——"
+                "重新采纳一条方向，或改用新的规划落点"
+            )
+        if str(plan_row["status"]) != "active":
+            raise CandidateConflict(
+                f"这条候选原先的规划落点是计划 #{landing}，它已不是进行中"
+                f"（{plan_row['status']}）——先把那边恢复，或重新采纳一条方向"
+            )
+        target = int(landing)
+
+    session_id, created = create_planning_session(conn, candidate_id, target, actor=actor)
+    return {
+        "candidate_id": candidate_id,
+        "planning_session_id": session_id,
+        "created": created,
+        "landing_plan_id": target,
+        "planning_status": "needs_blueprint",
+    }
+
+
+def expire_stale_sessions(conn: sqlite3.Connection) -> list[int]:
+    """把超过无活动期限的 active / blueprint_pending 会话标成 expired（终态）。
+
+    供周期任务调用（本批次只提供入口，不接定时 job）；读取路径上另有一道懒过期
+    （`blueprint._ensure_session_alive`），两处最终都走 `set_session_status`。
+    过期不是否决：会话只读保留，候选仍是 accepted。
+    """
+    rows = conn.execute(
+        "SELECT id FROM planning_session"
+        f" WHERE status IN ({', '.join('?' * len(PLANNING_SESSION_ACTIVE))})"
+        " AND expires_at IS NOT NULL AND expires_at < ?",
+        (*PLANNING_SESSION_ACTIVE, now_iso()),
+    ).fetchall()
+    expired: list[int] = []
+    for row in rows:
+        try:
+            set_session_status(
+                conn,
+                int(row["id"]),
+                "expired",
+                reason="超过无活动期限，规划会话自动过期",
+                actor="agent",
+            )
+        except AdvisorError:
+            continue  # 并发下别路刚处理过：不重复留痕
+        expired.append(int(row["id"]))
+    return expired

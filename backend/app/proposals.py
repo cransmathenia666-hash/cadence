@@ -6,9 +6,10 @@
 - `material_judgment`（`advisor.py` 产）：四问判断的结论。批准只记账——它回答的是
   「这份资料值不值得学」，不是新方向；落新方向由**候选采纳**那条路负责。
   （T29 起这一类的裁定仍留在这里，判资料的**输入与历史**搬到了 `/judge` 页。）
-- `plan_blueprint`（`blueprint.py` 产，SPEC 决策 36）：沿对话出的**一棵树**（阶段 → 任务）。
-  批准 = **按勾选建树**：`selected` 给的是勾中的阶段 / 任务下标，没勾的部分直接丢弃
-  （蓝图是版本化的，想要可以再出一版）；不勾（`selected` 空）= 整份采纳。
+- `plan_blueprint`（`blueprint.py` 产，SPEC 决策 36；OC-06 起为 **v2 payload**：成果契约
+  + 阶段树）。旧 v1（无契约）只读兼容、**不允许直接批准**；v2 的批准要「契约激活 + 建树
+  + 规划会话关闭」原子完成（方案 §5.4）——那条链路 OC-07 才接上，当前明确拒绝批准，
+  用户可把蓝图**退回规划**（会话恢复 active）或驳回。
 - `profile_change`（`dialogue.py` 产，2026-09-18 T28 起）：计划对话里聊出的「我的状态变了」。
   批准 = **真的写进长期档案**（新增一条，走 `app/profile.py` 的同一道判重闸）——这是这一类
   的第一个生产者，也是「批准」第一次真的改档案；驳回只留痕。
@@ -36,7 +37,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import blueprint, ledger, memory, plan, plan_change, profile
+from . import advisor, blueprint, ledger, memory, plan, plan_change, profile
 from .db import now_iso
 
 
@@ -131,6 +132,9 @@ def decide(
     approved: bool,
     reason: str | None = None,
     selected: list[str] | None = None,
+    confirm_contract: bool = False,
+    contract_overrides: dict[str, Any] | None = None,
+    landing_mode: str | None = None,
 ) -> dict[str, Any]:
     """裁定一条提案：批准（可选带方向 / 勾选）或驳回（必写理由）。
 
@@ -146,10 +150,32 @@ def decide(
     if not approved and not str(reason or "").strip():
         raise ProposalError("驳回必须写明理由——它进台账，回答「当时为什么不同意」")
 
-    # 蓝图：先只读地解析出要建哪些节点（查完重名），建的动作留到状态改完之后
-    builds: list[Any] = []
+    # 蓝图（OC-06/OC-07 起）：批准入口按 payload 版本分流。
+    # - 旧 v1（没有成果契约）：只读兼容，不允许直接批准——缺失的契约绝不半猜，
+    #   请重新生成 v2 蓝图（方案 §9.4）。
+    # - v2（带契约 + 阶段树）：必须显式确认契约（confirm_contract），缺了就地拒绝、
+    #   提案保持 pending；确认了就走 approve_atomic 的「预检 + 原子批准」——
+    #   契约激活、建树、提案终态、会话关闭同一事务完成（方案 §5.4），提前返回。
     if approved and kind == blueprint.BLUEPRINT_KIND:
-        builds = blueprint.resolve_build(conn, payload, selected)
+        if not blueprint.is_v2_payload(payload):
+            raise ProposalError(
+                "这是旧版蓝图（没有成果契约），不能直接批准——"
+                "请在规划对话里重新生成 v2 蓝图后再来"
+            )
+        if not confirm_contract:
+            raise ProposalError(
+                "批准蓝图必须先确认成果契约：勾选「我认可这个成果定义和验收条件」"
+                "（confirm_contract）——没看见契约就落库不是批准"
+            )
+        return blueprint.approve_atomic(
+            conn,
+            proposal_id,
+            payload,
+            selected=selected,
+            contract_overrides=contract_overrides,
+            landing_mode=landing_mode,
+            reason=reason,
+        )
 
     # 档案变更：同样先把「能不能写」验完（类别合法、不撞同类别一字不差的现有条目），
     # 写的动作留到状态改完之后——验不过就一条都不写，提案保持 pending 可重裁
@@ -209,11 +235,7 @@ def decide(
             raise ProposalError(str(error)) from error
 
     if approved:
-        if kind == blueprint.BLUEPRINT_KIND:
-            task_count = sum(len(build.tasks) for build in builds)
-            new_stages = sum(1 for build in builds if build.reuse_id is None)
-            base = f"批准：按勾选建树（{new_stages} 个新阶段、{task_count} 件任务）"
-        elif kind == "profile_change":
+        if kind == "profile_change":
             base = f"批准：把这条写进长期档案（{profile_category}）"
         elif kind == plan_change.KIND:
             # 台账那句话说清「到底批准了哪一条」——summary 是后端拼的人话一行
@@ -225,6 +247,12 @@ def decide(
             base = _APPROVE_REASONS.get(kind, f"批准：{kind}")
     else:
         base = "驳回"
+
+    # 规划会话（OC-05）：出它的会话随裁定流转——批准 = 规划完成（converted），
+    # 驳回 = 退回规划对话继续聊（active），对话历史不丢。老提案没有会话归属，跳过。
+    session_id = int(payload["planning_session_id"]) if (
+        kind == blueprint.BLUEPRINT_KIND and payload.get("planning_session_id")
+    ) else None
 
     ledger.set_status(
         conn,
@@ -242,10 +270,7 @@ def decide(
     added: dict[str, Any] | None = None
     updated: dict[str, Any] | None = None
     remembered: dict[str, Any] | None = None
-    if approved and kind == blueprint.BLUEPRINT_KIND:
-        built = blueprint.apply_build(conn, int(payload.get("plan_id") or 0), builds)
-        effect = "blueprint_built"
-    elif approved and kind == "profile_change":
+    if approved and kind == "profile_change":
         try:
             written_id = profile.create_item(
                 conn,
@@ -277,6 +302,19 @@ def decide(
         except (memory.MemoryError, ledger.LedgerError) as error:
             raise ProposalError(f"记忆没能写进去：{error}") from error
         effect = str(remembered["effect"])
+
+    if not approved and session_id is not None:
+        # 只有还停在 blueprint_pending 的会话才「退回规划」；会话已经过期 / 被放弃 /
+        # 已转正（终态，不可重开）时，驳回过期旧稿不该把它复活——原样留只读。
+        session_row = advisor.get_planning_session(conn, session_id)
+        if session_row is not None and str(session_row["status"]) == "blueprint_pending":
+            advisor.set_session_status(
+                conn,
+                session_id,
+                "active",
+                reason=f"蓝图提案 #{proposal_id} 被驳回，退回规划对话继续聊",
+                actor="user",
+            )
 
     return {
         "id": proposal_id,

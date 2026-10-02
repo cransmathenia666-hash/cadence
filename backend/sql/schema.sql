@@ -211,6 +211,11 @@ CREATE TABLE IF NOT EXISTS task_model_map (
 -- 采纳一条候选之后、生成蓝图之前的那段对话。**追加式**：一行一句话，不写台账
 -- （同 learning_request 的先例——它记的是「我说过什么」，不是有状态的对象）。
 -- 每行的归属同时记住 plan_id 与 candidate_id：这段对话是「围绕这条候选、进这个计划」的。
+-- planning_session_id（2026-10-01 成果闭环 OC-05 加，列在 app/db.py 的 _ADDED_COLUMNS——
+-- 老表的表已存在，CREATE TABLE IF NOT EXISTS 补不了列）：新流程的消息按**规划会话**归属
+-- （见下面的 planning_session 表），服务端从会话解析候选与落点，不信任客户端另传的 plan_id。
+-- 老行该列为 NULL，仍按 (candidate_id, plan_id) 只读兼容读取；plan_id 为 0 的行表示
+-- 「会话还没有落点计划」（新方向）——真实计划 id 从 1 起，旧查询不会把它们圈进去。
 CREATE TABLE IF NOT EXISTS plan_chat (
   id           INTEGER PRIMARY KEY,
   plan_id      INTEGER NOT NULL,
@@ -337,7 +342,100 @@ CREATE TABLE IF NOT EXISTS memory_scan (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_scan ON memory_scan (plan_id, status, id);
 
--- 彻底删除的墓碑：**只记对象类型、时间和影响范围，不含任何原文**——
+-- ========== 成果闭环（P1：成果契约 · 证据提交 · 阶段验收） ==========
+--
+-- 三张新表都是**追加式**对象：契约按版本追加（旧版本标 superseded，永不改写正文），
+-- 证据每次提交落一行，验收每次落一行并只在 `is_current` 上翻当前性。
+-- 「历史只读」靠这个结构保证：没有任何接口改写旧行的正文或快照。
+--
+-- 注意：`plan` 与 `plan_node` 的新增列不在本文件里——老库的表已存在，
+-- `CREATE TABLE IF NOT EXISTS` 补不了列，加列走 `app/db.py` 的 `_ADDED_COLUMNS`
+-- （schema 默认值与加列定义两边一致：flow_version=1 / completion_mode='legacy'）。
+
+-- 成果契约：一个计划同时只有一条 active；蓝图批准前的契约只存在于提案 payload，
+-- 不提前落库（P1 的落库入口是「手工建完整契约计划」与「激活新版本」两条路由）。
+-- acceptance_criteria：JSON 数组 [{id, text, required}]（2–5 条，id 服务端生成）；
+-- evidence_requirements：JSON 数组 [{id, kind, required, description}]（1–5 条）。
+-- status 取值 active / superseded；旧版本保留正文与激活时间，历史验收各自带快照。
+CREATE TABLE IF NOT EXISTS outcome_contract (
+  id                    INTEGER PRIMARY KEY,
+  plan_id               INTEGER NOT NULL,
+  version               INTEGER NOT NULL,
+  source_kind           TEXT    NOT NULL DEFAULT 'blueprint',  -- blueprint / manual / migrated
+  title                 TEXT    NOT NULL,
+  outcome               TEXT    NOT NULL,
+  value                 TEXT    NOT NULL,
+  success_statement     TEXT    NOT NULL,
+  acceptance_criteria   TEXT    NOT NULL,
+  evidence_requirements TEXT    NOT NULL,
+  constraints           TEXT,
+  stop_conditions       TEXT,
+  source_candidate_id   INTEGER,
+  status                TEXT    NOT NULL DEFAULT 'active',     -- active / superseded
+  created_at            TEXT    NOT NULL,
+  activated_at          TEXT,
+  superseded_at         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outcome_contract_plan ON outcome_contract (plan_id, version);
+
+-- 证据提交：提交本身不改变阶段验收状态，也不完成任务——它只新增一条历史记录。
+-- kind 取值与 contract.EVIDENCE_KINDS 一致；`legacy` 只由旧交付物接口的兼容路径写入
+-- （用户提交走不了 legacy），它**不满足**任何 required 证据要求。
+CREATE TABLE IF NOT EXISTS evidence_submission (
+  id           INTEGER PRIMARY KEY,
+  node_id      INTEGER NOT NULL,
+  kind         TEXT    NOT NULL,   -- link / repository / document / demo / screenshot / text / other / legacy
+  reference    TEXT,               -- URL、路径或引用；kind=text 时可为空
+  note         TEXT    NOT NULL,
+  submitted_by TEXT    NOT NULL DEFAULT 'user',
+  created_at   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_node ON evidence_submission (node_id, created_at);
+
+-- 阶段验收：用户基于证据逐条确认阶段验收条件的记录。
+-- criteria_snapshot / submission_snapshot 保存**当时**的条件与证据正文——之后契约改版、
+-- 证据追加都不影响历史记录的解释。同一阶段同时只有一条 is_current=1；
+-- 失效（阶段放回、条件/交付要求变更、契约版本变化）只翻 is_current 并写 invalidated_at，
+-- 永不删除、永不改写。
+CREATE TABLE IF NOT EXISTS stage_review (
+  id                  INTEGER PRIMARY KEY,
+  node_id             INTEGER NOT NULL,
+  contract_id         INTEGER NOT NULL,   -- 这次验收按哪一版契约判
+  decision            TEXT    NOT NULL,   -- accepted / needs_work / not_met
+  criteria_snapshot   TEXT    NOT NULL,   -- JSON：当时每条条件的 id/text/required
+  criteria_state      TEXT    NOT NULL,   -- JSON：criterion_id -> met / unmet / unknown
+  submission_snapshot TEXT    NOT NULL,   -- JSON：关联证据的 id/kind/reference/note 快照
+  submission_ids      TEXT    NOT NULL,   -- JSON 数组，便于反查
+  note                TEXT    NOT NULL,
+  is_current          INTEGER NOT NULL DEFAULT 1,
+  invalidated_at      TEXT,
+  created_at          TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stage_review_node ON stage_review (node_id, is_current);
+
+-- 规划会话（成果闭环 OC-05，方案 `docs/ideas/成果闭环重构开发方案.md` §5.2）：
+-- 「候选已采纳、蓝图未批准」的临时规划容器。它**不占用计划列表**、不参与报告 / 落后量 /
+-- 收尾，也不新增 plan.status=draft——正式计划与阶段只由蓝图批准建立。
+-- 生命周期只有一条正向路径：active → blueprint_pending → converted；abandoned（用户主动
+-- 放弃）与 expired（超过无活动期限）是两个终态，都不允许重新打开。候选再次进入规划时
+-- 创建新的 session，旧 session 只读保留。
+-- landing_plan_id：延续已有计划时填写（只记归属，不改计划结构）；「新方向」在转换前为空。
+-- last_activity_at：读取之外的用户动作、模型成功回复、生成蓝图时更新（滑动 expires_at）；
+-- 过期只处理 active / blueprint_pending 且已超过 expires_at 的会话。
+CREATE TABLE IF NOT EXISTS planning_session (
+  id               INTEGER PRIMARY KEY,
+  candidate_id     INTEGER NOT NULL,
+  landing_plan_id  INTEGER,            -- 规划落点；新方向（还没有正式计划）为空
+  status           TEXT    NOT NULL DEFAULT 'active',
+                                       -- active / blueprint_pending / converted / abandoned / expired
+  created_at       TEXT    NOT NULL,
+  last_activity_at TEXT    NOT NULL,
+  expires_at       TEXT,               -- 无活动期限（滑动：每次活动往后推）
+  closed_at        TEXT,               -- 终态（converted / abandoned / expired）的关闭时间
+  closed_reason    TEXT,
+  valid_from       TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_planning_session_candidate ON planning_session (candidate_id, status);
 -- 它的用途是「证明这件事发生过」，不是「让你日后还能拼回来」。
 -- plan_id（2026-09-21 走查整改加，可空）：计划内记忆被彻底删除后，记忆行已经没了，
 -- 只有墓碑知道「这件事是哪个计划里的」——没有它就算不出「某个计划里刚删过一条」。

@@ -61,6 +61,13 @@ SPECS: dict[str, EntitySpec] = {
         table="plan_node", value_column="title", active_status="not_started",
         supports_lifecycle=False,
     ),
+    # 规划会话（2026-10-01 成果闭环 OC-05）：候选采纳后、蓝图批准前的临时规划容器。
+    # 它有自己的业务状态机（active / blueprint_pending / converted / abandoned / expired），
+    # 台账只做状态迁移的写入与留痕（set_status），supersede / void 对它没有意义。
+    "planning_session": EntitySpec(
+        table="planning_session", value_column=None, active_status="active",
+        supports_lifecycle=False,
+    ),
 }
 
 # 被禁掉生命周期操作时，告诉你「那该用什么」——只报错不给替代方案等于把人堵死。
@@ -68,6 +75,7 @@ _LIFECYCLE_HINT: dict[str, str] = {
     "plan_node": "节点用 skipped 表达「这件事不算数」",
     "candidate": "候选用 rejected 表达否决",
     "proposal": "提案用 rejected 表达否决",
+    "planning_session": "规划会话用 abandoned / expired 表达终止，用 converted 表达完成",
 }
 
 

@@ -87,6 +87,8 @@ def init(db_path: Path | str | None = None) -> Path:
     try:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _add_missing_columns(conn)
+        # 索引必须在补列之后：老表的新列此刻才存在
+        _add_missing_indexes(conn)
         _backfill(conn)
         conn.commit()
     finally:
@@ -130,6 +132,47 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("learning_request", "intent", "TEXT"),
     ("learning_request", "reply", "TEXT"),
     ("learning_request", "turn_status", "TEXT"),
+    # 2026-10-01（成果闭环 P1）：计划的双模式字段。schema.sql 里不建这些列（老表的表
+    # 已存在，IF NOT EXISTS 补不了列），默认值与 schema 语义一致：老计划一律 legacy。
+    #   flow_version            1 = 旧流程；2 = 成果契约流程（completion_mode=outcome）
+    #   completion_mode         legacy / outcome——阶段完成与收尾判定按它分流
+    #   contract_review_status  not_required（加列瞬间的占位）→ 老行由 _backfill 标成
+    #                           needs_review（该计划尚未补成果契约）；补齐契约后是 ready
+    #   closure_kind / closure_reason   closed 状态的解释（completed / stopped）与理由；
+    #                           legacy 的旧式收尾两者留空——不把旧 closed 猜成新验收
+    ("plan", "flow_version", "INTEGER NOT NULL DEFAULT 1"),
+    ("plan", "completion_mode", "TEXT NOT NULL DEFAULT 'legacy'"),
+    ("plan", "contract_review_status", "TEXT NOT NULL DEFAULT 'not_required'"),
+    ("plan", "closure_kind", "TEXT"),
+    ("plan", "closure_reason", "TEXT"),
+    # 2026-10-01（成果闭环 P1）：阶段（plan_node）的验收字段。全部可空——老阶段没有
+    # 这些信息，也不能替它猜；没有验收条件与契约绑定的阶段不能提交 v2 验收。
+    # contract_id 是阶段建立时绑定的契约版本，历史绑定不随契约升级改写；
+    # 验收记录自己保存当时的快照（stage_review.criteria_snapshot）。
+    ("plan_node", "purpose", "TEXT"),
+    ("plan_node", "why_now", "TEXT"),
+    ("plan_node", "acceptance_criteria", "TEXT"),
+    ("plan_node", "evidence_requirements", "TEXT"),
+    ("plan_node", "contract_criterion_ids", "TEXT"),
+    ("plan_node", "contract_id", "INTEGER"),
+    # 2026-10-01（成果闭环 OC-05）：规划对话消息按**规划会话**归属（planning_session 表）。
+    # 可空——老行没有会话归属，仍按 (candidate_id, plan_id) 只读兼容读取。新流程的消息由
+    # 服务端从会话解析候选与落点后写入这一列，不信任客户端另传的 plan_id。会话还没有落点
+    # 计划（新方向）时消息行的 plan_id 写约定哨兵 0（真实计划 id 从 1 起，这一列在老库上
+    # 是 NOT NULL、加列迁不动约束，0 表示「还没有正式计划」）。
+    ("plan_chat", "planning_session_id", "INTEGER"),
+)
+
+# 老表新列上的索引。**必须在 _add_missing_columns 之后建**（列不存在时 CREATE INDEX
+# 会直接报错），所以不能进 schema.sql——schema.sql 在 init 里先跑，那时老表还没有这些列。
+# 新库两边结果一致：schema.sql 建全表，这里补索引（IF NOT EXISTS，可重复执行）。
+_ADDED_INDEXES: tuple[tuple[str, str, str], ...] = (
+    # 双模式读取按 completion_mode 分流；计划表就几百行，索引只为让口径有落点可查
+    ("idx_plan_completion_mode", "plan", "completion_mode"),
+    # 阶段验收要按 contract_id 找「绑定某版契约的阶段」
+    ("idx_node_contract", "plan_node", "contract_id"),
+    # 规划会话的消息按会话圈线程（OC-05）；老行该列为 NULL，走旧的 (候选, 计划) 索引
+    ("idx_plan_chat_session", "plan_chat", "planning_session_id"),
 )
 
 
@@ -140,6 +183,12 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _add_missing_indexes(conn: sqlite3.Connection) -> None:
+    """老表新列上的索引——调用顺序有讲究：必须在 `_add_missing_columns` 之后。"""
+    for name, table, expression in _ADDED_INDEXES:
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression})")
+
+
 # 数据补齐（不是加列）：加完列之后，老库里那些既有行要有一个人话可读的默认值。
 #
 # 只做「已有空值填成约定值」这一种，且**可重复执行**：新写入的条目一律自带 `source_kind`
@@ -148,6 +197,15 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
 def _backfill(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE profile_item SET source_kind = 'legacy_manual' WHERE source_kind IS NULL"
+    )
+    # 成果闭环 P1：老计划（以及一切还没补契约的 legacy 计划）标「该计划尚未补成果契约」。
+    # 只做标记，**不创建契约行、不猜测验收标准、不把旧交付物或旧 closed 当成新流程的验收**。
+    # 可重复执行：补齐契约的行已经是 ready / superseded 场景，不会再被这条 UPDATE 摸到；
+    # 'not_required' 只在加列那一刻存在于老行上，新写入的路由都显式给值（legacy 入口给
+    # needs_review，成果入口给 ready）。
+    conn.execute(
+        "UPDATE plan SET contract_review_status = 'needs_review'"
+        " WHERE contract_review_status = 'not_required'"
     )
 
 

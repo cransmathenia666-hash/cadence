@@ -27,6 +27,7 @@ from . import (
     advisor,
     blueprint,
     config,
+    contract,
     db,
     dialogue,
     export,
@@ -79,6 +80,25 @@ class PlanIn(BaseModel):
     goal: str = Field(min_length=1, description="这个计划要达成的目标")
 
 
+class CriterionIn(BaseModel):
+    """一条验收条件（成果闭环 P1）。id 可不传：服务端按顺序补稳定编号。"""
+
+    text: str = Field(min_length=1, description="可观察的条件表达")
+    required: bool = Field(default=True, description="是否必需条件")
+    id: str | None = Field(default=None, description="稳定 id；不给就由服务端生成")
+
+
+class EvidenceRequirementIn(BaseModel):
+    """一条证据要求（成果闭环 P1）。"""
+
+    kind: Literal["repository", "link", "document", "demo", "screenshot", "text", "other"] = Field(
+        description="证据类型；验收时按类型核对是否已提交"
+    )
+    required: bool = Field(default=True, description="是否必需证据")
+    description: str = Field(default="", description="这条证据要说明什么")
+    id: str | None = Field(default=None, description="稳定 id；不给就由服务端生成")
+
+
 class NodeIn(BaseModel):
     plan_id: int
     level: Literal["stage", "checkpoint", "task"]
@@ -87,6 +107,18 @@ class NodeIn(BaseModel):
     deliverable: str | None = Field(default=None, description="阶段用：可验证的交付物")
     due_date: date | None = Field(default=None, description="计划完成日，写 ISO 日期（如 2026-09-30）；不带就不进落后量")
     sort_order: int = 0
+    # 成果闭环 P1：阶段可选携带的验收字段（任务与周打卡上传了会被 400 拒掉）
+    purpose: str | None = Field(default=None, description="阶段用：为最终成果解决什么问题")
+    why_now: str | None = Field(default=None, description="阶段用：为什么排在当前位置")
+    acceptance_criteria: list[CriterionIn] | None = Field(
+        default=None, description="阶段用：1 条以上阶段级验收条件（id 服务端补齐）"
+    )
+    evidence_requirements: list[EvidenceRequirementIn] | None = Field(
+        default=None, description="阶段用：这个阶段需要什么证据"
+    )
+    contract_criterion_ids: list[str] | None = Field(
+        default=None, description="阶段用：承接成果契约里的哪些条件 id（成果计划有效）"
+    )
 
 
 class ReportIn(BaseModel):
@@ -192,10 +224,19 @@ def health() -> dict[str, str]:
 
 @app.post("/api/plan", status_code=201)
 def create_plan(payload: PlanIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """建一个计划。目标是唯一必填项。"""
+    """建一个计划。目标是唯一必填项。旧入口，保持 legacy 语义。
+
+    成果闭环 P1：这样建出的计划 `contract_review_status=needs_review`——
+    表示「该计划尚未补成果契约」，不自动创建契约行、不猜验收标准；
+    想直接建成果计划请走 `POST /api/plans/with-contract`（必须给完整契约）。
+    """
     goal = payload.goal.strip()
     try:
-        plan_id = ledger.create_active(conn, "plan", {"goal": goal}, actor="user")
+        plan_id = ledger.create_active(
+            conn, "plan",
+            {"goal": goal, "contract_review_status": "needs_review"},
+            actor="user",
+        )
     except ledger.LedgerError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": plan_id, "goal": goal}
@@ -238,10 +279,22 @@ def create_node(payload: NodeIn, conn: sqlite3.Connection = Depends(get_conn)) -
             # 校验归边界（这里是 date 类型），存储归文本，内部照旧只用 parse_date 解析。
             due_date=None if payload.due_date is None else payload.due_date.isoformat(),
             sort_order=payload.sort_order,
+            purpose=payload.purpose,
+            why_now=payload.why_now,
+            acceptance_criteria=None if payload.acceptance_criteria is None else [
+                item.model_dump() for item in payload.acceptance_criteria
+            ],
+            evidence_requirements=None if payload.evidence_requirements is None else [
+                item.model_dump() for item in payload.evidence_requirements
+            ],
+            contract_criterion_ids=payload.contract_criterion_ids,
         )
     except plan.DuplicateNode as error:
         # 409：请求本身没错，是和现有状态冲突——重复提交走这一条
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except plan.PlanError as error:
+        # 400：成果闭环 P1 的阶段验收字段（条件、证据要求、契约条件 id）不合法走这里
+        raise HTTPException(status_code=400, detail=str(error)) from error
     except ledger.LedgerError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"id": node_id, "level": payload.level, "title": payload.title.strip()}
@@ -317,10 +370,83 @@ def post_node_reopen(
 def post_deliverable(
     node_id: int, payload: DeliverableIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """提交阶段的交付物：独立动作、可重新提交（旧值留痕）。只对阶段有效。"""
+    """提交阶段的交付物：独立动作、可重新提交（旧值留痕）。只对阶段有效。
+
+    成果闭环 P1 兼容语义：同一次提交也会在证据区落一条 `kind=legacy` 的只读记录，
+    但它不满足任何必需证据要求——旧链接不自动变成新验收。
+    """
     _require_node(conn, node_id)
     try:
         return plan.submit_deliverable(conn, node_id, payload.url, payload.note)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+# ---------- 成果闭环 P1：证据提交与阶段验收 ----------
+#
+# 「阶段完成」拆成两个动作（方案 §3.7）：提交证据只增历史记录，不改变验收状态；
+# 用户逐条确认验收条件后才可能达标。回执刻意不返回「stage_finished=true」之类的
+# 字段——完成与否看 GET /api/plan 里后端算好的 `acceptance.status` 与 `finished`。
+
+class EvidenceIn(BaseModel):
+    kind: Literal["repository", "link", "document", "demo", "screenshot", "text", "other"] = Field(
+        description="证据类型；text = 纯文字结果（可以没有链接）"
+    )
+    reference: str | None = Field(
+        default=None, description="链接、路径或引用；kind=text 时可空"
+    )
+    note: str = Field(min_length=1, description="这份证据说明了什么")
+
+
+class StageReviewIn(BaseModel):
+    contract_id: int = Field(description="按哪一版成果契约验收（必须是当前有效版本）")
+    submission_ids: list[int] = Field(
+        default_factory=list, description="关联的证据编号；必须都属于本阶段"
+    )
+    criteria_state: dict[str, str] = Field(
+        description="每个阶段验收条件的结论：{条件 id: met/unmet/unknown}，必须全覆盖"
+    )
+    decision: Literal["accepted", "needs_work", "not_met"] = Field(
+        description="accepted=达标（要求全部必需条件 met + 必需证据齐）；needs_work/not_met=记录缺口"
+    )
+    note: str = Field(min_length=1, description="本次验收说明")
+
+
+@app.post("/api/plan/nodes/{node_id}/evidence", status_code=201)
+def post_stage_evidence(
+    node_id: int, payload: EvidenceIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """提交一条阶段证据。只新增历史记录——**提交证据不等于阶段完成**，完成要靠验收。"""
+    _require_node(conn, node_id)
+    try:
+        return plan.submit_evidence(conn, node_id, payload.kind, payload.reference, payload.note)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/plan/nodes/{node_id}/review")
+def post_stage_review(
+    node_id: int, payload: StageReviewIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """提交一条阶段验收：逐条确认条件 + 关联证据 + 给出本次判断。
+
+    门槛在 `plan.review_stage`：只对阶段、legacy 计划不可用、契约必须是当前版本、
+    条件必须全覆盖、证据必须属于本阶段、accepted 还要必需证据齐。
+    验收记录、旧验收失效与阶段状态迁移在**同一事务**里完成。
+    """
+    _require_node(conn, node_id)
+    try:
+        return plan.review_stage(
+            conn,
+            node_id,
+            contract_id=payload.contract_id,
+            submission_ids=payload.submission_ids,
+            criteria_state=payload.criteria_state,
+            decision=payload.decision,
+            note=payload.note,
+        )
+    except plan.PlanConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except plan.PlanError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -329,11 +455,18 @@ class NodeFieldsIn(BaseModel):
     """改一个已经建好的节点的字段（决策 38：原地改 + 台账流水，id 不变）。
 
     只传要改的字段；**传空字符串表示清空**（交付物 / 截止日可以清，标题不许清）。
+    成果闭环 P1：阶段还可整组替换验收条件 / 证据要求——变更会使该阶段当前验收失效。
     """
 
     title: str | None = Field(default=None, description="新的标题")
     deliverable: str | None = Field(default=None, description="阶段要交的东西（只对阶段有效）")
     due_date: str | None = Field(default=None, description="YYYY-MM-DD；空字符串 = 清掉日期（清了就不进落后量）")
+    acceptance_criteria: list[CriterionIn] | None = Field(
+        default=None, description="阶段用：整组替换阶段验收条件（传了就是全量替换）"
+    )
+    evidence_requirements: list[EvidenceRequirementIn] | None = Field(
+        default=None, description="阶段用：整组替换证据要求（传了就是全量替换）"
+    )
     reason: str = Field(min_length=1, description="为什么改——进台账，回答「为什么改」")
 
 
@@ -341,14 +474,14 @@ class NodeFieldsIn(BaseModel):
 def post_node_fields(
     node_id: int, payload: NodeFieldsIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """改一个已经建好的节点（标题 / 交付物 / 截止日）。
+    """改一个已经建好的节点（标题 / 交付物 / 截止日 / 阶段验收条件）。
 
     这是 2026-09-18（T30）补上的那条写入口：在此之前只有「建节点」与「改状态」，
     建好之后交付物写不进去、截止日挪不动——T26 的「同名阶段复用但交付物写不进去」
     与 T14 的「重排提案只能记方向」都卡在这里。
 
     **id 不变、引用不断**：走台账的一条 `update_fields` 流水（改前改后 + 理由），
-    不是「取代」。
+    不是「取代」。成果闭环 P1：条件或交付要求变更会使该阶段当前验收失效。
     """
     _require_node(conn, node_id)
     try:
@@ -359,6 +492,12 @@ def post_node_fields(
             title=payload.title,
             deliverable=payload.deliverable,
             due_date=payload.due_date,
+            acceptance_criteria=None if payload.acceptance_criteria is None else [
+                item.model_dump() for item in payload.acceptance_criteria
+            ],
+            evidence_requirements=None if payload.evidence_requirements is None else [
+                item.model_dump() for item in payload.evidence_requirements
+            ],
         )
     except plan.PlanError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -399,7 +538,17 @@ def get_plan(plan_id: int | None = None, conn: sqlite3.Connection = Depends(get_
 # 四者都让计划从默认列表消失，但历史与理由都留着。
 
 class PlanCloseIn(BaseModel):
-    reason: str | None = Field(default=None, description="为什么收尾（可选，进台账）")
+    """收尾请求。成果闭环 P1：成果计划必须明确 `close_kind`（完成 / 停止）。
+
+    legacy 计划不传 `close_kind` 走旧接口语义（完成收尾，按 legacy 判定）；
+    成果计划不传会被 400 拒——系统不默认替你猜成「提前停止」。
+    """
+
+    reason: str | None = Field(default=None, description="为什么收尾（可选，进台账）；停止收尾必填")
+    close_kind: Literal["completed", "stopped"] | None = Field(
+        default=None,
+        description="收尾类型：completed=按成果完成收尾（过不了验收门槛回 409）；stopped=提前停止（必须写理由）",
+    )
 
 
 class PlanVoidIn(BaseModel):
@@ -422,18 +571,23 @@ def get_plans(
     return {"plans": plan.list_plans(conn, include_inactive=include_inactive)}
 
 
-@app.post("/api/plans/{plan_id}/close")
+@app.post("/api/plans/{plan_id}/close",
+          responses={409: {"description": "成果计划未过验收门槛就想按「完成」收尾；或已收尾的计划想换一种收尾语义覆盖"}})
 def post_plan_close(
     plan_id: int, payload: PlanCloseIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """收尾一个计划：做完了，进历史，不再出现在默认列表里。可重复调用。
+    """收尾一个计划，进历史，不再出现在默认列表里。
 
-    收尾顺手**登记一条待扫描**（记忆系统，方案第 6 节）：这个计划的经历该提炼一遍了。
-    刻意**不在这里同步调模型**——收尾是一次业务动作，不该被一次模型调用拖住、也不该
-    因为模型不通而失败；由每周任务或记忆页之后来把它做掉。
+    成果闭环 P1：`completed` 与 `stopped` 是两种不同的收尾语义——完成收尾必须所有
+    阶段已验收或跳过，停止收尾必须写明理由；页面、台账与导出据此区分「做成了」与
+    「中途放弃」。收尾顺手**登记一条待扫描**（记忆系统，方案第 6 节）：这个计划的
+    经历该提炼一遍了。刻意**不在这里同步调模型**——收尾是一次业务动作，不该被一次
+    模型调用拖住、也不该因为模型不通而失败；由每周任务或记忆页之后来把它做掉。
     """
     try:
-        result = plan.close_plan(conn, plan_id, payload.reason)
+        result = plan.close_plan(conn, plan_id, payload.reason, close_kind=payload.close_kind)
+    except plan.PlanConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except plan.PlanError as error:
         raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
     scan_id = memory.register_pending_scan(conn, plan_id) if result["changed"] else None
@@ -473,6 +627,219 @@ def post_plan_reopen(
         return plan.reopen_plan(conn, plan_id, payload.reason)
     except plan.PlanError as error:
         raise HTTPException(status_code=404 if "不存在" in str(error) else 400, detail=str(error)) from error
+
+
+# ---------- 成果闭环 P1：成果契约的手工建计划与版本激活 ----------
+#
+# 写入只有两条路，都进 `contract.activate` 这一个口子（方案 §5.4 写入口矩阵）：
+# 手工建「成果计划」（计划 + 第一版契约，同一事务），或在成果计划上激活新版本
+# （旧版本标 superseded、历史保留；验收条件或必需证据要求变化时按旧版判的当前
+# 验收失效）。旧入口 POST /api/plan 保持 legacy 语义，一个字不改。
+
+class OutcomeContractIn(BaseModel):
+    """一份完整的成果契约（方案 §4.1 的最小必填集）。"""
+
+    title: str = Field(min_length=1, description="成果名称")
+    outcome: str = Field(min_length=1, description="最终要产生的外部结果")
+    value: str = Field(min_length=1, description="为什么值得做")
+    success_statement: str = Field(min_length=1, description="做到什么算够（一句话）")
+    acceptance_criteria: list[CriterionIn] = Field(
+        min_length=2, max_length=5, description="2–5 条验收条件（id 服务端补稳定编号）"
+    )
+    evidence_requirements: list[EvidenceRequirementIn] = Field(
+        min_length=1, max_length=5, description="1–5 条证据要求"
+    )
+    constraints: list[str] | None = Field(default=None, description="约束（可选）")
+    stop_conditions: list[str] | None = Field(default=None, description="停止条件（可选）")
+    source_candidate_id: int | None = Field(default=None, description="来源候选（可选）")
+
+
+class PlanWithContractIn(BaseModel):
+    """手工建「成果计划」：计划与完整契约一次落库，不经过 LLM（方案 §8.6）。"""
+
+    goal: str | None = Field(default=None, description="计划目标；不填就用契约的成果名称")
+    contract: OutcomeContractIn
+
+
+class ContractActivateIn(BaseModel):
+    """在成果计划上激活一份**新版本**契约。"""
+
+    contract: OutcomeContractIn
+    reason: str | None = Field(default=None, description="为什么升级契约——进台账")
+
+
+def _contract_payload(payload: OutcomeContractIn) -> dict:
+    data = payload.model_dump()
+    data["acceptance_criteria"] = [item.model_dump() for item in payload.acceptance_criteria]
+    data["evidence_requirements"] = [item.model_dump() for item in payload.evidence_requirements]
+    return data
+
+
+def _translate_contract_error(error: Exception) -> HTTPException:
+    if isinstance(error, contract.ContractConflict):
+        return HTTPException(status_code=409, detail=str(error))
+    if "不存在" in str(error):
+        return HTTPException(status_code=404, detail=str(error))
+    return HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/api/plans/with-contract", status_code=201)
+def post_plan_with_contract(
+    payload: PlanWithContractIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """手工建一个「成果计划」：计划行 + 完整契约 v1 同一事务落库（不调模型）。
+
+    与旧入口 `POST /api/plan` 的分界：旧入口保持 legacy（可以以后再补契约），
+    这里必须一次性给出**完整**契约——建出来就是 outcome 模式，可以直接建阶段、
+    交证据、做验收。契约校验不过时整个请求什么都不落。
+    """
+    goal = str(payload.goal or "").strip() or str(payload.contract.title).strip()
+    try:
+        with atomic(conn):
+            plan_id = ledger.create_active(conn, "plan", {"goal": goal}, actor="user")
+            activated = contract.activate(
+                conn, plan_id, _contract_payload(payload.contract),
+                source_kind="manual", reason="手工建立成果计划",
+            )
+            row = contract.get(conn, activated["id"])
+    except (contract.ContractError, ledger.LedgerError) as error:
+        raise _translate_contract_error(error) from error
+    return {
+        "id": plan_id,
+        "goal": goal,
+        "contract": contract.public(row),  # type: ignore[arg-type]
+        "completion_mode": "outcome",
+        "flow_version": 2,
+    }
+
+
+@app.get("/api/plans/{plan_id}/contract")
+def get_plan_contract(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """读一个计划的契约：当前有效版本 + 全部历史版本（只读，旧的永不改写）。"""
+    try:
+        plan.require_plan(conn, plan_id)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    active = contract.active(conn, plan_id)
+    return {
+        "plan_id": plan_id,
+        "contract": None if active is None else contract.public(active),
+        "history": contract.history(conn, plan_id),
+    }
+
+
+@app.post("/api/plans/{plan_id}/contract", status_code=201)
+def post_plan_contract(
+    plan_id: int, payload: ContractActivateIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """在成果计划上激活一份新版本契约：旧版本标 superseded（正文与激活时间保留）。
+
+    验收条件或必需证据要求变化时，按旧版本判的**当前**验收会被确定性失效
+    （历史行只翻当前性，永不改写）；仅标题、价值说明等文字变化不影响已有验收。
+    legacy 计划暂不能从这里升级——升级要连阶段条件映射一起做，是后续批次的事。
+    """
+    if plan.resolve_plan(conn, plan_id) is None:
+        raise HTTPException(status_code=404, detail=f"计划 id={plan_id} 不存在")
+    if plan.plan_mode(conn, plan_id) != "outcome":
+        raise HTTPException(
+            status_code=400,
+            detail="这个计划还是旧流程：要在保留现有阶段的前提下补全契约，"
+            "请走「升级为成果闭环」（POST /api/plans/{id}/upgrade，"
+            "一次带上完整契约与每个现有阶段的处置）；新建成果计划请走 "
+            "POST /api/plans/with-contract",
+        )
+    try:
+        with atomic(conn):
+            activated = contract.activate(
+                conn, plan_id, _contract_payload(payload.contract),
+                source_kind="manual", reason=str(payload.reason or "").strip() or "激活新版本契约",
+            )
+            row = contract.get(conn, activated["id"])
+    except (contract.ContractError, ledger.LedgerError) as error:
+        raise _translate_contract_error(error) from error
+    return {
+        "contract": contract.public(row),  # type: ignore[arg-type]
+        "superseded_id": activated["superseded_id"],
+        "reviews_invalidated": activated["reviews_invalidated"],
+    }
+
+
+class StageUpgradeIn(BaseModel):
+    """升级时对一个现有阶段的处置（方案 §9.2.5）。"""
+
+    stage_id: int = Field(description="现有阶段的节点 id")
+    disposition: Literal["include", "skipped", "history"] = Field(
+        description="include=补条件并纳入成果流程；skipped=明确跳过（要理由）；history=保留为历史、不进完成门槛"
+    )
+    reason: str | None = Field(default=None, description="跳过 / 保留为历史的一句理由（进台账）")
+    acceptance_criteria: list[CriterionIn] | None = Field(
+        default=None, description="disposition=include 时必填：该阶段的验收条件（至少一条）"
+    )
+    evidence_requirements: list[EvidenceRequirementIn] | None = Field(
+        default=None, description="disposition=include 时可选：该阶段的证据要求"
+    )
+    contract_criterion_ids: list[str] | None = Field(
+        default=None, description="disposition=include 时可选：该阶段承接的成果契约条件 id"
+    )
+
+
+class PlanUpgradeIn(BaseModel):
+    """把一份 legacy 旧计划明确升级为成果流程（方案 §9.2.5）。
+
+    完整契约 + **每个现有阶段**的处置一次交齐；全部校验通过才在一条事务里
+    落契约、绑阶段、切模式。漏一个阶段的处置会被拒——系统不替用户猜。
+    """
+
+    contract: OutcomeContractIn
+    stages: list[StageUpgradeIn] = Field(
+        default_factory=list, description="每个现有阶段的处置；计划当前有几个阶段就要给几条"
+    )
+    reason: str | None = Field(default=None, description="为什么升级——进台账")
+
+
+@app.post("/api/plans/{plan_id}/upgrade", status_code=201,
+          responses={409: {"description": "计划已不是进行中的旧流程计划，或状态与升级冲突"}})
+def post_plan_upgrade(
+    plan_id: int, payload: PlanUpgradeIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """把旧计划升级为成果闭环：旧计划唯一的新流程入口。
+
+    与「激活新版本契约」的分界：那条只对**已经成果化**的计划改标准；这条面向
+    `completion_mode=legacy` 的旧计划，必须同时给出完整契约与每个现有阶段的处置
+    （纳入 / 跳过 / 保留为历史）。升级不是自动迁移，也不回写旧报告与旧交付物——
+    旧记录保持只读，升级后只有新证据与新验收才算当前依据。
+    """
+    if plan.resolve_plan(conn, plan_id) is None:
+        raise HTTPException(status_code=404, detail=f"计划 id={plan_id} 不存在")
+    stages = [
+        {
+            "stage_id": item.stage_id,
+            "disposition": item.disposition,
+            "reason": item.reason,
+            "acceptance_criteria": None if item.acceptance_criteria is None else [
+                entry.model_dump() for entry in item.acceptance_criteria
+            ],
+            "evidence_requirements": None if item.evidence_requirements is None else [
+                entry.model_dump() for entry in item.evidence_requirements
+            ],
+            "contract_criterion_ids": item.contract_criterion_ids,
+        }
+        for item in payload.stages
+    ]
+    try:
+        return plan.upgrade_plan(
+            conn, plan_id, _contract_payload(payload.contract), stages,
+            reason=str(payload.reason or "").strip(),
+        )
+    except plan.PlanConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except contract.ContractConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (plan.PlanError, contract.ContractError, ledger.LedgerError) as error:
+        # 计划不存在已在上面 404 掉了；这里剩下的都是参数/引用错误 → 400。
+        # 刻意不复用 `_translate_contract_error`：它按「不存在」猜 404，会把
+        # 「引用了契约里不存在的条件 id」这种参数错误误判成 404。
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 # ---------- LLM 提供商与调用记账（T10） ----------
@@ -647,8 +1014,9 @@ class VerdictIn(BaseModel):
     否决必须写理由（业务层判，缺理由回 400）：它会同时进 `reject_reason` 列与台账流水，
     并成为下一次「找」的禁区——理由写得越具体，禁区越管得住。
 
-    采纳要能落到一个计划上（SPEC 决策 33 ②）：候选自带的计划归属优先；归属为空
-    （「新方向」）时用 `plan_id` 指明进哪个计划，两者都没有就报 400——不偷偷落最新。
+    采纳（OC-05 起 = 进入规划）：候选自带的计划归属优先作为**规划落点**；归属为空
+    （「新方向」）时可用 `plan_id` 指明延续哪个已有计划，两者都没有也行——落点为空、
+    只开规划会话，正式计划等蓝图批准时才创建。与归属冲突的 `plan_id` 回 409。
     """
 
     accept: bool = Field(description="true = 采纳，false = 否决")
@@ -902,16 +1270,20 @@ def get_candidates(
 
 
 @app.post("/api/candidates/{candidate_id}/verdict",
-          responses={409: {"description": "这条候选已经裁定过了，或采纳落不了阶段（没有可落的计划 / 有同名未收尾阶段）"}})
+          responses={409: {"description": "这条候选已经裁定过了，或规划落点冲突（候选归属与指定计划不一致 / 目标计划不在进行中）"}})
 def post_candidate_verdict(
     candidate_id: int, payload: VerdictIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """采纳 / 否决一条候选。
+    """采纳 / 否决一条候选（OC-05 起：采纳 = 进入规划，不再直接建阶段）。
 
     否决留痕（`reject_reason` + 台账流水），并让它的标题成为下一次「找」的禁区——
     这是成功标准 2 后半句「已被否决的候选不再出现」的入口。
-    采纳落进**候选自带的计划归属**（SPEC 决策 33 ②）；归属为空时用 `plan_id` 指明，
-    两者都没有回 409 并保持 proposed 可重试——不偷偷落最新。
+    采纳（成果闭环方案 §3.3）只标 accepted、记录**规划落点**（候选自带的归属优先，
+    归属为空时用 `plan_id` 指明；「新方向」没有现存计划也能采纳，落点为空）、
+    创建规划会话——**不再调用建阶段**，正式阶段等蓝图批准后建立。
+    落点与候选归属冲突时回 409 并保持 proposed 可重试——不偷偷落最新。
+    回执里 `plan_id` 的语义是「规划落点」、`node_id` 恒为 None，另有
+    `planning_session_id` / `planning_status` / `created_planning_session`。
     """
     try:
         return advisor.decide_candidate(
@@ -921,6 +1293,26 @@ def post_candidate_verdict(
             reason=payload.reason,
             plan_id=payload.plan_id,
         )
+    except advisor.CandidateNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except advisor.CandidateConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except advisor.AdvisorError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/candidates/{candidate_id}/planning")
+def post_candidate_planning(
+    candidate_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """「重新开始规划」：给一条**已采纳**的候选开一段新的规划会话（方案 §5.2）。
+
+    候选的会话过期 / 被放弃 / 已转正之后，旧会话只读保留，但这条候选不该从此进不了规划——
+    这个入口沿用候选自己的规划落点创建新会话；已有活会话时幂等返回它（`created=false`）。
+    落点计划没了或已收尾则明确回 409，不悄悄把落点改成「新方向」。
+    """
+    try:
+        return advisor.reopen_planning_session(conn, candidate_id)
     except advisor.CandidateNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except advisor.CandidateConflict as error:
@@ -945,6 +1337,10 @@ class ProposalDecideIn(BaseModel):
     `approved=False` 必须写理由（业务层判，缺理由回 400）。
 
     T29 起**没有 `option` 了**：唯一需要「选一个方向」的 `plan_replan` 已整类删除。
+
+    批准 v2 蓝图（OC-07）额外要：`confirm_contract=true`（缺了回 400、提案保持
+    pending）；`contract_overrides` 可选，直接覆盖契约字段、经同一套确定性校验；
+    `landing_mode` 可选（不传按会话落点自动分流）。
     """
 
     approved: bool = Field(description="true = 批准（可能带副作用），false = 驳回")
@@ -955,6 +1351,27 @@ class ProposalDecideIn(BaseModel):
             "批准 plan_blueprint 时用：勾中的阶段 / 任务下标，"
             "形如 [\"0\", \"1.2\"]（阶段整段写 \"下标\"，单个任务写 \"阶段下标.任务下标\"，从 0 起）。"
             "没勾的部分直接丢弃；不传 = 整份采纳"
+        ),
+    )
+    confirm_contract: bool = Field(
+        default=False,
+        description=(
+            "批准 v2 蓝图必填：确认「认可这个成果定义和验收条件」。"
+            "缺了批准被拒（400）且提案保持 pending，不半猜"
+        ),
+    )
+    contract_overrides: dict | None = Field(
+        default=None,
+        description=(
+            "批准 v2 蓝图时可选：直接覆盖契约字段（未传字段按蓝图值继承，传空数组 = 明确清空）。"
+            "合并后的最终契约过 contract.validate 同一套确定性校验，不合格整单拒绝"
+        ),
+    )
+    landing_mode: Literal["new_plan", "continue_plan", "revise_plan"] | None = Field(
+        default=None,
+        description=(
+            "批准 v2 蓝图时可选：new_plan=新建正式计划（新方向），continue_plan=延续已有计划，"
+            "revise_plan=在已有契约上激活新版本。不传按规划会话落点自动分流"
         ),
     )
 
@@ -983,7 +1400,8 @@ def post_proposal_decide(
     """批准 / 驳回一条提案。
 
     批准不必都改东西：`effect` 字段说明这一次到底动了什么——`blueprint_built` 是
-    **按勾选把树建进计划**（阶段 / 任务，`built` 里列出建了哪些），`profile_written` 是
+    **确认成果契约 + 建树 + 关闭规划会话**的原子批准（OC-07：v2 蓝图必须带
+    confirm_contract；回执里还有激活的 `contract` 与落点 `plan_id`），`profile_written` 是
     真往长期档案里写了一条（`written` 是哪一条），`node_updated` 是**原地改了一个已有节点
     的字段**（`updated` 里是改前改后，id 不变），`node_added` 是往计划里加了节点——一个阶段
     带它下面的任务、或者一批任务（`added.nodes` 里按建的顺序列出每一条），`recorded_only`
@@ -997,6 +1415,9 @@ def post_proposal_decide(
             approved=payload.approved,
             reason=payload.reason,
             selected=payload.selected,
+            confirm_contract=payload.confirm_contract,
+            contract_overrides=payload.contract_overrides,
+            landing_mode=payload.landing_mode,
         )
     except proposals.ProposalNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -1007,6 +1428,9 @@ def post_proposal_decide(
     except blueprint.BlueprintConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except (proposals.ProposalError, blueprint.BlueprintError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except advisor.AdvisorError as error:
+        # 裁定链路里的领域错误（如规划会话状态迁移）也算业务拒绝，不落到 500
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
@@ -1020,35 +1444,57 @@ def post_proposal_decide(
 
 
 class PlanChatIn(BaseModel):
-    """聊一轮：我说一句话，模型回最多 3 个问题。"""
+    """聊一轮：我说一句话，模型回最多 3 个问题。
 
-    candidate_id: int = Field(description="聊的是哪条候选（必须是已采纳的）")
+    `planning_session_id`（OC-05 新流程）与 `candidate_id`（旧候选兼容）二选一：
+    按会话聊时，候选与落点由服务端从会话解析，不信任另传的 `plan_id`。
+    """
+
+    candidate_id: int | None = Field(
+        default=None, description="聊的是哪条候选（必须是已采纳的）；按会话聊时可省略"
+    )
     message: str = Field(min_length=1, description="你的这一句回答")
     plan_id: int | None = Field(
         default=None,
-        description="这条候选没有计划归属（「新方向」）时用它指明落在哪个计划",
+        description="这条候选没有计划归属（「新方向」）时用它指明落在哪个计划；按会话聊时忽略",
+    )
+    planning_session_id: int | None = Field(
+        default=None, description="按哪条规划会话聊（新流程）；给了就优先按会话走"
     )
 
 
 class PlanBlueprintIn(BaseModel):
     """出方案：把上面聊清的意向落成一条 `pending` 蓝图提案。"""
 
-    candidate_id: int
+    candidate_id: int | None = Field(
+        default=None, description="哪条候选（旧候选兼容）；按会话出方案时可省略"
+    )
     plan_id: int | None = Field(default=None, description="同 `PlanChatIn.plan_id`")
+    planning_session_id: int | None = Field(
+        default=None, description="按哪条规划会话出方案（新流程）；给了就优先按会话走"
+    )
+    mode: Literal["standard", "enhanced"] = Field(
+        default="standard", description="本次生成模式；标准模式保持旧流程，增强模式增加审查和最多一次修订"
+    )
 
 
 @app.get("/api/plan-chat")
 def get_plan_chat(
-    candidate_id: int,
+    candidate_id: int | None = None,
+    planning_session_id: int | None = None,
     plan_id: int | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict:
     """看这段对话：历史消息 + 聊了几轮 + 能不能出方案 + 有没有待裁定蓝图。
 
+    `planning_session_id`（OC-05 新流程）与 `candidate_id`（旧候选兼容）二选一；
+    按会话看时返回里多带 `planning_session`（会话状态）与 `planning_status`。
     追问的边界：`can_generate` 为 false 表示还没聊过——决策 36 要求先问清意向再出树。
     """
+    if planning_session_id is None and candidate_id is None:
+        raise HTTPException(status_code=400, detail="要告诉后端看的是哪段规划：传 planning_session_id 或 candidate_id")
     try:
-        return blueprint.view(conn, candidate_id, plan_id)
+        return blueprint.view(conn, candidate_id, plan_id, planning_session_id=planning_session_id)
     except blueprint.BlueprintNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except blueprint.BlueprintConflict as error:
@@ -1064,9 +1510,15 @@ def post_plan_chat(payload: PlanChatIn, conn: sqlite3.Connection = Depends(get_c
     输出不合格时**不重试**（那一轮只给 1 次调用）：如实回 400，而你那句话已经留在
     对话里了——再说一句就接着走。
     """
+    if payload.planning_session_id is None and payload.candidate_id is None:
+        raise HTTPException(status_code=400, detail="要告诉后端聊的是哪段规划：传 planning_session_id 或 candidate_id")
     try:
         return blueprint.say(
-            conn, payload.candidate_id, payload.message, plan_id=payload.plan_id
+            conn,
+            payload.candidate_id,
+            payload.message,
+            plan_id=payload.plan_id,
+            planning_session_id=payload.planning_session_id,
         )
     except blueprint.BlueprintNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -1082,15 +1534,22 @@ def post_plan_chat(payload: PlanChatIn, conn: sqlite3.Connection = Depends(get_c
 def post_plan_blueprint(
     payload: PlanBlueprintIn, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
-    """出方案：1 次调用（不合格带原因重试 1 次），落成一条 `pending` 蓝图提案。
+    """按所选模式生成一条 `pending` 蓝图提案；增强模式先由两位独立审查员各自表态，有必须修改的反对意见时自动修订一次。
 
     **树 = 版本**：同一个计划同时只有一份待裁定蓝图，新的一版落库时把旧的标成
     `superseded`（业务终态，不走台账的取代——决策 22 禁止对提案做生命周期操作）。
-    `superseded_ids` 里列出的就是被它顶掉的那一版。
+    `superseded_ids` 里列出的就是被它顶掉的那一版。按规划会话出方案（OC-05）时，
+    生成成功把会话置为 `blueprint_pending`，失败则会话保持 `active`。
     """
+    if payload.planning_session_id is None and payload.candidate_id is None:
+        raise HTTPException(status_code=400, detail="要告诉后端出的是哪段规划的方案：传 planning_session_id 或 candidate_id")
     try:
         return blueprint.generate_blueprint(
-            conn, payload.candidate_id, plan_id=payload.plan_id
+            conn,
+            payload.candidate_id,
+            plan_id=payload.plan_id,
+            planning_session_id=payload.planning_session_id,
+            mode=payload.mode,
         )
     except blueprint.BlueprintNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -1099,6 +1558,37 @@ def post_plan_blueprint(
     except blueprint.BlueprintError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+class BlueprintReturnIn(BaseModel):
+    """把一份待裁定蓝图退回规划对话（OC-06，方案 §6.2）。理由必填，进台账。"""
+
+    planning_session_id: int = Field(description="退回哪条规划会话（必须是出这份蓝图的那段）")
+    reason: str = Field(min_length=1, description="退回理由：为什么先不裁定这版蓝图")
+
+
+@app.post("/api/plan-chat/blueprint/{proposal_id}/return")
+def post_blueprint_return(
+    proposal_id: int, payload: BlueprintReturnIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """从待裁定蓝图退回规划：提案终态化为 `superseded`、会话恢复 `active`，对话历史保留。
+
+    只有仍为 `pending` 且属于这条规划会话的蓝图才能退回；别的会话的待批稿、
+    已经裁定过的提案，一律 409。退回后在对话里接着聊，可以再出一版。
+    """
+    try:
+        return blueprint.return_to_planning(
+            conn,
+            proposal_id,
+            planning_session_id=payload.planning_session_id,
+            reason=payload.reason,
+        )
+    except blueprint.BlueprintNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except blueprint.BlueprintConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except blueprint.BlueprintError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 

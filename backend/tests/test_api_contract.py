@@ -86,6 +86,32 @@ def test_level_still_only_accepts_two_values():
         NodeIn(plan_id=1, level="milestone", title="x")
 
 
+def test_blueprint_mode_defaults_to_standard_and_accepts_enhanced():
+    assert main.PlanBlueprintIn(candidate_id=1).mode == "standard"
+    assert main.PlanBlueprintIn(candidate_id=1, mode="enhanced").mode == "enhanced"
+    with pytest.raises(ValidationError):
+        main.PlanBlueprintIn(candidate_id=1, mode="automatic")
+
+
+def test_blueprint_route_passes_selected_mode_to_generator(conn, monkeypatch):
+    seen = {}
+
+    def generate(_conn, candidate_id, *, plan_id=None, planning_session_id=None, mode="standard"):
+        seen.update(
+            candidate_id=candidate_id, plan_id=plan_id,
+            planning_session_id=planning_session_id, mode=mode,
+        )
+        return {"mode": mode}
+
+    monkeypatch.setattr(main.blueprint, "generate_blueprint", generate)
+    result = main.post_plan_blueprint(
+        main.PlanBlueprintIn(candidate_id=42, plan_id=9, mode="enhanced"), conn=conn
+    )
+
+    assert result == {"mode": "enhanced"}
+    assert seen == {"candidate_id": 42, "plan_id": 9, "planning_session_id": None, "mode": "enhanced"}
+
+
 # ---------- 错误响应：所有出口一个形状（方案 C） ----------
 
 def run(handler, exc):

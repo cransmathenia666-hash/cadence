@@ -3,12 +3,14 @@
 覆盖四组东西：
 ① 对话：前提（必须已采纳）、轮数与历史字符两个上限、每轮只调 1 次不重试；
 ② 蓝图：落成 `pending` 提案、payload 形状、**树 = 版本**（新版把旧版标 superseded）；
-③ 批准 = 按勾选建树：只建勾中的、没勾的直接丢弃；同名阶段**复用**（采纳时自动建的那条）；
+③ 批准 = 按勾选建树：只建勾中的、没勾的直接丢弃；同名阶段**复用**（计划里已有的那条）；
 ④ 建树前的查重：蓝图内任务重名、撞上已有同名任务、下标超界，一律在建之前拦下；
 ⑤ 生成门槛与预检（2026-09-28 整改 III-01/III-02）：最后一轮必须聊成、待批稿只给
    出它的那条候选看、任务撞现有计划里开着的同名任务在生成期拦下带原因重试。
 
 一律用假上游打桩（同 `test_candidates.py`），不打真实接口、不花钱。
+注意（2026-10-01 成果闭环 OC-05）：采纳不再自动建同名阶段——需要「计划里已有同名阶段」
+的用例（复用 / 撞车）一律先手工 `plan.add_node` 建出来。
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import json
 
 import pytest
 
-from app import advisor, blueprint, db, ledger, llm, plan, proposals
+from app import advisor, blueprint, contract, db, ledger, llm, plan, proposals
 
 BLUEPRINT_KIND = blueprint.BLUEPRINT_KIND
 
@@ -70,8 +72,89 @@ def chat_reply(questions: list[str], *, ready: bool = False, note: str = "先问
     return json.dumps({"questions": questions, "ready": ready, "note": note}, ensure_ascii=False)
 
 
-def blueprint_json(*stages: dict, goal: str = "能自己写后端接口") -> str:
-    return json.dumps({"goal": goal, "stages": list(stages)}, ensure_ascii=False)
+def blueprint_json(*stages: dict, goal: str = "能自己写后端接口", contract: dict | None = None) -> str:
+    return json.dumps(
+        {
+            "goal": goal,
+            "contract": contract or contract_json(),
+            "stages": [v2_stage(item) for item in stages],
+        },
+        ensure_ascii=False,
+    )
+
+
+def review_json(*points: dict, summary: str = "计划与已知信息相符") -> str:
+    return json.dumps({"summary": summary, "points": list(points)}, ensure_ascii=False)
+
+
+def agree_point(
+    target: str = "第 1 阶段",
+    point: str = "起点与档案相符",
+    reason: str = "档案显示已有 Python 项目经验",
+) -> dict:
+    return {"stance": "agree", "target": target, "point": point, "reason": reason}
+
+
+def disagree_point(
+    target: str, point: str, reason: str, adjustment: str, severity: str = "revise"
+) -> dict:
+    return {
+        "stance": "disagree",
+        "target": target,
+        "point": point,
+        "reason": reason,
+        "adjustment": adjustment,
+        "severity": severity,
+    }
+
+
+def revision_json(*stages: dict, goal: str = "能自己写后端接口", resolutions=None, contract: dict | None = None) -> str:
+    return json.dumps(
+        {
+            "goal": goal,
+            "contract": contract or contract_json(),
+            "stages": [v2_stage(item) for item in stages],
+            "review_resolution": list(resolutions or []),
+        },
+        ensure_ascii=False,
+    )
+
+
+# 蓝图 v2（OC-06）的契约底稿：oc-1 为必需条件（所有默认阶段都承接它，覆盖检查通过），
+# oc-2 非必需；契约校验要求 2–5 条验收条件，所以底稿放两条。
+BASE_CONTRACT: dict = {
+    "title": "做出能演示的后端小项目",
+    "outcome": "一个能运行、能演示的后端小项目",
+    "value": "作品集需要一个真实项目",
+    "success_statement": "能运行、能当面演示、能讲清关键取舍",
+    "acceptance_criteria": [
+        {"id": "oc-1", "text": "能运行并演示一个含错误处理的接口", "required": True},
+        {"id": "oc-2", "text": "能向他人讲清项目的技术取舍", "required": False},
+    ],
+    "evidence_requirements": [
+        {"id": "ev-1", "kind": "repository", "required": True, "description": "可运行的代码仓库"},
+    ],
+}
+
+
+def contract_json(**over) -> dict:
+    return {**BASE_CONTRACT, **over}
+
+
+def v2_stage(stage_dict: dict) -> dict:
+    """把测试里的阶段底稿补成 v2 形状（缺的字段按能通过校验的默认值补齐）。"""
+    upgraded = dict(stage_dict)
+    upgraded.setdefault("purpose", "为最终成果解决基础问题")
+    upgraded.setdefault("why_now", str(upgraded.get("why") or "先打基础"))
+    upgraded.setdefault(
+        "acceptance_criteria", [{"text": "交出该阶段可验收的结果", "required": True}]
+    )
+    upgraded.setdefault(
+        "evidence_requirements",
+        [{"kind": "repository", "required": False, "description": "该阶段的产出"}],
+    )
+    upgraded.setdefault("contract_criterion_ids", ["oc-1"])
+    return upgraded
 
 
 def stage(title: str, *, deliverable: str = "交一个能跑通的小东西", tasks=None, why="先打基础"):
@@ -90,7 +173,7 @@ def task(title: str, due: str | None = None) -> dict:
 def adopted_candidate(conn, title: str = "学 HTTP") -> tuple[int, int]:
     """建一个计划 + 一条**走真正采纳路径**的候选，返回 (候选 id, 计划 id)。
 
-    走真路径是因为采纳会顺带建一个同名阶段——那正是蓝图要复用的那条，测试要看到它。
+    OC-05 起采纳不再建阶段：只把候选标 accepted、记规划落点并开一条 planning_session。
     """
     plan_id = ledger.create_active(conn, "plan", {"goal": f"计划：{title}"}, actor="user")
     request_id = advisor.record_request(conn, "search", "我不知道该学什么", plan_id)
@@ -111,6 +194,30 @@ def adopted_candidate(conn, title: str = "学 HTTP") -> tuple[int, int]:
     return candidate_id, plan_id
 
 
+def legacy_adopted_candidate(conn, title: str = "学 HTTP") -> tuple[int, int]:
+    """旧流程（OC-05 之前）留下的已采纳候选：**没有 planning_session**。
+
+    「树 = 版本」的计划级取代语义只在这种老数据上还成立——进过规划的候选一律按会话走。
+    """
+    plan_id = ledger.create_active(conn, "plan", {"goal": f"计划：{title}"}, actor="user")
+    request_id = advisor.record_request(conn, "search", "我不知道该学什么", plan_id)
+    candidate_id = ledger.create_active(
+        conn,
+        "candidate",
+        {
+            "request_id": request_id,
+            "title": title,
+            "why": "对主线有直接帮助",
+            "depth_target": "够用",
+            "rank": 1,
+        },
+        actor="agent",
+        reason="测试用",
+    )
+    ledger.set_status(conn, "candidate", candidate_id, "accepted", actor="user", reason="旧库事实")
+    return candidate_id, plan_id
+
+
 def ready_thread(conn, title: str = "学 HTTP", *, transport=None) -> tuple[int, int]:
     """一条已经聊过一轮的对话（`generate_blueprint` 的前置条件）。"""
     candidate_id, plan_id = adopted_candidate(conn, title)
@@ -123,7 +230,8 @@ def ready_thread(conn, title: str = "学 HTTP", *, transport=None) -> tuple[int,
 def free_candidate_adopted_into(conn, plan_id: int, title: str = "轻量后端入门") -> int:
     """一条「新方向」的候选（请求没有计划归属）被显式采纳进某个计划。
 
-    这正是前端刷新后的样子：落点只存在于采纳那一刻的响应里，库里候选自己查不出来。
+    落点记在候选自己身上（`candidate.landing_plan_id`，OC-05 起语义是「规划落点」），
+    刷新一次页面对话照样定得下来。
     """
     request_id = advisor.record_request(conn, "search", "我不知道该学什么")  # 没有归属
     candidate_id = ledger.create_active(
@@ -143,8 +251,32 @@ def free_candidate_adopted_into(conn, plan_id: int, title: str = "轻量后端�
     return candidate_id
 
 
+def open_payload(conn, plan_id: int, candidate_id: int, *stages: dict) -> dict:
+    """直接构造一份 **v2** 蓝图 payload（不经模型）——build_tree 直测与提案落库共用。"""
+    return {
+        "version": 2,
+        "plan_id": plan_id,
+        "candidate_id": candidate_id,
+        "planning_session_id": None,
+        "goal": "能自己写后端接口",
+        "contract": contract_json(),
+        "stages": [v2_stage(item) for item in stages],
+    }
+
+
 def open_proposal(conn, plan_id: int, candidate_id: int, *stages: dict) -> int:
-    """直接落一条待裁定蓝图——专测裁定与建树时用它，省掉一轮对话。"""
+    """直接落一条待裁定的 **v2** 蓝图提案——省掉一轮对话。"""
+    payload = open_payload(conn, plan_id, candidate_id, *stages)
+    return ledger.create_active(
+        conn,
+        "proposal",
+        {"kind": BLUEPRINT_KIND, "payload": json.dumps(payload, ensure_ascii=False), "reason": "测试"},
+        actor="agent",
+    )
+
+
+def open_v1_proposal(conn, plan_id: int, candidate_id: int, *stages: dict) -> int:
+    """落一条**旧 v1** 蓝图提案（没有 version/contract）——测批准拒绝与只读兼容。"""
     payload = {
         "plan_id": plan_id,
         "candidate_id": candidate_id,
@@ -220,10 +352,10 @@ def test_one_turn_records_both_sides_and_carries_the_context(conn):
     assert rows[0]["content"] == "我想先把 HTTP 弄明白"
     assert json.loads(rows[1]["content"])["ready"] is False  # 助手那侧存 JSON 原文
 
-    # 背景那一段要带上档案、计划目标、以及「已有阶段别重复建」的提醒
+    # 背景那一段要带上档案、计划目标，并如实说「还没有阶段」（OC-05：采纳不建阶段）
     background = transport.seen[0]["payload"]["messages"][1]["content"]
     assert "通用工程基础" in background and "计划：学 HTTP" in background
-    assert "不要重复建" in background
+    assert "还没有阶段" in background
 
 
 def test_turns_are_capped_at_six(conn):
@@ -292,9 +424,9 @@ def test_blueprint_without_plan_id_falls_back_to_the_recorded_thread(conn):
         conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()["payload"]
     )
     assert payload["plan_id"] == plan_id
-    # 蓝图建树也落在同一个计划里
-    result = proposals.decide(conn, created["proposal_id"], approved=True)
-    assert result["built"]["plan_id"] == plan_id
+    # 蓝图建树也落在同一个计划里（v2 批准走原子链路前的建树直测）
+    result = blueprint.build_tree(conn, payload)
+    assert result["plan_id"] == plan_id
 
 
 def test_another_turn_also_falls_back_to_the_recorded_thread(conn):
@@ -418,6 +550,8 @@ def test_blueprint_lands_as_a_pending_proposal(conn):
     assert row["kind"] == BLUEPRINT_KIND and row["status"] == "pending"
     payload = json.loads(row["payload"])
     assert payload["plan_id"] == plan_id and payload["candidate_id"] == candidate_id
+    assert payload["mode"] == "standard" and "review" not in payload
+    assert created["mode"] == "standard" and created["review"] is None
     assert payload["goal"] == "能自己写后端接口"
     assert [item["title"] for item in payload["stages"]] == ["学 HTTP", "上线"]
     assert payload["stages"][0]["tasks"][0]["due_date"] == "2026-10-01"
@@ -425,6 +559,230 @@ def test_blueprint_lands_as_a_pending_proposal(conn):
     # 它就在待裁定列表里（前端按 kind 分流渲染）
     pending = proposals.list_pending(conn, BLUEPRINT_KIND)["proposals"]
     assert [item["id"] for item in pending] == [created["proposal_id"]]
+
+
+def test_enhanced_blueprint_passes_after_independent_review(conn):
+    make_provider(conn)
+    add_profile(conn, content="已做过 Python 命令行小项目")
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("复习 HTTP", tasks=[task("读请求与响应") ])),
+        review_json(agree_point(), summary="水平判断有档案依据"),
+        review_json(summary="阶段衔接与任务粒度站得住"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, mode="enhanced", transport=transport
+    )
+
+    row = conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()
+    payload = json.loads(row["payload"])
+    assert created["mode"] == "enhanced" and created["calls"] == 3
+    review = payload["review"]
+    assert review["mode"] == "enhanced" and review["initial"] is None
+    assert [reviewer["key"] for reviewer in review["reviewers"]] == ["level", "structure"]
+    assert all(reviewer["stance"] == "agree" for reviewer in review["reviewers"])
+    # 赞同也要写清认可了哪一点
+    assert review["reviewers"][0]["points"][0]["point"] == "起点与档案相符"
+    assert len(transport.seen) == 4  # 含建线程的一次对话调用
+    assert "水平核对员" in transport.seen[2]["payload"]["messages"][0]["content"]
+    assert "结构审查员" in transport.seen[3]["payload"]["messages"][0]["content"]
+    # 两位审查员互相看不到对方的结论：第二位的输入里没有第一位的回答
+    assert "水平判断有档案依据" not in transport.seen[3]["payload"]["messages"][-1]["content"]
+
+
+def test_enhanced_blueprint_revises_once_and_keeps_audit_details(conn):
+    make_provider(conn)
+    add_profile(conn, content="已做过 Python 命令行小项目")
+    revised = stage("用现有项目验证 HTTP", tasks=[task("为项目增加一个 HTTP 请求")])
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("复习命令行", tasks=[task("从零学习 Python 命令行") ])),
+        review_json(agree_point(), summary="水平判断有档案依据"),
+        review_json(
+            disagree_point(
+                target="第 1 阶段 / 任务 1",
+                point="把已掌握的命令行基础安排成从零学习",
+                reason="档案：已做过 Python 命令行小项目",
+                adjustment="删除重复入门任务，直接用现有项目验证 HTTP 基础",
+            ),
+            summary="发现一处与已有经验重复的任务",
+        ),
+        revision_json(
+            revised,
+            resolutions=[
+                {
+                    "reviewer_key": "structure",
+                    "point_index": 0,
+                    "resolution": "移除重复入门任务，改为项目练习",
+                }
+            ],
+        ),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, mode="enhanced", transport=transport
+    )
+
+    payload = json.loads(
+        conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()["payload"]
+    )
+    review = payload["review"]
+    assert created["calls"] == 4 and created["mode"] == "enhanced"
+    assert created["stages"][0]["title"] == "用现有项目验证 HTTP"
+    assert review["initial"]["stages"][0]["title"] == "复习命令行"
+    structure = next(item for item in review["reviewers"] if item["key"] == "structure")
+    assert structure["stance"] == "disagree"
+    assert structure["points"][0]["target"] == "第 1 阶段 / 任务 1"
+    assert structure["points"][0]["adjustment"] == "删除重复入门任务，直接用现有项目验证 HTTP 基础"
+    assert review["revision_resolution"] == [
+        {"reviewer_key": "structure", "point_index": 0, "resolution": "移除重复入门任务，改为项目练习"}
+    ]
+    assert "把已掌握的命令行基础" in transport.seen[-1]["payload"]["messages"][-1]["content"]
+
+
+def test_enhanced_blueprint_repairs_a_known_plan_conflict_even_if_reviewers_miss_it(conn):
+    make_provider(conn)
+    add_profile(conn)
+    candidate_id, plan_id = adopted_candidate(conn)
+    existing_stage = plan.add_node(conn, plan_id, "stage", "学 HTTP")  # 撞车的既有阶段
+    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=existing_stage)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+        review_json(summary="没有明显语义问题"),
+        review_json(summary="没有明显结构问题"),
+        revision_json(
+            stage("学 HTTP", tasks=[task("写一个请求客户端")]),
+            resolutions=[
+                {"reviewer_key": "system", "point_index": 0, "resolution": "将撞名任务改为实际项目练习"}
+            ],
+        ),
+    )
+    blueprint.say(conn, candidate_id, "我想把 HTTP 学明白", transport=transport)
+
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, mode="enhanced", transport=transport
+    )
+
+    payload = json.loads(
+        conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()["payload"]
+    )
+    assert created["calls"] == 4
+    assert payload["mode"] == "enhanced"
+    assert payload["stages"][0]["tasks"][0]["title"] == "写一个请求客户端"
+    reviewers = payload["review"]["reviewers"]
+    # 两位模型审查员都漏看了，系统的防冲突检查自己补位成第三个座位
+    assert [reviewer["key"] for reviewer in reviewers] == ["level", "structure", "system"]
+    assert reviewers[0]["stance"] == "agree"
+    assert reviewers[2]["points"][0]["severity"] == "revise"
+
+
+def test_enhanced_blueprint_keeps_uncertain_level_as_a_confirmation_note(conn):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("Python 基础", tasks=[task("写一个小程序") ])),
+        review_json(
+            disagree_point(
+                target="整体",
+                point="档案没有说明用户是否熟悉 Python 基础",
+                reason="档案中没有可确认 Python 熟练度的经历",
+                adjustment="出方案前询问一次；也可先按待确认状态继续",
+                severity="confirm",
+            ),
+            summary="水平依据不足，请用户确认",
+        ),
+        review_json(summary="没有明显结构问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, mode="enhanced", transport=transport
+    )
+
+    payload = json.loads(
+        conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()["payload"]
+    )
+    assert created["calls"] == 3
+    level = payload["review"]["reviewers"][0]
+    assert level["stance"] == "disagree"
+    assert level["points"][0]["severity"] == "confirm"
+    # 待确认不触发修订
+    assert payload["review"]["initial"] is None
+    assert payload["review"]["revision_resolution"] == []
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        ("not-json", review_json(), review_json()),  # 增强模式草稿无效时不把额度耗在重试上
+        (blueprint_json(stage("学 HTTP")), "not-json", review_json()),  # 第一位审查员失效不静默降级
+        (blueprint_json(stage("学 HTTP")), review_json(), "not-json"),  # 第二位审查员失效同样不降级
+    ],
+)
+def test_enhanced_blueprint_fails_closed_on_invalid_draft_or_review(conn, responses):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(chat_reply([], ready=True), *responses)
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
+
+
+def test_enhanced_disagreement_without_adjustment_fails_closed(conn):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP")),
+        review_json(
+            {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
+        ),
+        review_json(summary="没有问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
+
+
+def test_enhanced_revision_must_account_for_every_required_finding(conn):
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("入门", tasks=[task("看资料") ])),
+        review_json(summary="没有水平问题"),
+        review_json(
+            disagree_point(
+                target="第 2 阶段",
+                point="直接要求部署但前面没有可运行的项目",
+                reason="第 1 阶段的交付物只是阅读笔记",
+                adjustment="先增加实现可运行项目的任务",
+            ),
+            summary="需要先补项目实践",
+        ),
+        # 回执对到了不存在的审查员/意见上：等于没交代，必须整单作废
+        revision_json(
+            stage("入门", tasks=[task("看资料") ]),
+            resolutions=[{"reviewer_key": "level", "point_index": 0, "resolution": "没有改动"}],
+        ),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    with pytest.raises(blueprint.BlueprintError):
+        blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
 
 
 def test_a_new_version_supersedes_the_old_one_and_leaves_a_trace(conn):
@@ -435,7 +793,9 @@ def test_a_new_version_supersedes_the_old_one_and_leaves_a_trace(conn):
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN"), task("写接口")])),
     )
-    candidate_id, plan_id = ready_thread(conn, transport=transport)
+    # 老数据（没有会话）：计划级的「树 = 版本」取代语义照旧
+    candidate_id, plan_id = legacy_adopted_candidate(conn, title="学 HTTP")
+    blueprint.say(conn, candidate_id, "聊聊这个方向", plan_id=plan_id, transport=transport)
 
     first = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
     second = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
@@ -472,11 +832,16 @@ def test_invalid_due_date_gets_one_retry(conn):
     assert created["stages"][0]["tasks"][0]["due_date"] == "2026-10-01"
 
 
-# ---------- 批准 = 按勾选建树 ----------
+# ---------- 建树（批准动作的内核） ----------
+#
+# OC-06 起 proposals.decide 对蓝图提案只做版本分流（v1 拒批、v2 等原子批准），
+# 建树内核的这些行为改由 build_tree 直测；原子批准接上后（OC-07）它们仍是批准的后半段。
 
-def test_approval_builds_only_the_ticked_part(conn):
+def test_build_tree_builds_only_the_ticked_part(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(
+    # 「计划里已有同名阶段」是复用的前提（OC-05 起采纳不建阶段，这里手工建一条）
+    plan.add_node(conn, plan_id, "stage", "学 HTTP")
+    payload = open_payload(
         conn,
         plan_id,
         candidate_id,
@@ -485,11 +850,10 @@ def test_approval_builds_only_the_ticked_part(conn):
         stage("上线", deliverable="一个能访问的地址"),
     )
 
-    result = proposals.decide(conn, proposal_id, approved=True, selected=["0.1", "1"])
+    built = blueprint.build_tree(conn, payload, selected=["0.1", "1"])
 
-    assert result["effect"] == "blueprint_built"
-    assert [item["title"] for item in result["built"]["stages"]] == ["做一个小服务"]
-    assert [item["title"] for item in result["built"]["tasks"]] == ["写一个接口", "起一个服务"]
+    assert [item["title"] for item in built["stages"]] == ["做一个小服务"]
+    assert [item["title"] for item in built["tasks"]] == ["写一个接口", "起一个服务"]
     assert stage_titles(conn, plan_id) == ["学 HTTP", "做一个小服务"]  # 「上线」整段被丢弃
     stages = plan.get_stages(conn, plan_id)
     assert task_titles(conn, int(stages[0]["id"])) == ["写一个接口"]  # 0.1 之外的没建
@@ -497,39 +861,41 @@ def test_approval_builds_only_the_ticked_part(conn):
     # 复用「学 HTTP」时它要交的东西按这一版写进去了（T30 的写入口；改前改后进台账）
     reused = plan.get_node(conn, int(stages[0]["id"]))
     assert reused["deliverable"] == "交一个能跑通的小东西"
-    assert result["built"]["notes"] and "要交的东西" in result["built"]["notes"][0]
+    assert built["notes"] and "要交的东西" in built["notes"][0]
     events = [
         event
         for event in ledger.history(conn, "plan_node", int(stages[0]["id"]))
         if event["change_type"] == "update_fields"
     ]
     assert len(events) == 1
-    assert json.loads(events[0]["after_value"]) == {"deliverable": "交一个能跑通的小东西"}
+    # OC-07 起复用阶段会把成果字段一并写入（deliverable + v2 字段，一条 update_fields 流水）
+    after = json.loads(events[0]["after_value"])
+    assert after["deliverable"] == "交一个能跑通的小东西"
+    # （这条是 legacy 计划上的 build_tree 直测：契约承接 id 不绑，成果计划批准时才会绑）
+    assert {"purpose", "why_now", "acceptance_criteria", "evidence_requirements"} <= set(after)
 
 
-def test_reusing_a_stage_overwrites_an_old_deliverable_with_a_note(conn):
+def test_build_tree_reuses_a_stage_and_overwrites_an_old_deliverable_with_a_note(conn):
     """复用的阶段本来就有别的交付物：按这一版改写，并在回执里明说是「改」不是「没写」。"""
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    stages_before = plan.get_stages(conn, plan_id)
-    plan.update_node_fields(
-        conn, int(stages_before[0]["id"]), deliverable="先交一份笔记", reason="手工先定一个"
-    )
-    proposal_id = open_proposal(
+    # OC-05 起采纳不建阶段：这个「已有同名阶段」是手工建的复用前提
+    stage_id = plan.add_node(conn, plan_id, "stage", "学 HTTP", deliverable="先交一份笔记")
+    payload = open_payload(
         conn, plan_id, candidate_id, stage("学 HTTP", deliverable="一个过测试的客户端")
     )
 
-    result = proposals.decide(conn, proposal_id, approved=True)
+    built = blueprint.build_tree(conn, payload)
 
-    assert plan.get_node(conn, int(stages_before[0]["id"]))["deliverable"] == "一个过测试的客户端"
-    note = result["built"]["notes"][0]
+    assert plan.get_node(conn, stage_id)["deliverable"] == "一个过测试的客户端"
+    note = built["notes"][0]
     assert "从「先交一份笔记」改成了" in note
     # 它没在计划里多建一个同名阶段
     assert len(plan.get_stages(conn, plan_id)) == 1
 
 
-def test_no_selection_means_the_whole_blueprint(conn):
+def test_build_tree_with_no_selection_means_the_whole_blueprint(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(
+    payload = open_payload(
         conn,
         plan_id,
         candidate_id,
@@ -537,7 +903,7 @@ def test_no_selection_means_the_whole_blueprint(conn):
         stage("上线", deliverable="一个能访问的地址"),
     )
 
-    result = proposals.decide(conn, proposal_id, approved=True)
+    blueprint.build_tree(conn, payload)
 
     assert stage_titles(conn, plan_id) == ["学 HTTP", "上线"]
     stages = plan.get_stages(conn, plan_id)
@@ -545,41 +911,39 @@ def test_no_selection_means_the_whole_blueprint(conn):
     assert stages[1]["deliverable"] == "一个能访问的地址"  # 新阶段的交付物真的写进去了
 
 
-def test_a_ticked_stage_keeps_all_of_its_tasks(conn):
+def test_build_tree_a_ticked_stage_keeps_all_of_its_tasks(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(
+    payload = open_payload(
         conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("A"), task("B")])
     )
 
-    proposals.decide(conn, proposal_id, approved=True, selected=["0"])
+    blueprint.build_tree(conn, payload, selected=["0"])
 
     stages = plan.get_stages(conn, plan_id)
     assert task_titles(conn, int(stages[0]["id"])) == ["A", "B"]
 
 
-def test_nothing_ticked_is_refused_and_changes_nothing(conn):
+def test_build_tree_nothing_ticked_is_refused_and_changes_nothing(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("A")]))
+    payload = open_payload(conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("A")]))
 
     with pytest.raises(blueprint.BlueprintError):
-        proposals.decide(conn, proposal_id, approved=True, selected=[""])
+        blueprint.build_tree(conn, payload, selected=[""])
 
-    assert stage_titles(conn, plan_id) == ["学 HTTP"]  # 还是采纳时那一条
-    row = conn.execute("SELECT status FROM proposal WHERE id = ?", (proposal_id,)).fetchone()
-    assert row["status"] == "pending"  # 提案没被改成 accepted，可重裁
+    assert stage_titles(conn, plan_id) == []  # OC-05：采纳不再建阶段，计划还是空的
 
 
-def test_out_of_range_selection_is_refused(conn):
+def test_build_tree_out_of_range_selection_is_refused(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("A")]))
+    payload = open_payload(conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("A")]))
 
     with pytest.raises(blueprint.BlueprintError):
-        proposals.decide(conn, proposal_id, approved=True, selected=["0.9"])
+        blueprint.build_tree(conn, payload, selected=["0.9"])
     with pytest.raises(blueprint.BlueprintError):
-        proposals.decide(conn, proposal_id, approved=True, selected=["5"])
+        blueprint.build_tree(conn, payload, selected=["5"])
     with pytest.raises(blueprint.BlueprintError):
-        proposals.decide(conn, proposal_id, approved=True, selected=["二"])
-    assert conn.execute("SELECT COUNT(*) AS n FROM plan_node").fetchone()["n"] == 1  # 只有采纳那条阶段
+        blueprint.build_tree(conn, payload, selected=["二"])
+    assert conn.execute("SELECT COUNT(*) AS n FROM plan_node").fetchone()["n"] == 0  # 一个节点都没建
 
 
 def test_rejecting_a_blueprint_builds_nothing(conn):
@@ -589,46 +953,89 @@ def test_rejecting_a_blueprint_builds_nothing(conn):
     result = proposals.decide(conn, proposal_id, approved=False, reason="阶段拆得不对")
 
     assert result["effect"] == "recorded_only" and result["built"] is None
-    assert stage_titles(conn, plan_id) == ["学 HTTP"]
+    assert stage_titles(conn, plan_id) == []
     assert result["status"] == "rejected"
 
 
 # ---------- 建树前的查重（一条都不写的预检） ----------
 
-def test_duplicate_task_titles_inside_a_stage_are_refused(conn):
+def test_build_tree_duplicate_task_titles_inside_a_stage_are_refused(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(
+    payload = open_payload(
         conn, plan_id, candidate_id, stage("做服务", tasks=[task("起一个服务"), task("起一个服务")])
     )
 
     with pytest.raises(blueprint.BlueprintError):
-        proposals.decide(conn, proposal_id, approved=True)
+        blueprint.build_tree(conn, payload)
 
-    assert stage_titles(conn, plan_id) == ["学 HTTP"]  # 一个节点都没建
+    assert stage_titles(conn, plan_id) == []  # 一个节点都没建
 
 
-def test_a_task_clashing_with_an_existing_open_one_is_refused(conn):
+def test_build_tree_a_task_clashing_with_an_existing_open_one_is_refused(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    adopted = plan.get_stages(conn, plan_id)[0]
-    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=int(adopted["id"]))
-    proposal_id = open_proposal(
+    existing_stage = plan.add_node(conn, plan_id, "stage", "学 HTTP")  # 复用/撞车的既有阶段
+    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=existing_stage)
+    payload = open_payload(
         conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("读 MDN")])
     )
 
     with pytest.raises(blueprint.BlueprintError):
-        proposals.decide(conn, proposal_id, approved=True)
+        blueprint.build_tree(conn, payload)
 
 
-def test_building_into_a_closed_plan_is_refused(conn):
+def test_build_tree_into_a_closed_plan_is_refused(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
-    proposal_id = open_proposal(conn, plan_id, candidate_id, stage("上线"))
+    payload = open_payload(conn, plan_id, candidate_id, stage("上线"))
     plan.close_plan(conn, plan_id)
 
     with pytest.raises(blueprint.BlueprintConflict):
-        proposals.decide(conn, proposal_id, approved=True)
+        blueprint.build_tree(conn, payload)
 
+
+# ---------- 批准入口的版本分流（OC-06） ----------
+
+def test_approving_a_v1_blueprint_is_refused_with_a_regenerate_hint(conn):
+    """旧 v1 蓝图（无契约）只读兼容：批准明确拒绝并提示重新生成，不半猜缺失契约。"""
+    candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
+    proposal_id = open_v1_proposal(conn, plan_id, candidate_id, stage("上线"))
+
+    with pytest.raises(proposals.ProposalError) as refused:
+        proposals.decide(conn, proposal_id, approved=True)
+    assert "重新生成" in str(refused.value)
+
+    # 只读兼容：提案还在待裁定列表里，驳回（留痕）仍可用
+    assert [item["id"] for item in proposals.list_pending(conn, BLUEPRINT_KIND)["proposals"]] == [
+        proposal_id
+    ]
+    decided = proposals.decide(conn, proposal_id, approved=False, reason="旧稿不要了")
+    assert decided["status"] == "rejected"
+
+
+def test_approving_a_v2_blueprint_still_needs_explicit_confirmation(conn):
+    """v2 蓝图批准（OC-07 起原子）必须显式确认契约；缺 confirm_contract 就地拒绝、提案保持 pending。"""
+    candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
+    # F6 口径：延续/改版只允许已有 active 契约的计划（legacy 计划要先走升级入口）
+    contract.activate(
+        conn, plan_id, contract_json(), source_kind="manual", reason="测试：落点先升到成果流程"
+    )
+    proposal_id = open_proposal(conn, plan_id, candidate_id, stage("学 HTTP", tasks=[task("读 MDN")]))
+
+    with pytest.raises(proposals.ProposalError) as refused:
+        proposals.decide(conn, proposal_id, approved=True, confirm_contract=False)
+    assert "确认" in str(refused.value) or "confirm" in str(refused.value)
     row = conn.execute("SELECT status FROM proposal WHERE id = ?", (proposal_id,)).fetchone()
     assert row["status"] == "pending"
+
+    # 确认了就走原子批准：契约激活 + 建树一次完成（这条 v2 提案没有会话归属，跳过会话关闭）
+    result = proposals.decide(conn, proposal_id, approved=True, confirm_contract=True)
+    assert result["effect"] == "blueprint_built" and result["plan_id"] == plan_id
+    # 第一版是测试预置的、第二版是这次批准激活的
+    assert conn.execute("SELECT COUNT(*) AS n FROM outcome_contract").fetchone()["n"] == 2
+    assert contract.active(conn, plan_id)["version"] == 2
+    assert [str(row["title"]) for row in plan.get_stages(conn, plan_id)] == ["学 HTTP"]
+    plan_row = conn.execute("SELECT * FROM plan WHERE id = ?", (plan_id,)).fetchone()
+    assert plan_row["completion_mode"] == "outcome"
+
 
 # ---------- 路径形状的步骤草案进对话上下文（T34：SPEC 决策 41） ----------
 #
@@ -636,7 +1043,7 @@ def test_building_into_a_closed_plan_is_refused(conn):
 # 它进规划对话的上下文当底稿，模型在它上面增减，而不是从零再问六轮。
 
 def adopted_path_candidate(conn, steps: list[dict], title: str = "从零到部署学通 agent 开发"):
-    """一条**带步骤草案**的已采纳候选（走真路径，采纳会顺带建同名伞阶段）。"""
+    """一条**带步骤草案**的已采纳候选（走真路径；OC-05 起采纳不建伞阶段，草案只进对话）。"""
     plan_id = ledger.create_active(conn, "plan", {"goal": f"计划：{title}"}, actor="user")
     request_id = advisor.record_request(conn, "search", "学 agent 开发怎么学", plan_id)
     candidate_id = ledger.create_active(
@@ -787,7 +1194,10 @@ def test_a_failed_reply_does_not_count_as_a_valid_turn(conn):
     created = blueprint.generate_blueprint(conn, candidate_id, transport=transport)
     assert created["plan_id"] == plan_id
     seen = blueprint.view(conn, candidate_id)
-    assert seen["valid_turns_used"] == 1 and seen["can_generate"] is True
+    assert seen["valid_turns_used"] == 1
+    # 提案已落在会话上：会话转 blueprint_pending，等裁定（不再允许就地再出一版）
+    assert seen["can_generate"] is False
+    assert seen["planning_status"] == "blueprint_pending"
 
 
 def test_pending_blueprint_summary_carries_its_candidate(conn):
@@ -958,8 +1368,8 @@ def test_generation_retries_when_a_task_clashes_with_an_open_one(conn):
     make_provider(conn)
     add_profile(conn)
     candidate_id, plan_id = adopted_candidate(conn)
-    stage_row = plan.get_stages(conn, plan_id)[0]  # 采纳时自动建的同名阶段
-    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=int(stage_row["id"]))
+    existing_stage = plan.add_node(conn, plan_id, "stage", "学 HTTP")  # 撞车的既有阶段
+    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=existing_stage)
     transport = ScriptedTransport(
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),  # 撞上开着的同名任务
@@ -981,8 +1391,8 @@ def test_generation_lands_nothing_when_both_attempts_clash(conn):
     make_provider(conn)
     add_profile(conn)
     candidate_id, plan_id = adopted_candidate(conn)
-    stage_row = plan.get_stages(conn, plan_id)[0]
-    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=int(stage_row["id"]))
+    existing_stage = plan.add_node(conn, plan_id, "stage", "学 HTTP")
+    plan.add_node(conn, plan_id, "task", "读 MDN", parent_id=existing_stage)
     transport = ScriptedTransport(
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
