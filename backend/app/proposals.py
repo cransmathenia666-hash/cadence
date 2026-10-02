@@ -37,8 +37,8 @@ import json
 import sqlite3
 from typing import Any
 
-from . import advisor, blueprint, ledger, memory, plan, plan_change, profile
-from .db import now_iso
+from . import advisor, blueprint, contract, ledger, memory, plan, plan_change, profile
+from .db import atomic, now_iso
 
 
 class ProposalError(RuntimeError):
@@ -57,6 +57,8 @@ class ProposalConflict(ProposalError):
 # 台账那句话也要能读懂。有实质动作的类型（收尾计划 / 重排 / 建树 / 写档案）各自组词。
 _APPROVE_REASONS = {
     "material_judgment": "批准：认可这次四问判断",
+    # 契约修改有实质动作，正常走下面按 summary 组词的分支；这里只兜「payload 缺 summary」的底
+    plan_change.CONTRACT_CHANGE_KIND: "批准：按对话里的建议激活新版成果契约",
 }
 
 
@@ -222,6 +224,20 @@ def decide(
             # resolve 里的防重名闸复用 `plan.assert_no_open_duplicate`，它抛的是 plan 的错误
             raise ProposalError(str(error)) from error
 
+    # 成果契约修改（OC-09）：同样先把「能不能动」验完——计划还在进行中、契约没换版
+    # （提案按别的版本拟的就地拒绝）、现版 + 拟改合并后仍过得了 contract.validate。
+    # 验不过就一条都不写，提案保持 pending 可重裁；写（激活新版本）留到状态改完之后。
+    contract_change: dict[str, Any] | None = None
+    if approved and kind == plan_change.CONTRACT_CHANGE_KIND:
+        try:
+            contract_change = plan_change.resolve_contract_change(conn, payload)
+        except plan_change.PlanChangeNotFound as error:
+            raise ProposalNotFound(str(error)) from error
+        except plan_change.PlanChangeConflict as error:
+            raise ProposalConflict(str(error)) from error
+        except plan_change.PlanChangeError as error:
+            raise ProposalError(str(error)) from error
+
     # 记忆候选（2026-09-21 记忆系统）：同样先把「能不能写」验完（目标那条记忆还在不在、
     # 是否仍有效、内容有没有和某条现行记忆撞成完全一样），写的动作留到状态改完之后
     if approved and kind == memory.KIND:
@@ -240,6 +256,8 @@ def decide(
         elif kind == plan_change.KIND:
             # 台账那句话说清「到底批准了哪一条」——summary 是后端拼的人话一行
             base = f"批准：{payload.get('summary') or '按聊天里的建议改动计划'}"
+        elif kind == plan_change.CONTRACT_CHANGE_KIND:
+            base = f"批准：{payload.get('summary') or '按聊天里的建议修改成果契约'}"
         elif kind == memory.KIND:
             label = memory.ACTIONS.get(str(payload.get("action")), str(payload.get("action")))
             base = f"批准：{label}一条长期记忆"
@@ -270,6 +288,7 @@ def decide(
     added: dict[str, Any] | None = None
     updated: dict[str, Any] | None = None
     remembered: dict[str, Any] | None = None
+    contract_result: dict[str, Any] | None = None
     if approved and kind == "profile_change":
         try:
             written_id = profile.create_item(
@@ -302,6 +321,34 @@ def decide(
         except (memory.MemoryError, ledger.LedgerError) as error:
             raise ProposalError(f"记忆没能写进去：{error}") from error
         effect = str(remembered["effect"])
+    elif approved and kind == plan_change.CONTRACT_CHANGE_KIND and contract_change is not None:
+        # 成果契约修改（OC-09）：验已经全验过了（resolve_contract_change），这里才是唯一
+        # 一次写——复用 `contract.activate` 激活新版本：旧版 superseded、计划双模式标记、
+        # 受影响的当前验收按既有 invalidate 路径失效、台账流水。activate 自己不提交，
+        # 按它的约定包在 `db.atomic` 里：激活失败整体回滚（提案已 accepted 的那笔账
+        # 与既有 plan_change 分支同一口径——预检已把可预见的失败全拦在前面）。
+        try:
+            with atomic(conn):
+                activated = contract.activate(
+                    conn,
+                    int(contract_change["plan_id"]),
+                    contract_change["merged"],
+                    source_kind="manual",
+                    reason=(
+                        f"按提案 #{proposal_id} 批准修改成果契约："
+                        f"{str(payload.get('why') or '').strip() or '计划对话里聊出的契约调整'}"
+                    ),
+                    actor="user",
+                )
+        except (contract.ContractError, contract.ContractConflict, ledger.LedgerError) as error:
+            raise ProposalError(f"新版成果契约没能激活：{error}") from error
+        effect = "contract_activated"
+        contract_result = {
+            "id": int(activated["id"]),
+            "version": int(activated["version"]),
+            "superseded_id": activated["superseded_id"],
+            "reviews_invalidated": int(activated["reviews_invalidated"]),
+        }
 
     if not approved and session_id is not None:
         # 只有还停在 blueprint_pending 的会话才「退回规划」；会话已经过期 / 被放弃 /
@@ -326,4 +373,6 @@ def decide(
         "added": added,
         "updated": updated,
         "remembered": remembered,
+        # OC-09：contract_change 批准的回执带新版本号（effect=contract_activated 时非空）
+        "contract": contract_result,
     }

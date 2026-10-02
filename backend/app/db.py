@@ -163,6 +163,17 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 计划（新方向）时消息行的 plan_id 写约定哨兵 0（真实计划 id 从 1 起，这一列在老库上
     # 是 NOT NULL、加列迁不动约束，0 表示「还没有正式计划」）。
     ("plan_chat", "planning_session_id", "INTEGER"),
+    # 2026-10-02（成果闭环 OC-08）：报告的复盘回流四列（方案 §5.2 / §6.4）。全部可空——
+    # 加列之前的旧报告行没有这些信息，读取按旧报告解释，不替它们猜。review_requested 只
+    # 存「用户希望 AI 提调整建议」的意图，不会因此自动调模型；复盘卡始终确定性生成。
+    ("report", "stage_node_ids", "TEXT"),
+    ("report", "progressed_criteria", "TEXT"),
+    ("report", "next_action", "TEXT"),
+    ("report", "review_requested", "INTEGER NOT NULL DEFAULT 0"),
+    # 2026-10-02（成果闭环 OC-09）：计划对话行的报告上下文关联。可空——没带报告的轮
+    # 与加列之前的旧行都是 NULL；落这一列只为「报告上下文可追溯」（方案 §6.4：刷新后
+    # 仍能追溯这轮对话是带着哪份报告进的），上下文本体不落库、每轮现拼。
+    ("plan_dialogue", "report_id", "INTEGER"),
 )
 
 # 老表新列上的索引。**必须在 _add_missing_columns 之后建**（列不存在时 CREATE INDEX

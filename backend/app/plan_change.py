@@ -29,13 +29,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from . import plan
+from . import contract, plan
 
 # 落进 proposal.kind 的取值（决策 28 的第四类）
 KIND = "plan_change"
@@ -90,6 +91,8 @@ class Suggestion(BaseModel):
     tasks: list[dict[str, Any]] = Field(default_factory=list)
     # add_stage：{title, deliverable, why}
     stage: dict[str, Any] = Field(default_factory=dict)
+    # revise_contract（OC-09）：拟改的契约字段（部分覆盖现版；验收/证据要求给完整新数组）
+    changes: dict[str, Any] = Field(default_factory=dict)
     why: str = Field(min_length=1)
 
 
@@ -600,3 +603,185 @@ def apply(conn: sqlite3.Connection, change: ChangePlan) -> dict[str, Any]:
             }
         )
     return {"nodes": created}
+
+# ---------- 契约修改建议（成果闭环 OC-09，方案 §4.3 / §5.1 / §6.6） ----------
+#
+# 计划建立之后成果契约不改写、只开新版本（§4.3）：改契约 = 对话里聊一条
+# contract_change 建议 → 用户批准 → `contract.activate` 激活新版本（旧版 superseded、
+# 受影响的当前验收按既有 invalidate 路径失效）。它与 plan_change **共用同一个信封**
+# （suggestion 是单个对象 → 「一轮最多一条」从形状上成立，plan_change 与
+# contract_change 二选一），判据也是同一套：**现版 + 拟改 合并后过 `contract.validate`**
+# ——契约的唯一判据不许有第二套松一点的（方案 §5.1：本模块增加契约修改提案的
+# 确定性校验入口）。差异摘要由后端确定性拼出，不靠模型自报。
+
+# 落进 proposal.kind 的取值；信封里 suggestion.action 的对应取值。
+CONTRACT_CHANGE_KIND = "contract_change"
+REVISE_CONTRACT = "revise_contract"
+
+# 拟改允许出现的契约字段。acceptance_criteria / evidence_requirements 给**完整的新数组**
+# （不是增量补丁）；constraints / stop_conditions 给完整的新字符串数组或不给；
+# source_candidate_id 是来源记账，不许模型碰。
+CHANGEABLE_CONTRACT_FIELDS = (
+    "title", "outcome", "value", "success_statement",
+    "acceptance_criteria", "evidence_requirements",
+    "constraints", "stop_conditions",
+)
+
+_CONTRACT_FIELD_LABELS = {
+    "title": "成果名称",
+    "outcome": "最终结果",
+    "value": "价值",
+    "success_statement": "做到什么算够",
+    "acceptance_criteria": "验收条件",
+    "evidence_requirements": "证据要求",
+    "constraints": "约束",
+    "stop_conditions": "停止条件",
+}
+
+
+def _current_contract_payload(row: sqlite3.Row) -> dict[str, Any]:
+    """契约行 → 可过 `contract.validate` 的 payload 字典（合并里「现版」的那一半）。"""
+
+    def _json(text: Any, fallback: Any) -> Any:
+        try:
+            return json.loads(text) if text else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    return {
+        "title": row["title"],
+        "outcome": row["outcome"],
+        "value": row["value"],
+        "success_statement": row["success_statement"],
+        "acceptance_criteria": _json(row["acceptance_criteria"], []),
+        "evidence_requirements": _json(row["evidence_requirements"], []),
+        "constraints": _json(row["constraints"], None),
+        "stop_conditions": _json(row["stop_conditions"], None),
+        "source_candidate_id": row["source_candidate_id"],
+    }
+
+
+def _contract_diff(current: dict[str, Any], merged: dict[str, Any]) -> list[str]:
+    """现版与合并版的差异摘要，一行一条（确定性拼出；给提案 payload 与确认条用）。"""
+    parts: list[str] = []
+    for name in CHANGEABLE_CONTRACT_FIELDS:
+        before, after = current.get(name), merged.get(name)
+        if before == after:
+            continue
+        label = _CONTRACT_FIELD_LABELS[name]
+        if name in ("acceptance_criteria", "evidence_requirements"):
+            before_texts = [
+                str(item.get("text") or item) for item in (before or []) if isinstance(item, dict)
+            ] if isinstance(before, list) else []
+            after_texts = [
+                str(item.get("text") or item) for item in (after or []) if isinstance(item, dict)
+            ] if isinstance(after, list) else []
+            detail = "；".join(
+                [f"新增「{text}」" for text in after_texts if text not in before_texts]
+                + [f"去掉「{text}」" for text in before_texts if text not in after_texts]
+            )
+            parts.append(
+                f"{label} {len(before_texts)} 条 → {len(after_texts)} 条"
+                + (f"（{detail}）" if detail else "")
+            )
+        elif name in ("constraints", "stop_conditions"):
+            parts.append(
+                f"{label} {len(before or [])} 条 → {len(after or [])} 条"
+            )
+        else:
+            parts.append(f"{label}「{before}」→「{after}」")
+    return parts
+
+
+def check_contract_change(
+    conn: sqlite3.Connection, plan_id: int, suggestion: Suggestion
+) -> tuple[dict[str, Any] | None, str | None]:
+    """验收一条「改成果契约」的建议 → (要落库的 payload, 不合格原因)。只读。
+
+    落提案之前的确定性校验（方案 §6.6）：现版 + 拟改合并后必须过 `contract.validate`，
+    不合格带原因回给模型重说一次，两次仍不合格一条都不落（`agent_runtime` 的调用上限
+    兜住）。改前＝改后同样不算一条修改。
+    """
+    why = str(suggestion.why or "").strip()
+    if not why:
+        return None, "why 是空的——契约修改必须说清为什么该改"
+    changes = suggestion.changes
+    if not isinstance(changes, dict) or not changes:
+        return None, "changes 是空的——拟改的契约字段一个都没给，等于什么都没改"
+    unknown = sorted(str(key) for key in changes if str(key) not in CHANGEABLE_CONTRACT_FIELDS)
+    if unknown:
+        return None, (
+            "changes 里有不能改的字段：" + "、".join(unknown)
+            + f"（允许：{'、'.join(CHANGEABLE_CONTRACT_FIELDS)}）；来源记账不许模型碰"
+        )
+
+    row = plan.resolve_plan(conn, plan_id)
+    if row is None:
+        return None, f"计划 id={plan_id} 不存在"
+    if plan.plan_mode(conn, plan_id) != "outcome":
+        return None, "这个计划还是旧流程——先补全成果契约，才有契约可改"
+    active = contract.active(conn, plan_id)
+    if active is None:
+        return None, "这个计划还没有有效的成果契约——先补契约，再谈修改"
+
+    current = _current_contract_payload(active)
+    merged = {**current, **changes}
+    try:
+        contract.validate(merged)
+    except contract.ContractError as error:
+        return None, (
+            f"现版契约加上拟改字段后不合格（{error}）——changes 里给的字段要给**完整的新值**，"
+            "以现版为准改到能通过校验"
+        )
+
+    diff = _contract_diff(current, merged)
+    if not diff:
+        return None, "拟改的字段与现版完全一样——改前等于改后，不算一条修改"
+
+    return {
+        "action": REVISE_CONTRACT,
+        "plan_id": plan_id,
+        "contract_id": int(active["id"]),
+        "current_version": int(active["version"]),
+        "changes": changes,
+        "diff_summary": "；".join(diff),
+        "summary": f"改成果契约（第 {active['version']} 版）：{'；'.join(diff)}",
+        "why": why,
+    }, None
+
+
+def resolve_contract_change(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    """批准那一刻**再查一遍**（只读；计划与契约可能在提案落库之后变了）。
+
+    返回 `{"plan_id", "merged"}`——merged 直接喂给 `contract.activate`。契约已经换版、
+    计划已经不是进行中、合并后过不了校验，都就地拒绝：提案保持 pending，一条都不写。
+    """
+    plan_id = int(payload.get("plan_id") or 0)
+    row = plan.resolve_plan(conn, plan_id)
+    if row is None:
+        raise PlanChangeNotFound(f"计划 id={plan_id} 不存在")
+    if row["status"] != "active":
+        raise PlanChangeConflict(
+            f"计划 id={plan_id} 已不是进行中（{row['status']}），不能改契约"
+        )
+    active = contract.active(conn, plan_id)
+    if active is None:
+        raise PlanChangeConflict("这个计划当前没有有效的成果契约——提案按旧版拟的，不能直接激活")
+    if int(active["id"]) != int(payload.get("contract_id") or 0):
+        raise PlanChangeConflict(
+            f"成果契约已经换版（当前第 {active['version']} 版，id={active['id']}）——"
+            "这条提案按别的版本拟的，请在对话里重新聊一条"
+        )
+    changes = payload.get("changes")
+    if not isinstance(changes, dict) or not changes:
+        raise PlanChangeError("提案里没有拟改的契约字段，批准它等于什么都没发生")
+    unknown = sorted(str(key) for key in changes if str(key) not in CHANGEABLE_CONTRACT_FIELDS)
+    if unknown:
+        raise PlanChangeError("提案里出现了不能改的契约字段：" + "、".join(unknown))
+    current = _current_contract_payload(active)
+    merged = {**current, **changes}
+    try:
+        contract.validate(merged)
+    except contract.ContractError as error:
+        raise PlanChangeError(f"现版契约加上提案的拟改字段后不合格（{error}）") from error
+    return {"plan_id": plan_id, "merged": merged}

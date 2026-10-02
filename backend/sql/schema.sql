@@ -143,6 +143,14 @@ CREATE TABLE IF NOT EXISTS report (
   note              TEXT,               -- 一句话说明
   artifact_url      TEXT,               -- 可选：产物（仓库 / URL / 截图）
   material_feedback TEXT,               -- 可选：资料评价，用于修正后续推荐
+  -- 成果闭环 OC-08（复盘回流）：以下四列全部可空——加列之前的旧报告没有这些信息，
+  -- 读取时按旧报告解释（方案 §5.2「新增字段为空时按旧报告解释」）。
+  stage_node_ids      TEXT,             -- JSON：本周涉及的阶段 node id 列表（用户自报）
+  progressed_criteria TEXT,             -- JSON：有进展的验收条件稳定 id 列表（用户自报）
+  next_action         TEXT,             -- 用户自报下一步：continue / narrow / defer / switch / stop
+  review_requested    INTEGER NOT NULL DEFAULT 0,
+                                      -- 是否希望基于这次报告让 AI 提调整建议；只存意图，
+                                      -- 不会因此自动调模型（复盘卡始终确定性生成）
   created_at        TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_report_node ON report (node_id, created_at);
@@ -254,6 +262,8 @@ CREATE TABLE IF NOT EXISTS plan_dialogue (
   role       TEXT    NOT NULL,   -- user / assistant
   content    TEXT    NOT NULL,   -- 用户原话；助手那侧存它的原话（人话，不是 JSON）
   questions  TEXT,               -- 助手这轮带出的结构化追问（JSON 数组，界面渲染成问答卡）；可空
+  report_id  INTEGER,            -- 成果闭环 OC-09：这一轮带上了哪份报告（复盘卡入口）；可空——
+                                 -- 没带报告的轮与加列之前的旧行都是 NULL，行为不变
   created_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_dialogue_thread ON plan_dialogue (plan_id, id);

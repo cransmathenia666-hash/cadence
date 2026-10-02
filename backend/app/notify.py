@@ -288,6 +288,23 @@ def _advice_block(status: dict[str, Any], quiet_weeks: int) -> str:
     return "\n".join([head, *lines])
 
 
+def _outcome_line(conn: sqlite3.Connection, status: dict[str, Any]) -> str | None:
+    """成果怎么看（OC-09）：契约标题 + 验收缺口条数 + 最新复盘卡结论一句。
+
+    周提醒只是把确定性算好的事实念一遍——不调模型、不做任何判定；
+    没有契约的计划照实说「还没有成果契约」，legacy 计划不被打扰成要补契约。
+    """
+    plan_id = status.get("plan_id")
+    if not plan_id:
+        return None
+    snapshot = plan.outcome_snapshot(conn, int(plan_id))
+    if snapshot["has_contract"]:
+        head = f"成果契约《{snapshot['contract_title']}》，验收缺口 {snapshot['acceptance_gaps']} 条"
+    else:
+        head = "还没有成果契约——验收与完成都挂在契约上"
+    return f"成果怎么看：{head}；复盘卡：{snapshot['review_card_conclusion']}"
+
+
 def compose_weekly(
     conn: sqlite3.Connection,
     status: dict[str, Any],
@@ -309,7 +326,11 @@ def compose_weekly(
     if makeup_week:
         lines.append(f"（补发）上周（{makeup_week}）的检查点漏了一次——那几天电脑没开着，这次一起补上。")
         lines.append("")
-    lines += [_stage_line(status), "", _progress_line(status), "", _advice_block(status, quiet_weeks)]
+    outcome = _outcome_line(conn, status)
+    lines += [_stage_line(status), "", _progress_line(status)]
+    if outcome:
+        lines += ["", outcome]
+    lines += ["", _advice_block(status, quiet_weeks)]
     if quiet_weeks >= QUIET_WEEKS_DOWNGRADE:
         lines += ["", f"这个计划已经连续 {quiet_weeks} 周没有更新，提醒先降为每两周一次。", "这个计划可能已经不合适了，要不要重新看一次。"]
     lines += ["", _frontend_hint()]

@@ -437,8 +437,25 @@ def main() -> int:
                 "tasks": [{"title": "写最小记账页"}],
             }],
         }, ensure_ascii=False)
+        # OC-09（复盘回流）：带报告的计划对话轮——假上游直接回一条改契约的建议信封
+        dialogue_text = json.dumps({
+            "intent": "modify",
+            "reply": "看了这次报告和复盘卡：任务卡住了、验收还有缺口。建议把成果契约的验收条件补成三条，把按月统计也定成标准。",
+            "suggestion": {
+                "action": "revise_contract",
+                "changes": {
+                    "acceptance_criteria": [
+                        {"text": "能运行并记一笔账", "required": True},
+                        {"text": "能导出记录", "required": False},
+                        {"text": "能按月统计记账次数", "required": True},
+                    ],
+                },
+                "why": "复盘卡显示验收有缺口，先把「按月统计」定进契约标准",
+            },
+        }, ensure_ascii=False)
 
-        stub_thread, stub_base = _start_stub_llm([candidates_text, chat_text, blueprint_text])
+        stub_thread, stub_base = _start_stub_llm(
+            [candidates_text, chat_text, blueprint_text, dialogue_text])
         status, provider = request(base, "POST", "/api/providers", {
             "name": f"冒烟假上游 {stamp}", "base_url": stub_base,
             "api_key": "sk-smoke", "default_model": "smoke-model", "set_as_default": True,
@@ -518,6 +535,61 @@ def main() -> int:
         checker.expect("转正落点回填到新建计划（F4）",
                        session_view.get("planning_session", {}).get("landing_plan_id"),
                        approved["plan_id"])
+
+        # ========== 成果闭环（OC-09）：复盘回流端到端 ==========
+        # 30–33：带停止建议的报告 → 复盘卡 → 带 report_id 的计划对话产 contract_change 提案
+        # → 批准激活新契约版本（旧版 superseded）。模型调用全部打在本脚本自带的假上游上。
+
+        new_plan_id = approved["plan_id"]
+        new_task_id = new_tree["stages"][0]["tasks"][0]["id"]
+        status, report = request(base, "POST", "/api/report", {
+            "node_id": new_task_id, "status": "stuck", "note": f"冒烟：卡住了 {stamp}",
+            "next_action": "stop", "review_requested": True,
+        })
+        checker.step(30, "提交带停止建议的报告（不进对话、不落提案）", status,
+                     {"report_id": report.get("report_id"),
+                      "card": (report.get("review_card") or {}).get("rule")})
+        checker.expect("报告状态码", status, 201)
+        checker.expect("复盘卡给停止入口", (report.get("review_card") or {}).get("rule"), "user_stop")
+
+        status, proposals_before = request(base, "GET", "/api/proposals")
+        pending_before = {item["id"] for item in proposals_before.get("proposals") or []}
+
+        status, card = request(base, "GET", f"/api/plans/{new_plan_id}/review-card")
+        checker.step(31, "只读取当前复盘卡（供工作台与报告页）", status,
+                     {"rule": card.get("rule")})
+        checker.expect("只读路由也是停止卡", card.get("rule"), "user_stop")
+
+        status, said = request(base, "POST", "/api/plan-dialogue", {
+            "plan_id": new_plan_id,
+            "message": f"根据这次复盘，把成果契约改一下：验收条件加一条「能按月统计记账次数」（{stamp}）",
+            "report_id": report["report_id"],
+        })
+        proposal_id_c = (said.get("suggestion") or {}).get("proposal_id")
+        checker.step(32, "带 report_id 聊一轮（假上游建议改契约）→ 落 contract_change 提案", status,
+                     {"proposal_id": proposal_id_c, "kind": (said.get("suggestion") or {}).get("kind")})
+        checker.expect("对话状态码", status, 201)
+        checker.expect("落的是契约修改提案", (said.get("suggestion") or {}).get("kind"), "contract_change")
+        checker.expect("拿到待裁定的提案编号", isinstance(proposal_id_c, int), True)
+
+        old_contract_id = new_tree["contract"]["id"]
+        status, decided = request(base, "POST", f"/api/proposals/{proposal_id_c}/decide",
+                                  {"approved": True, "reason": f"冒烟：认可这条契约调整 {stamp}"})
+        checker.step(33, "批准契约修改：激活新版本（旧版 superseded）", status,
+                     {"effect": decided.get("effect"), "contract": decided.get("contract")})
+        checker.expect("批准状态码", status, 200)
+        checker.expect("effect 是 contract_activated", decided.get("effect"), "contract_activated")
+        checker.expect("新契约是第 2 版", (decided.get("contract") or {}).get("version"), 2)
+        checker.expect("旧契约被取代", (decided.get("contract") or {}).get("superseded_id"), old_contract_id)
+
+        status, final_tree = request(base, "GET", f"/api/plan?plan_id={new_plan_id}")
+        checker.expect("新计划的当前契约已是新版",
+                       (final_tree.get("contract") or {}).get("id"),
+                       (decided.get("contract") or {}).get("id"))
+        status, pending_after = request(base, "GET", "/api/proposals")
+        pending_after_ids = {item["id"] for item in pending_after.get("proposals") or []}
+        checker.expect("批准正好消化了这一条提案（其余待裁定不受影响）",
+                       pending_after_ids == pending_before, True)
 
         stub_thread.join(timeout=1)
         print()

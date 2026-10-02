@@ -57,6 +57,12 @@ REPORT_TO_NODE: dict[str, str] = {
     "skipped": "skipped",
 }
 
+# 成果闭环 OC-08：报告里用户自报的下一步建议（方案 §3.8 / §5.2 的五令牌）。
+# 与报告状态相互独立：状态陈述「现实怎么样」，建议表达「我想往哪走」。
+# 令牌按本轮施工口径取 continue/narrow/defer/switch/stop，与方案 §5.2 的
+# continue/reduce/reschedule/change_route/stop 一一同义。
+REVIEW_NEXT_ACTIONS = ("continue", "narrow", "defer", "switch", "stop")
+
 # 合法迁移表。设计取舍：报告是你对现实的陈述，所以状态机对「往前推」很宽容
 # （没开始也能直接报完成，因为现实里你常常是先做完了才回来记），
 # 但不允许把已经完成的东西悄悄降级——done 只能重新打开成进行中，
@@ -926,18 +932,54 @@ def submit_report(
     note: str,
     artifact_url: str | None = None,
     material_feedback: str | None = None,
+    stage_node_ids: list[int] | None = None,
+    progressed_criteria: list[str] | None = None,
+    next_action: str | None = None,
+    review_requested: bool = False,
     at: str | None = None,
 ) -> dict[str, Any]:
-    """收一条报告：落报告行 → 台账留痕 → 按状态机推进节点 → 必要时产出推进提案。
+    """收一条报告：落报告行 → 台账留痕 → 按状态机推进节点 → 附一张确定性复盘卡。
 
     为什么先把能判的都判掉：非法迁移或缺一句话说明，如果写到一半才报错，
     库里会留下「有报告、状态却没动」的假记录，比直接报错更难查。
     `at` 是给测试用的时间桩，正常调用不用传。
+
+    成果闭环 OC-08（方案 §3.8 / §6.4）新增四个可选字段：本周涉及的阶段、有进展的
+    验收条件、自报下一步建议、是否希望 AI 提调整建议。它们只是用户自报的事实与
+    意向：报告仍服务节奏——不完成阶段、不写 accepted、`review_requested=True`
+    也不会自动调模型，进不进调整对话由用户点了入口再算数。
     """
     if status not in REPORT_STATUSES:
         raise PlanError(f"未知报告状态：{status}；可用状态：{' / '.join(REPORT_STATUSES)}")
     if not str(note or "").strip():
         raise PlanError("报告必须写一句话说明")
+    if next_action is not None and next_action not in REVIEW_NEXT_ACTIONS:
+        raise PlanError(
+            f"未知的下一步建议：{next_action}；可用：{' / '.join(REVIEW_NEXT_ACTIONS)}"
+        )
+
+    # 与开发方案 §5.2 / §6.4 的字段口径对照（诚实说明：别把这两组当同义字段用）：
+    # - stage_node_ids 取「阶段 node id 列表」（本轮施工口径），方案 §5.2 的 stage_id 是
+    #   单值——形状不同、非同义；这里只做整数清洗，不校验节点存在/归属。
+    # - progressed_criteria 取「有进展的条件 id 列表」，方案 §6.4 的 criteria_updates 是
+    #   条件 id → 状态（met/unknown）的映射，且要求只更新本阶段当前条件；这里只做去空串，
+    #   **不存状态、不校验归属**——它是用户自报的元数据，不驱动验收、不写 stage_review。
+    # 将来若要按方案的 criteria_updates 语义消费（回写状态、界面按状态渲染），先补归属与
+    # 状态校验或走一次显式迁移，不能直接当同一字段读。
+    stage_ids_json: str | None = None
+    if stage_node_ids is not None:
+        try:
+            cleaned_stage_ids = [int(item) for item in stage_node_ids]
+        except (TypeError, ValueError) as error:
+            raise PlanError("stage_node_ids 要是阶段 node id 的整数列表") from error
+        stage_ids_json = json.dumps(cleaned_stage_ids) if cleaned_stage_ids else None
+    criteria_json: str | None = None
+    if progressed_criteria is not None:
+        cleaned_criteria = [str(item).strip() for item in progressed_criteria]
+        cleaned_criteria = [item for item in cleaned_criteria if item]
+        criteria_json = (
+            json.dumps(cleaned_criteria, ensure_ascii=False) if cleaned_criteria else None
+        )
 
     node = get_node(conn, node_id)
     if node is None:
@@ -949,9 +991,14 @@ def submit_report(
 
     timestamp = at or now_iso()
     cursor = conn.execute(
-        """INSERT INTO report (node_id, status, note, artifact_url, material_feedback, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (node_id, status, note, artifact_url, material_feedback, timestamp),
+        """INSERT INTO report
+           (node_id, status, note, artifact_url, material_feedback,
+            stage_node_ids, progressed_criteria, next_action, review_requested, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            node_id, status, note, artifact_url, material_feedback,
+            stage_ids_json, criteria_json, next_action, int(bool(review_requested)), timestamp,
+        ),
     )
     report_id = int(cursor.lastrowid)
     ledger.log_event(conn, "report", report_id, "create", None, status, note, actor="user")
@@ -965,6 +1012,19 @@ def submit_report(
     # 不再是一次裁定（决策 28/30 的修订）。留着这个键是为了不动前端与冒烟脚本的形状。
     proposal_id = None
 
+    # 成果闭环 OC-08：报告落定后立刻给一张复盘卡。确定性判定、零模型调用、
+    # 只读——卡的结论随这次报告（含自报的下一步建议）与计划现状而定。
+    card = review_card(
+        conn,
+        int(node["plan_id"]),
+        report={
+            "report_id": report_id,
+            "status": status,
+            "next_action": next_action,
+            "review_requested": bool(review_requested),
+        },
+    )
+
     return {
         "report_id": report_id,
         "node_id": node_id,
@@ -972,6 +1032,405 @@ def submit_report(
         "node_status_before": before,
         "node_status": target,
         "proposal_id": proposal_id,
+        "review_card": card,
+    }
+
+
+# ---------- 复盘卡（成果闭环 OC-08，方案 §3.8 / §5.3） ----------
+#
+# 报告提交后立刻给一张**确定性**复盘卡：结论与理由只由计划现状与报告事实算出来，
+# 不调模型、不写任何业务表。它只给选择与原因——继续 / 缩小顺延 / 调整对话 /
+# 补条件 / 补契约 / 停止入口，外加验收缺口、证据缺口、逾期与卡住信号的事实明细；
+# 改计划永远要走用户裁定（方案 §5.3「这张卡只给选择和原因，不直接改计划」）。
+
+def report_public(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """报告行 → 响应形状。
+
+    OC-08 的四个新列在这里解析成结构化值；加列之前的旧报告行这些列为空，
+    解析成空列表 / None / False——「新增字段为空时按旧报告解释」（方案 §5.2）。
+    """
+    if row is None:
+        return None
+
+    def _ids(text: Any) -> list[Any]:
+        try:
+            parsed = json.loads(text) if text else []
+        except (TypeError, ValueError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    return {
+        "id": int(row["id"]),
+        "node_id": int(row["node_id"]),
+        "status": row["status"],
+        "note": row["note"],
+        "artifact_url": row["artifact_url"],
+        "material_feedback": row["material_feedback"],
+        "stage_node_ids": _ids(row["stage_node_ids"]),
+        "progressed_criteria": _ids(row["progressed_criteria"]),
+        "next_action": row["next_action"] if row["next_action"] in REVIEW_NEXT_ACTIONS else None,
+        "review_requested": bool(row["review_requested"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _plan_reports_newest_first(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
+    """计划下所有报告，新的在前（复盘卡「最近信号」的取数口径与 reports_between 一致）。"""
+    return list(
+        conn.execute(
+            f"""SELECT report.* FROM report
+               JOIN plan_node ON plan_node.id = report.node_id
+               WHERE plan_node.plan_id = ? AND plan_node.{not_invalid()}
+               ORDER BY report.created_at DESC, report.id DESC""",
+            (plan_id,),
+        ).fetchall()
+    )
+
+
+def review_card(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    report: dict[str, Any] | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """按方案 §5.3 复盘卡判定表产出结论与理由。确定性：不调模型、不写任何表。
+
+    `report` 是刚提交的那条报告（还没落库也可以传：当成最新一条参与判定；
+    id 与库里最新一行相同则只算一次，不会把同一份报告数两遍）。
+
+    六条判定规则来自方案 §5.3 的判定表；冲突时按下面的固定次序取**第一条命中**
+    （落选规则的信号仍原样留在 facts 里，不丢事实）：
+
+        1. 用户本报告选择停止（stop）——最新的用户意向优先：给停止入口，
+           绝不自动作废、不自动收尾；
+        2. 成果计划没有有效契约——验收机制先修好，其它推进建议在此之前都会误导；
+           legacy 计划没有契约是常态（OC-04 保持 legacy 可用），不触发这条，
+           只在「全部阶段收尾」时挡住「宣称完成」；
+        3. 上一阶段已验收且存在下一阶段——建议继续下一阶段；
+        4. 任务逾期但阶段未验收——建议缩小或顺延，列出最紧节点；
+        5. 最近连续两次报告 stuck——建议打开调整对话；
+        6. 有证据但验收 needs_work——建议补齐指定条件；
+        7. 全部阶段已收尾——有契约且过完成门槛才给「完成收尾」入口，否则先补缺口；
+        8. 兜底——保持节奏。
+    """
+    today = today or date.today()
+    plan_row = require_plan(conn, plan_id)
+    mode = plan_mode(conn, plan_id)
+    active = contract.active(conn, plan_id)
+    stages = get_stages(conn, plan_id)
+
+    # 按计划顺序走阶段：前面已收尾的记下来，第一个没收尾的就是「当前阶段」。
+    finished: list[sqlite3.Row] = []
+    current: sqlite3.Row | None = None
+    for stage in stages:
+        if stage_finished(conn, stage):
+            finished.append(stage)
+        else:
+            current = stage
+            break
+    prev = finished[-1] if finished else None
+    # 「上一阶段已验收」的判据：legacy 按旧语义收尾即算；outcome 必须是 accepted
+    # （升级时「保留为历史」的旧阶段没有验收记录，不能冒充已验收）。
+    prev_accepted = False
+    if prev is not None:
+        if mode == "outcome":
+            prev_accepted = stage_acceptance(conn, prev)["status"] == "accepted"
+        else:
+            prev_accepted = True
+
+    # 报告流：库里最新的在前；传入的 report 视为最新一条（同一行只算一次）。
+    rows = _plan_reports_newest_first(conn, plan_id)
+    reports: list[dict[str, Any]] = [
+        item for item in (report_public(row) for row in rows) if item is not None
+    ]
+    if report is not None:
+        rid = report.get("report_id", report.get("id"))
+        passed = {
+            "id": int(rid) if rid is not None else None,
+            "status": report.get("status"),
+            "next_action": (
+                report.get("next_action")
+                if report.get("next_action") in REVIEW_NEXT_ACTIONS
+                else None
+            ),
+            "review_requested": bool(report.get("review_requested")),
+        }
+        if reports and passed["id"] is not None and reports[0]["id"] == passed["id"]:
+            reports[0] = passed
+        else:
+            reports.insert(0, passed)
+    latest = reports[0] if reports else None
+
+    # 逾期节点：没收尾且到期日已过；最紧的在前（落后天数多者优先，并列取计划顺序）。
+    overdue: list[dict[str, Any]] = []
+    for node in conn.execute(
+        f"SELECT * FROM plan_node WHERE plan_id = ? AND {not_invalid()} ORDER BY sort_order, id",
+        (plan_id,),
+    ):
+        if node["status"] in SETTLED_STATUSES:
+            continue
+        lag = node_lag_days(conn, node, today)
+        if lag is not None and lag > 0:
+            overdue.append({
+                "id": int(node["id"]),
+                "title": node["title"],
+                "due_date": node["due_date"],
+                "lag_days": lag,
+            })
+    overdue.sort(key=lambda item: (-item["lag_days"], item["id"]))
+
+    # 当前阶段的验收缺口与证据缺口（legacy 阶段没有条件与证据要求，两列天然为空）。
+    acceptance_gaps: list[dict[str, Any]] = []
+    evidence_gaps: list[dict[str, Any]] = []
+    current_review: sqlite3.Row | None = None
+    if current is not None:
+        current_review = current_stage_review(conn, int(current["id"]))
+        state: dict[str, Any] = {}
+        if current_review is not None:
+            try:
+                state = json.loads(current_review["criteria_state"]) or {}
+            except (TypeError, ValueError):
+                state = {}
+        for criterion in _stage_criteria_of(current):
+            if not criterion.get("required"):
+                continue
+            criterion_id = str(criterion.get("id"))
+            state_value = state.get(criterion_id)
+            if state_value != "met":
+                acceptance_gaps.append({
+                    "criterion_id": criterion_id,
+                    "text": criterion.get("text"),
+                    "state": state_value if state_value in CRITERIA_STATES else "no_review",
+                })
+        evidence_kinds = {str(row["kind"]) for row in stage_evidence(conn, int(current["id"]))}
+        for requirement in _stage_requirements_of(current):
+            if requirement.get("required") and str(requirement.get("kind")) not in evidence_kinds:
+                evidence_gaps.append({
+                    "requirement_id": str(requirement.get("id")),
+                    "kind": requirement.get("kind"),
+                    "description": requirement.get("description"),
+                })
+
+    # 连续 stuck：从最新一条往回数，碰到第一条非 stuck 就停。
+    stuck_count = 0
+    stuck_ids: list[int] = []
+    for item in reports:
+        if item["status"] == "stuck":
+            stuck_count += 1
+            if item["id"] is not None:
+                stuck_ids.append(int(item["id"]))
+        else:
+            break
+
+    def _choice(action: str, label: str, detail: str) -> dict[str, str]:
+        return {"action": action, "label": label, "detail": detail}
+
+    def _card(
+        rule: str, action: str, conclusion: str, reason: str,
+        choices: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        return {
+            "plan_id": plan_id,
+            "mode": mode,
+            "rule": rule,
+            "action": action,
+            "conclusion": conclusion,
+            "reason": reason,
+            "choices": choices,
+            "facts": {
+                "has_active_contract": active is not None,
+                "contract_review_status": plan_row["contract_review_status"],
+                "finished_stage": None if prev is None else {
+                    "id": int(prev["id"]),
+                    "title": prev["title"],
+                },
+                "current_stage": None if current is None else {
+                    "id": int(current["id"]),
+                    "title": current["title"],
+                    "status": current["status"],
+                    "acceptance_status": stage_acceptance(conn, current)["status"],
+                },
+                "stage_progress": (
+                    None if current is None else stage_completion(conn, int(current["id"]))
+                ),
+                "acceptance_gaps": acceptance_gaps,
+                "evidence_gaps": evidence_gaps,
+                "overdue_nodes": overdue,
+                "stuck_streak": {"count": stuck_count, "report_ids": stuck_ids},
+                "contract_coverage": (
+                    contract_coverage(conn, plan_id) if active is not None else None
+                ),
+                "latest_report": latest,
+            },
+        }
+
+    # ① 用户本报告选择停止：只给入口，绝不自动作废或收尾。
+    if latest is not None and latest["next_action"] == "stop":
+        return _card(
+            "user_stop", "stop",
+            "你在这次报告里选择了停止——下面是停止计划的入口，怎么走由你决定",
+            f"报告 #{latest['id']} 的下一步建议是 stop；系统不会替你作废或收尾这个计划",
+            [
+                _choice("open_stop", "停止计划",
+                        "到计划页选「停止收尾」并写明理由——stopped 允许未完成，"
+                        "页面与台账都会明确记录这是提前停止"),
+                _choice("keep_going", "先不停", "不改任何东西，按当前节奏继续"),
+            ],
+        )
+
+    # ② 成果计划没有有效契约：验收机制先修好，其它推进建议在此之前都会误导。
+    if mode == "outcome" and active is None:
+        return _card(
+            "no_contract", "add_contract",
+            "这个成果计划还没有有效的成果契约——先补契约，在补上之前不能宣称完成",
+            "没有当前有效的契约，阶段验收与完成判定都无法进行；任何「已完成」的说法都不成立",
+            [
+                _choice("add_contract", "补成果契约",
+                        "到计划页补全成果契约（或走升级流程），补上之后阶段才能逐条验收"),
+                _choice("keep_going", "先按现状推进",
+                        "不补契约也不动计划，卡里的逾期 / 卡住信号仍然照实列出"),
+            ],
+        )
+
+    # ③ 上一阶段已验收、下一阶段存在：建议继续下一阶段。
+    if current is not None and prev is not None and prev_accepted:
+        verb = "已验收达标" if mode == "outcome" else "已收尾"
+        return _card(
+            "continue_next_stage", "continue",
+            f"上一阶段「{prev['title']}」{verb}——建议继续阶段「{current['title']}」",
+            f"阶段「{prev['title']}」的完成判定已通过，下一阶段「{current['title']}」已就位",
+            [
+                _choice("continue", "继续下一阶段",
+                        f"把「{current['title']}」的任务推进起来；完成仍以验收为准"),
+                _choice("review_gaps", "先看缺口",
+                        "卡里列出的验收与证据缺口仍然有效，可先补齐再推进"),
+            ],
+        )
+
+    # ④ 任务逾期但阶段未验收：建议缩小或顺延，列出最紧节点。
+    if overdue and current is not None:
+        worst = overdue[0]
+        return _card(
+            "overdue_narrow_or_defer", "narrow_or_defer",
+            f"有 {len(overdue)} 个节点已逾期而当前阶段「{current['title']}」还没有验收"
+            "——建议缩小范围或顺延",
+            f"最紧的是「{worst['title']}」：到期 {worst['due_date']}，已落后 {worst['lag_days']} 天",
+            [
+                _choice("narrow", "缩小", f"把「{worst['title']}」的范围缩到这一周做得完的量"),
+                _choice("defer", "顺延",
+                        f"把「{worst['title']}」的计划完成日往后推 {worst['lag_days']} 天，"
+                        "重新对一次现实"),
+                _choice("open_dialogue", "打开调整对话", "和 AI 谈一次怎么调，改动仍需你批准"),
+            ],
+        )
+
+    # ⑤ 最近连续两次报告 stuck：建议打开调整对话。
+    if stuck_count >= 2:
+        id_text = "、#".join(str(item) for item in stuck_ids)
+        return _card(
+            "two_stuck_reports", "open_dialogue",
+            "最近连续两次报告都是卡住——建议打开调整对话，重新看这条路线",
+            f"报告 #{id_text} 连续 stuck（从最新往前数没有断）",
+            [
+                _choice("open_dialogue", "打开调整对话",
+                        "带着最近的报告进计划对话；AI 最多给一条修改建议，批准前不改任何内容"),
+                _choice("narrow", "先自己减量", "不等对话，直接把本阶段范围缩到做得完的量"),
+                _choice("open_stop", "考虑停止", "如果这条路已经不想走了，停止入口在计划页"),
+            ],
+        )
+
+    # ⑥ 有证据但验收 needs_work：建议补齐指定条件。
+    if (
+        current is not None
+        and current_review is not None
+        and str(current_review["decision"]) == "needs_work"
+        and stage_evidence(conn, int(current["id"]))
+    ):
+        gap_text = "；".join(
+            f"{item['criterion_id']}「{item['text']}」" for item in acceptance_gaps
+        ) or "（验收记录里没有点名具体条件）"
+        return _card(
+            "complete_criteria", "complete_criteria",
+            f"阶段「{current['title']}」已提交证据但验收是 needs_work——先补齐指定条件再谈推进",
+            f"这条验收点名的缺口：{gap_text}",
+            [
+                _choice("complete_criteria", "补齐指定条件",
+                        "按 needs_work 记录里的缺口补证据、补实现，再重新逐条验收"),
+                _choice("open_dialogue", "打开调整对话", "条件本身不合理的话，走对话提修改建议"),
+            ],
+        )
+
+    # ⑦ 全部阶段已收尾：过没过成果门槛，决定给「完成收尾」入口还是先补缺口。
+    if current is None and stages:
+        if active is None:
+            return _card(
+                "no_contract", "add_contract",
+                "所有阶段都已收尾，但这个计划没有有效的成果契约——不能宣称成果完成",
+                "成果完成要看验收门槛，而门槛挂在契约上；先补契约，或按旧流程完成收尾",
+                [
+                    _choice("add_contract", "补成果契约",
+                            "把成果与验收标准补成契约，再按新流程逐条兑现"),
+                    _choice("close_legacy", "按旧流程收尾",
+                            "legacy 计划沿用旧的完成收尾语义，页面与台账会写明它不是成果验收"),
+                ],
+            )
+        if plan_can_complete(conn, plan_id):
+            return _card(
+                "all_settled", "close_completed",
+                "所有阶段都已验收达标，成果契约的门槛也满足——可以在计划页按「完成」收尾",
+                "每个绑定契约的阶段都已验收或跳过，必需条件全部兑现",
+                [
+                    _choice("close_completed", "完成收尾",
+                            "到计划页选「完成收尾」；系统不会替你自动收尾"),
+                ],
+            )
+        coverage = contract_coverage(conn, plan_id)
+        parts: list[str] = []
+        if coverage["missing"]:
+            parts.append(f"还没有被任何阶段承接：{'、'.join(coverage['missing'])}")
+        if coverage["unsatisfied"]:
+            parts.append(f"还没有被已验收阶段兑现：{'、'.join(coverage['unsatisfied'])}")
+        return _card(
+            "all_settled", "review_contract_gaps",
+            "所有阶段都已收尾，但成果契约还有没兑现的必需条件——不能按「完成」收尾",
+            "契约缺口：" + ("；".join(parts) or "完成判定未通过，明细见 facts.contract_coverage"),
+            [
+                _choice("review_contract_gaps", "对照缺口补承接",
+                        "补一版契约把缺的条件承接进阶段，或把已完成的阶段补验收"),
+            ],
+        )
+
+    # ⑧ 兜底：没有可判定的信号。
+    return _card(
+        "keep_pace", "none",
+        "暂时没有需要调整的信号——保持节奏，按计划推进",
+        "没有逾期节点、连续卡住或未兑现的验收缺口",
+        [_choice("keep_going", "保持节奏", "下次报告见")],
+    )
+
+
+def outcome_snapshot(conn: sqlite3.Connection, plan_id: int) -> dict[str, Any]:
+    """「成果语义」三件事的只读快照，周提醒与周导出共用（成果闭环 OC-09，方案 P3）：
+
+    当前成果契约标题、验收缺口条数（契约必需条件里「没被任何阶段承接」与
+    「承接了还没兑现」的**去重**总数）、最新复盘卡结论一句。没有契约的计划三项照实给：
+    has_contract=False、缺口记 0（没有契约就谈不上缺口条数，文案会说「还没有」）。
+    """
+    active = contract.active(conn, plan_id)
+    if active is not None:
+        coverage = contract_coverage(conn, plan_id)
+        # 缺口按**条件**去重计数：没被任何阶段承接的条件必然也没被兑现
+        # （missing ⊆ unsatisfied），两个列表直接相加会把它数两遍、报偏大的缺口数。
+        gaps = len(set(coverage["missing"]) | set(coverage["unsatisfied"]))
+        title: str | None = str(active["title"])
+    else:
+        gaps, title = 0, None
+    card = review_card(conn, plan_id)
+    return {
+        "has_contract": active is not None,
+        "contract_title": title,
+        "acceptance_gaps": gaps,
+        "review_card_conclusion": str(card["conclusion"]),
     }
 
 

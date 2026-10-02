@@ -16,8 +16,13 @@
   写档案必须经你裁定（SPEC 第 8 节铁律）。对话本身不碰计划一个字。
 - **聊到明确要改时还能附一条可执行建议**（2026-09-18 T31 起，SPEC 决策 39；2026-09-28
   决策 44 加门槛：只有他明确请求修改的 intent=modify 轮才许提）：改一个已有节点、
-  或加一件任务 / 一个阶段。建议落成 `kind=plan_change` 的待裁定提案，你当场点「确认」
-  才走写入口（`app/plan_change.py` 管这一类）。它自己**一个字段也写不动**。
+  或加一件任务 / 一个阶段；2026-10-02 起（成果闭环 OC-09）还能提**改成果契约**的建议
+  （`kind=contract_change`，与节点建议共用「一轮最多一条」的信封位置，二选一）。
+  建议落成待裁定提案，你当场点「确认」才走写入口（节点走 `app/plan_change.py`，
+  契约走 `contract.activate` 激活新版本）。它自己**一个字段也写不动**。
+- **报告上下文（OC-09）**：从复盘卡点「让 AI 根据这次复盘给建议」进来的一轮可带
+  `report_id`——报告原文与复盘卡拼进**本轮**上下文（带字符上限，超出从旧截断），
+  报告编号落进对话行可追溯；带报告不等于授权修改，闲聊轮照样一条提案都不落。
 - 调用卡在 `llm.Operation` 上：**每轮最多 3 次模型调用**（决策 40 起）——工具轮与
   「输出不合格带原因重说一次」共用这个额度，结构错误也计入上限；**最多 6 次只读工具调用**。
 - 成本闸不是轮数而是**历史字符上限**（决策 6/37 的修订）：长期窗口不能用「聊六次就锁死」
@@ -59,6 +64,7 @@ from . import (
     ledger,
     llm,
     memory,
+    plan,
     plan_change,
     profile,
 )
@@ -107,10 +113,13 @@ def plan_of(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row:
 
 
 def messages_of(conn: sqlite3.Connection, plan_id: int) -> list[sqlite3.Row]:
-    """这段对话的全部消息。`id` 也要取——建议与提案就是靠它关联的（决策 39）。"""
+    """这段对话的全部消息。`id` 也要取——建议与提案就是靠它关联的（决策 39）。
+
+    `report_id`（OC-09）一并取：这一轮是带着哪份报告进的，界面要能追溯（方案 §6.4）。
+    """
     return list(
         conn.execute(
-            "SELECT id, role, content, questions, created_at FROM plan_dialogue"
+            "SELECT id, role, content, questions, report_id, created_at FROM plan_dialogue"
             " WHERE plan_id = ? ORDER BY id",
             (plan_id,),
         ).fetchall()
@@ -132,6 +141,7 @@ def _record(
     role: str,
     content: str,
     questions: list[dict[str, Any]] | None = None,
+    report_id: int | None = None,
 ) -> int:
     """追加一句，返回它的行号。这张表是追加式日志、不经台账（同 learning_request 的先例）。
 
@@ -139,15 +149,18 @@ def _record(
     （payload 里的 `dialogue_id`）——界面据此把确认条挂在那条消息下面。
     助手这轮要是带了结构化追问（2026-09-26），随行存成 JSON——刷新页面之后
     问答卡还要能渲染出来。
+    `report_id`（OC-09）只在这一轮**带了报告上下文**时落：报告原文与复盘卡不落库
+    （每轮现拼），落编号是为了「这轮对话是带着哪份报告进的」刷新后仍可追溯。
     """
     cursor = conn.execute(
-        "INSERT INTO plan_dialogue (plan_id, role, content, questions, created_at)"
-        " VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO plan_dialogue (plan_id, role, content, questions, report_id, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
         (
             plan_id,
             role,
             content,
             None if questions is None else json.dumps(questions, ensure_ascii=False),
+            report_id,
             now_iso(),
         ),
     )
@@ -227,6 +240,17 @@ CONTRACT_PROMPT = (
     "- 你不能：删节点、替他打勾 / 跳过 / 交交付物、碰别的计划。"
     "「这块不做了」在计划里是用打勾 / 跳过 / 收尾表达的，不是你该提的建议。\n"
     "- 一次给一批不等于可以大改：只排你真说得清的那几件，剩下一律别凑数。\n"
+    "- **本轮若带【本轮带上的报告】与【复盘卡】两段（OC-09）**：那是他这次复盘的事实材料，"
+    "回答要用它、不要凭空另编事实；但**材料不等于授权**——他只是让你解读、或者只是闲聊，"
+    "就按 chat/discuss 照常回话、suggestion 给 null；他明确说「按这次复盘调整 / 改」"
+    "（或说出具体的修改要求）才许提建议。\n"
+    "- 改成果契约（只有他明确要求改契约时才提）："
+    '{"action": "revise_contract", "changes": {拟改的契约字段}, "why": "为什么该这么改"}'
+    "——changes 只写要改的那几样：title/outcome/value/success_statement 给新文本，"
+    'acceptance_criteria/evidence_requirements 给**完整的新数组**（每条 {"text": "...", '
+    '"required": true}，不是增量补丁），constraints/stop_conditions 给完整的新字符串数组'
+    "或不给。它与改节点/加任务**共用一条建议的位置**（一轮最多一条、二选一）。"
+    "改契约批准后会激活新版本、按旧版判的当前验收会失效——所以更要在他说清要改什么之后才提。\n"
     "- 建议只是建议：他点「确认」才会真改，所以别在 reply 里吹你已经改完了。\n"
     "- **出现【记忆库变了】那一行时，本轮必须先调用一次 read_memories 再回答**——"
     "你早先读到的说法可能已经不作数了。\n"
@@ -346,6 +370,24 @@ def _wants_option_card(message: str) -> bool:
     return any(mark in str(message or "") for mark in OPTION_REQUEST_MARKS)
 
 
+# 带报告那一轮的「调整意图」话术标记（OC-09，方案 §3.8 / §6.6）：从复盘卡点
+# 「让 AI 根据这次复盘给建议」进来，界面发的那句入口话本身就是明确的调整请求。
+# 但它要**同时带着报告上下文**（has_report）才算数——不带报告的轮里这句只是普通
+# 提问，维持原有的话术闸不动。口径同样收窄：只认点名的复盘/报告调整说法，宁可漏收
+# （他再补一句「改成…」顶多多一轮），不可滥收（闲聊带个「报告」两个字就算要改）。
+REPORT_ADJUST_MARKS = (
+    "根据这次复盘", "按这次复盘", "基于这次复盘", "根据复盘", "按复盘",
+    "根据这份报告", "按这份报告", "根据这次报告", "按这次报告", "基于这次报告",
+    "根据复盘卡", "按复盘卡", "按这张复盘卡", "复盘给建议",
+)
+
+
+def _wants_report_adjust(message: str) -> bool:
+    """带报告的轮里，这句话是不是在明确要求「根据这次复盘调整」。"""
+    text = str(message or "")
+    return any(mark in text for mark in REPORT_ADJUST_MARKS)
+
+
 # 「他这一句明确在要求修改计划」的话术标记（2026-09-28，决策 44 的第二道闸）：intent 是
 # 模型**自报**的——它把一句纯讨论硬报成 modify 就能绕过「只有 modify 才许带建议」那道闸。
 # 所以 suggestion 真要落提案，还得他**原话里说得出修改的说法**。口径刻意收窄：只收明确
@@ -434,7 +476,11 @@ def _confirmed_clarification(
 
 
 def _check_reply(
-    conn: sqlite3.Connection, plan_id: int, text: str, user_message: str = ""
+    conn: sqlite3.Connection,
+    plan_id: int,
+    text: str,
+    user_message: str = "",
+    has_report: bool = False,
 ) -> tuple[Any, ...]:
     """验收这一轮。合格 →（人话，要落库的建议 payload 或 None，None，结构化追问或 None，
     自报的 intent）；不合格 →（None, None, 不合格原因）。
@@ -444,6 +490,9 @@ def _check_reply(
     chat/answer/discuss 却硬塞一条建议 → 判不合格重说，只有 modify 才许提；其二，modify
     也是它**自报**的——suggestion 非空而他的原话里说不出修改的说法（见
     MODIFICATION_INTENT_MARKS）同样判不合格重说，免得「把讨论硬报成修改」绕过第一道。
+    带报告的轮（OC-09）话术闸多认一类**点名复盘的调整说法**（REPORT_ADJUST_MARKS）：
+    「让 AI 根据这次复盘给建议」这句入口话算明确的调整请求；**只带报告不点调整的闲聊
+    照样提不了建议**——报告上下文是材料，不是授权。
     反过来 intent=modify 而没带建议是合法的（先澄清再说，不算毛病）。建议里「点名的节点
     不存在 / 不属于这个计划 / 改前＝改后 / 名字撞车」这类**批不了**的毛病也在这里拦下：
     宁可不提，也不落一条等你点了「确认」才报错的提案（决策 39）。追问（如果有）在这里
@@ -487,25 +536,35 @@ def _check_reply(
 
     # 第二道闸（2026-09-28，决策 44）：intent 是它**自报**的，光凭上面那道拦不住「把普通
     # 讨论硬报成 modify」。建议真要落提案，他原话里得说得出修改的说法
-    # （MODIFICATION_INTENT_MARKS）；说不出就是看不出他要求改——判不合格重说，
-    # 宁可让它多问一句确认，也不落一条没人要的提案。
+    # （MODIFICATION_INTENT_MARKS）；带报告的轮另认点名的复盘调整说法（OC-09）。
+    # 说不出就是看不出他要求改——判不合格重说，宁可让它多问一句确认，也不落一条没人要的提案。
     if (
         reply.suggestion is not None
         and reply.intent == "modify"
-        and not (_wants_modification(user_message) or _confirmed_clarification(conn, plan_id, user_message, reply.suggestion))
+        and not (
+            _wants_modification(user_message)
+            or (has_report and _wants_report_adjust(user_message))
+            or _confirmed_clarification(conn, plan_id, user_message, reply.suggestion)
+        )
     ):
         return (
             None,
             None,
             "他这句话看不出是在要求修改当前计划——先别提建议：要么按讨论/解答回话"
             "（intent 用 discuss/answer），要么用 questions 问答卡先确认他是不是真想改、"
-            "想改哪里；他明确说出修改要求的那一轮再提",
+            "想改哪里；他明确说出修改要求的那一轮再提"
+            + ("（带报告的轮也一样：报告只是材料，他说了要按这次复盘调整才许提）" if has_report else ""),
         )
 
     if reply.suggestion is None:
         return said, None, None, questions, reply.intent  # 没有建议就是纯聊天，什么都不落
 
-    payload, problem = plan_change.check(conn, plan_id, reply.suggestion)
+    if reply.suggestion.action == plan_change.REVISE_CONTRACT:
+        # 改成果契约的建议（OC-09）：同一套确定性校验——现版 + 拟改合并后过
+        # contract.validate（判据不放松），不合格带原因重说、两次不落一条。
+        payload, problem = plan_change.check_contract_change(conn, plan_id, reply.suggestion)
+    else:
+        payload, problem = plan_change.check(conn, plan_id, reply.suggestion)
     if problem is not None:
         return None, None, f"建议不合格（{problem}）"
     return said, payload, None, questions, reply.intent
@@ -525,14 +584,16 @@ def _prose_reply(text: str) -> str | None:
 
 
 def _suggestions(conn: sqlite3.Connection, plan_id: int) -> dict[int, dict[str, Any]]:
-    """这段对话里冒出来过的建议：对话行号 → {proposal_id, summary, status}。
+    """这段对话里冒出来过的建议：对话行号 → {proposal_id, summary, status, kind}。
 
     关联靠提案 payload 里的 `dialogue_id`（**不加列、不动表结构**）：一条建议落一条
-    `plan_change` 提案，提案里记着它是从对话的哪一行冒出来的。已裁定的也照样带回来——
-    界面就不给按钮了，那一条「已确认 / 已忽略」还看得见。
+    提案（`plan_change` 或 OC-09 的 `contract_change`——两种都要带回来，否则刷新页面后
+    契约修改建议的确认条会消失），提案里记着它是从对话的哪一行冒出来的。已裁定的
+    也照样带回来——界面就不给按钮了，那一条「已确认 / 已忽略」还看得见。
     """
     rows = conn.execute(
-        "SELECT * FROM proposal WHERE kind = ? ORDER BY id", (plan_change.KIND,)
+        "SELECT * FROM proposal WHERE kind IN (?, ?) ORDER BY id",
+        (plan_change.KIND, plan_change.CONTRACT_CHANGE_KIND),
     ).fetchall()
     landed: dict[int, dict[str, Any]] = {}
     for row in rows:
@@ -546,6 +607,8 @@ def _suggestions(conn: sqlite3.Connection, plan_id: int) -> dict[int, dict[str, 
             "proposal_id": int(row["id"]),
             "summary": str(payload.get("summary") or ""),
             "status": str(row["status"]),
+            # 新增键（老界面忽略它也不出错）：确认条可以按种类渲染不同的人话
+            "kind": str(row["kind"]),
         }
     return landed
 
@@ -666,11 +729,104 @@ def view(conn: sqlite3.Connection, plan_id: int) -> dict[str, Any]:
     }
 
 
+# ---------- 报告上下文（成果闭环 OC-09，方案 §3.8 / §6.4） ----------
+#
+# 用户从复盘卡点「让 AI 根据这次复盘给建议」，进入的就是这条对话——只是这一轮要带上
+# 那份报告。带上 = 报告原文 + 它的复盘卡拼进**这一轮**的上下文；报告编号落进对话行，
+# 刷新后仍可追溯。它不改变对话的任何纪律：材料不是授权，建议照旧要走意图闸。
+
+# 报告上下文的字符上限（报告原文 + 复盘卡合起来算）。超出从旧的一侧截——卡里的结论、
+# 缺口与自报意向都在后段，保新舍旧。
+REPORT_CONTEXT_CHAR_LIMIT = 2000
+
+
+def report_of(conn: sqlite3.Connection, plan_id: int, report_id: int) -> sqlite3.Row:
+    """取一份**属于这个计划**的报告；不存在或属于别的计划，都给出中文原因。"""
+    row = conn.execute(
+        f"""SELECT report.* FROM report
+           JOIN plan_node ON plan_node.id = report.node_id
+           WHERE report.id = ? AND plan_node.plan_id = ? AND plan_node.{plan.not_invalid()}""",
+        (report_id, plan_id),
+    ).fetchone()
+    if row is None:
+        raise DialogueError(f"报告 id={report_id} 不存在或不属于计划 id={plan_id}")
+    return row
+
+
+def _report_context(conn: sqlite3.Connection, plan_id: int, report_id: int) -> str:
+    """这一轮要拼给模型的报告上下文：报告原文 + 它的复盘卡（确定性生成，不调模型）。"""
+    item = plan.report_public(report_of(conn, plan_id, report_id))
+    assert item is not None  # report_of 已经排除不存在
+    card = plan.review_card(
+        conn,
+        plan_id,
+        report={
+            "report_id": int(item["id"]),
+            "status": item["status"],
+            "next_action": item["next_action"],
+            "review_requested": item["review_requested"],
+        },
+    )
+    facts = card["facts"]
+    lines = [
+        f"【本轮带上的报告 #{item['id']}（{str(item['created_at'])[:16].replace('T', ' ')}）】",
+        f"状态：{item['status']}｜说明：{item['note'] or '（没写）'}",
+    ]
+    if item["artifact_url"]:
+        lines.append(f"产物：{item['artifact_url']}")
+    if item["material_feedback"]:
+        lines.append(f"资料评价：{item['material_feedback']}")
+    self_report: list[str] = []
+    if item["stage_node_ids"]:
+        self_report.append("涉及的阶段 #" + "、#".join(str(value) for value in item["stage_node_ids"]))
+    if item["progressed_criteria"]:
+        self_report.append("有进展的条件：" + "、".join(str(value) for value in item["progressed_criteria"]))
+    if item["next_action"]:
+        self_report.append(f"下一步建议：{item['next_action']}")
+    if item["review_requested"]:
+        self_report.append("他希望基于这次报告让 AI 提调整建议")
+    if self_report:
+        lines.append("自报：" + "；".join(self_report))
+    lines.append("【这张报告的复盘卡（系统确定性生成）】")
+    lines.append(f"结论：{card['conclusion']}")
+    lines.append(f"理由：{card['reason']}")
+    if card["choices"]:
+        lines.append("可选下一步：" + "；".join(
+            f"{choice['label']}（{choice['detail']}）" for choice in card["choices"]
+        ))
+    fact_bits: list[str] = []
+    if facts["acceptance_gaps"]:
+        fact_bits.append("验收缺口：" + "；".join(
+            f"{gap['criterion_id']}「{gap['text']}」（{gap['state']}）"
+            for gap in facts["acceptance_gaps"]
+        ))
+    if facts["evidence_gaps"]:
+        fact_bits.append("证据缺口：" + "；".join(
+            f"{gap['kind']}" + (f"（{gap['description']}）" if gap["description"] else "")
+            for gap in facts["evidence_gaps"]
+        ))
+    if facts["overdue_nodes"]:
+        fact_bits.append("逾期节点：" + "；".join(
+            f"{node['title']}（到期 {node['due_date']}，落后 {node['lag_days']} 天）"
+            for node in facts["overdue_nodes"]
+        ))
+    if facts["stuck_streak"]["count"]:
+        fact_bits.append(f"最近连续卡住 {facts['stuck_streak']['count']} 次")
+    if fact_bits:
+        lines.append("事实明细：" + "；".join(fact_bits))
+    block = "\n".join(lines)
+    if len(block) > REPORT_CONTEXT_CHAR_LIMIT:
+        marker = "（更早的部分已截断）"
+        block = marker + block[-(REPORT_CONTEXT_CHAR_LIMIT - len(marker)):]
+    return block
+
+
 def say(
     conn: sqlite3.Connection,
     plan_id: int,
     message: str,
     *,
+    report_id: int | None = None,
     provider_id: int | None = None,
     model: str | None = None,
     transport: llm.Transport | None = None,
@@ -687,31 +843,52 @@ def say(
     一段像对话的话，不是它自己吐的壳。信封里自报的 `intent`（2026-09-28，决策 44）
     随回执带回（新增键，老键一个没动）；只有明确请求修改的轮（intent=modify）才可能
     带出建议提案。
+
+    `report_id`（OC-09，方案 §3.8 / §6.4）：这一轮带上哪份报告（复盘卡的
+    「让 AI 根据这次复盘给建议」入口）。给了就把**报告原文 + 它的复盘卡**拼进本轮上下文
+    （带字符上限，超出从旧截断），报告编号落进这一轮的对话行；不给的行为一字不改。
+    带报告**不等于**授权修改：建议仍走意图闸——他明确要求调整（含点名的复盘调整说法）
+    才许提，闲聊轮一条提案都不落。
     """
     plan_of(conn, plan_id)
     text = str(message or "").strip()
     if not text:
         raise DialogueError("总得说点什么")
 
+    # 先验归属再落行：报告不存在 / 不属于这个计划，这一轮从一开始就不该发生。
+    report_block: str | None = None
+    if report_id is not None:
+        report_block = _report_context(conn, plan_id, int(report_id))
+
     # 验收合格那一轮自报的 intent（`_check_reply` 成功时的第 5 位）。`agent_runtime.Outcome`
     # 没有这个字段、循环那侧这轮不动，只好让验收闭包顺手记到一个格子里——最多记一次
-    # （合格即返回）。散文兜底那轮没有信封、没有自报，取值见下面回执处。
+    # （合格即返回）。
     declared: list[str] = []
 
     def check_with_intent(raw: str) -> tuple[Any, ...]:
-        result = _check_reply(conn, plan_id, raw, user_message=text)
+        result = _check_reply(
+            conn, plan_id, raw, user_message=text, has_report=report_id is not None
+        )
         if len(result) > 4:
             declared.append(str(result[4]))
         return result
 
-    asked_id = _record(conn, plan_id, "user", text)
+    asked_id = _record(
+        conn, plan_id, "user", text,
+        report_id=None if report_id is None else int(report_id),
+    )
+    history = _trim(messages_of(conn, plan_id))
+    if report_block is not None:
+        # 报告上下文只拼这一轮：挂在「他这一句」的后面发出去——不落库、不进后续历史
+        # （对话行里存的是 report_id，要追溯按编号现拼）。
+        history = [*history[:-1], {**history[-1], "content": f"{history[-1]['content']}\n\n{report_block}"}]
     try:
         outcome = agent_runtime.run(
             conn,
             plan_id,
             task=TASK_DIALOGUE,
             system_prompt=SYSTEM_PROMPT,
-            history=_trim(messages_of(conn, plan_id)),
+            history=history,
             check_final=check_with_intent,
             prose_fallback=_prose_reply,
             # 记忆库自它上次读之后变过 → 这一轮开头多一行提醒（走查整改第 3 条）。
@@ -739,7 +916,10 @@ def say(
         raise
 
     reply_id = _record(conn, plan_id, "assistant", outcome.reply, questions=outcome.questions)
-    suggestion = _land_suggestion(conn, plan_id, reply_id, outcome.suggestion)
+    suggestion = _land_suggestion(
+        conn, plan_id, reply_id, outcome.suggestion,
+        report_id=None if report_id is None else int(report_id),
+    )
     _record_run(conn, plan_id, reply_id, outcome.runbook)
     run = outcome.runbook.as_dict()
     # 散文兜底收下的那段没有信封、没有自报意图——它就是一段没套壳的人话、不带建议，按 chat 记。
@@ -763,21 +943,35 @@ def say(
 
 
 def _land_suggestion(
-    conn: sqlite3.Connection, plan_id: int, dialogue_id: int, payload: dict[str, Any] | None
+    conn: sqlite3.Connection,
+    plan_id: int,
+    dialogue_id: int,
+    payload: dict[str, Any] | None,
+    report_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """把验收过的建议落成一条 `kind=plan_change` 的待裁定提案（决策 39）。
+    """把验收过的建议落成一条待裁定提案（决策 39；OC-09 起含契约修改）。
 
-    界面上的「确认」就是裁定它：确认 → 批准（改的原地改、加的建节点），忽略 → 驳回
-    （台账记「聊天里先不动」）。所以每条建议都有归宿，不会在 `/proposals` 堆着。
+    界面上的「确认」就是裁定它：确认 → 批准，忽略 → 驳回（台账记「聊天里先不动」）。
+    所以每条建议都有归宿，不会在 `/proposals` 堆着。信封里 `suggestion` 是单个对象，
+    所以「一轮最多一条、plan_change 与 contract_change 二选一」从形状上成立；落哪种
+    kind 由建议自己的 action 决定。带报告的轮把 `report_id` 一并写进 payload——
+    「这条建议是哪次复盘触发的」可追溯（方案 §6.4）。
     """
     if payload is None:
         return None
+    kind = (
+        plan_change.CONTRACT_CHANGE_KIND
+        if str(payload.get("action")) == plan_change.REVISE_CONTRACT
+        else plan_change.KIND
+    )
     landed = {**payload, "dialogue_id": int(dialogue_id)}
+    if report_id is not None:
+        landed["report_id"] = int(report_id)
     proposal_id = ledger.create_active(
         conn,
         "proposal",
         {
-            "kind": plan_change.KIND,
+            "kind": kind,
             "payload": json.dumps(landed, ensure_ascii=False),
             "reason": (
                 f"计划 #{plan_id} 的对话里聊出的一条改动建议：{landed.get('summary')}"
@@ -790,6 +984,7 @@ def _land_suggestion(
         "proposal_id": proposal_id,
         "summary": str(landed.get("summary") or ""),
         "status": "pending",
+        "kind": kind,
     }
 
 

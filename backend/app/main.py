@@ -127,6 +127,22 @@ class ReportIn(BaseModel):
     note: str = Field(min_length=1, description="一句话说明，必填")
     artifact_url: str | None = None
     material_feedback: str | None = None
+    # 成果闭环 OC-08（复盘回流）：以下四个字段全部可选；旧客户端不传照常工作。
+    # 它们只是用户自报的事实与意向——review_requested=True 也不会自动调模型，
+    # 复盘卡始终由后端确定性生成。
+    stage_node_ids: list[int] | None = Field(
+        default=None, description="本周涉及的阶段 node id 列表（可选）"
+    )
+    progressed_criteria: list[str] | None = Field(
+        default=None, description="有进展的验收条件稳定 id 列表（可选）"
+    )
+    next_action: Literal["continue", "narrow", "defer", "switch", "stop"] | None = Field(
+        default=None, description="自报下一步建议（可选）：继续/缩小/顺延/换路线/停止"
+    )
+    review_requested: bool = Field(
+        default=False,
+        description="是否希望基于这次报告让 AI 提调整建议；只存意图，不会自动调模型",
+    )
 
 
 # ---------- 错误响应：所有出口一个形状（方案 C，SPEC 第 11 节） ----------
@@ -152,6 +168,10 @@ _FIELD_LABELS: dict[str, str] = {
     "note": "一句话说明",
     "artifact_url": "产物链接",
     "material_feedback": "资料评价",
+    "stage_node_ids": "本周涉及的阶段",
+    "progressed_criteria": "有进展的验收条件",
+    "next_action": "下一步建议",
+    "review_requested": "是否希望 AI 提调整建议",
     "category": "档案类别",
     "content": "档案内容",
     "reason": "理由",
@@ -505,7 +525,12 @@ def post_node_fields(
 
 @app.post("/api/report", status_code=201)
 def post_report(payload: ReportIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    """提交一条报告：状态四选一 + 一句话（必填），产物与资料评价可选。"""
+    """提交一条报告：状态四选一 + 一句话（必填），产物与资料评价可选。
+
+    成果闭环 OC-08：复盘回流四字段可选（本周涉及的阶段 / 有进展的条件 / 自报下一步 /
+    是否希望 AI 提建议），响应附带一张确定性复盘卡——不调模型，报告仍服务节奏，
+    不完成阶段、不写 accepted、不自动创建任何提案。
+    """
     if plan.get_node(conn, payload.node_id) is None:
         raise HTTPException(status_code=404, detail=f"节点 id={payload.node_id} 不存在")
     try:
@@ -516,9 +541,28 @@ def post_report(payload: ReportIn, conn: sqlite3.Connection = Depends(get_conn))
             payload.note,
             artifact_url=payload.artifact_url,
             material_feedback=payload.material_feedback,
+            stage_node_ids=payload.stage_node_ids,
+            progressed_criteria=payload.progressed_criteria,
+            next_action=payload.next_action,
+            review_requested=payload.review_requested,
         )
     except plan.PlanError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/plans/{plan_id}/review-card")
+def get_plan_review_card(plan_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """取一个计划的当前复盘卡（只读，成果闭环 OC-08）。
+
+    与报告响应里的是同一张确定性判定：不传报告也成立——最近一次报告的停止选择、
+    连续卡住、逾期信号都从库里读，结论随最新状态走。给工作台与报告页展示用；
+    只读，不调模型、不写任何表。
+    """
+    try:
+        plan.require_plan(conn, plan_id)
+    except plan.PlanError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return plan.review_card(conn, plan_id)
 
 
 @app.get("/api/plan")
@@ -1612,6 +1656,12 @@ class DialogueIn(BaseModel):
 
     plan_id: int = Field(description="聊的是哪个计划（必须存在）")
     message: str = Field(min_length=1, description="你的这一句")
+    # 成果闭环 OC-09：从复盘卡点「让 AI 根据这次复盘给建议」进来时带上那一份报告。
+    report_id: int | None = Field(
+        default=None,
+        description="可选：这一轮带上哪份报告——报告原文与复盘卡拼进本轮上下文，"
+                    "报告编号落进对话行可追溯；报告必须属于这个计划",
+    )
 
 
 class DialogueExtractIn(BaseModel):
@@ -1643,12 +1693,17 @@ def post_plan_dialogue(payload: DialogueIn, conn: sqlite3.Connection = Depends(g
     这一轮跑的是**受控工具循环**（决策 40）：它自己决定读哪几样资料（最多 6 次），
     最多 3 次模型调用（工具轮与「输出不合格重说一次」共用），撞上限或一直不合格就
     400 报错并如实说清读了什么、还缺什么——**一条提案都不落**，你这句话仍留在对话里。
-    合格就落一条 `plan_change` 待裁定提案，**确认 / 忽略在计划页**。回执里
-    `run` / `tools_used` / `stop_reason` 是这次新加的（老字段一个没动）；
-    助手那侧存进库里的仍是**人话**。
+    合格就落一条待裁定提案（改节点/加任务/加阶段是 `plan_change`；带 `report_id` 的
+    复盘轮里改成果契约是 `contract_change`，两者共用「一轮最多一条」的信封位置），
+    **确认 / 忽略在计划页**。回执里 `run` / `tools_used` / `stop_reason` 是这次新加的
+    （老字段一个没动）；助手那侧存进库里的仍是**人话**。
+
+    `report_id`（OC-09）：从复盘卡点「让 AI 根据这次复盘给建议」进来时带上那一份报告——
+    报告原文与复盘卡拼进本轮上下文，报告编号落进对话行；带报告不等于授权修改，
+    闲聊轮照样一条提案都不落。
     """
     try:
-        return dialogue.say(conn, payload.plan_id, payload.message)
+        return dialogue.say(conn, payload.plan_id, payload.message, report_id=payload.report_id)
     except dialogue.DialogueNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except dialogue.DialogueConflict as error:

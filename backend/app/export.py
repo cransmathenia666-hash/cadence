@@ -242,6 +242,22 @@ def weekly_markdown(
         lines += ["", "（三个方向只是建议，改不改、怎么改由你定。）"]
     else:
         lines.append("这周没什么要调的。")
+
+    # 成果与复盘（OC-09）：契约标题、验收缺口条数、最新复盘卡结论——与周提醒同一份
+    # 确定性快照（plan.outcome_snapshot），照实记账；文件命名与只读性质不变。
+    lines += ["", "## 四、成果与复盘", ""]
+    plan_id = status.get("plan_id")
+    if not plan_id:
+        lines.append("还没有进行中的计划。")
+    else:
+        snapshot = plan.outcome_snapshot(conn, int(plan_id))
+        if snapshot["has_contract"]:
+            lines.append(
+                f"- 成果契约：{snapshot['contract_title']}｜验收缺口 {snapshot['acceptance_gaps']} 条"
+            )
+        else:
+            lines.append("- 还没有成果契约（验收与完成都挂在契约上）。")
+        lines.append(f"- 复盘卡：{snapshot['review_card_conclusion']}")
     lines.append("")
     return f"周检查点-{week}.md", "\n".join(lines)
 
