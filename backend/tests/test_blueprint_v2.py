@@ -408,6 +408,7 @@ def test_enhanced_review_failure_lands_no_proposal(conn):
     transport = ScriptedTransport(
         blueprint_json(stage("学 HTTP")),
         "这不是 JSON",  # 水平核对员输出不合格
+        "仍然不是 JSON",  # 带原因重试仍不合格：fail-closed，不落提案
     )
     candidate_id, _, session_id, _ = ready_thread(conn)
 

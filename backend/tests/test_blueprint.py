@@ -720,8 +720,8 @@ def test_enhanced_blueprint_keeps_uncertain_level_as_a_confirmation_note(conn):
     "responses",
     [
         ("not-json", review_json(), review_json()),  # 增强模式草稿无效时不把额度耗在重试上
-        (blueprint_json(stage("学 HTTP")), "not-json", review_json()),  # 第一位审查员失效不静默降级
-        (blueprint_json(stage("学 HTTP")), review_json(), "not-json"),  # 第二位审查员失效同样不降级
+        (blueprint_json(stage("学 HTTP")), "not-json", "not-json"),  # 第一位审查员重试后仍失效不静默降级
+        (blueprint_json(stage("学 HTTP")), review_json(), "not-json", "not-json"),  # 第二位审查员同样不降级
     ],
 )
 def test_enhanced_blueprint_fails_closed_on_invalid_draft_or_review(conn, responses):
@@ -736,6 +736,72 @@ def test_enhanced_blueprint_fails_closed_on_invalid_draft_or_review(conn, respon
     assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
 
 
+def test_enhanced_review_accepts_stance_and_severity_aliases(conn):
+    """审查员把 stance/severity 写成同义词（「赞同」「需确认」）时表层规范化接住，不浪费重试。"""
+    make_provider(conn)
+    add_profile(conn)
+    aliased = json.dumps(
+        {
+            "summary": "整体站得住",
+            "points": [
+                {
+                    "stance": "赞同",
+                    "target": "第 1 阶段",
+                    "point": "起点与档案相符",
+                    "reason": "档案里有相关经历记录",
+                    "severity": "需确认",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("复习 HTTP")),
+        aliased,
+        review_json(summary="阶段衔接没有问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, mode="enhanced", transport=transport
+    )
+
+    row = conn.execute(
+        "SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)
+    ).fetchone()
+    review = json.loads(row["payload"])["review"]
+    assert review["reviewers"][0]["stance"] == "agree"
+    assert review["reviewers"][0]["points"][0]["severity"] == "confirm"
+    assert created["calls"] == 3  # 规范化接住，没有触发重试
+
+
+def test_enhanced_review_retries_once_when_first_output_is_broken(conn):
+    """审查输出结构不合格时带原因重试一次；重试合格就正常落提案。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("复习 HTTP")),
+        "not-json",  # 第一位审查员第一次结构不合格
+        review_json(summary="重试后的补充审查"),
+        review_json(summary="阶段衔接没有问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, mode="enhanced", transport=transport
+    )
+
+    row = conn.execute(
+        "SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)
+    ).fetchone()
+    review = json.loads(row["payload"])["review"]
+    assert review["reviewers"][0]["summary"] == "重试后的补充审查"
+    assert created["calls"] == 4  # 初稿＋第一位审查员两次＋第二位审查员一次
+    assert "结构检查" in transport.seen[3]["payload"]["messages"][-1]["content"]
+
+
 def test_enhanced_disagreement_without_adjustment_fails_closed(conn):
     make_provider(conn)
     add_profile(conn)
@@ -745,6 +811,9 @@ def test_enhanced_disagreement_without_adjustment_fails_closed(conn):
         review_json(
             {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
         ),
+        review_json(
+            {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
+        ),  # 重试仍缺 adjustment：内容不合格不是结构问题能自愈的
         review_json(summary="没有问题"),
     )
     candidate_id, _ = ready_thread(conn, transport=transport)

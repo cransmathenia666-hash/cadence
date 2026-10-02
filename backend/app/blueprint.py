@@ -8,7 +8,8 @@
 - LLM 只产出**提案**：蓝图落成 `pending` 提案，建树必须经你裁定（可勾选部分采纳）。
 - 调用次数卡在 `llm.Operation` 上：对话**每轮 1 次**（决策 6 修订，不重试）；
   蓝图标准模式 1 次生成 + 不合格带原因重试 1 次；增强模式（决策 45，2026-09-30 改多审查员）
-  = 初稿 + 两位职责不同的审查员各自独立表态 + 必要时修订一次，最多 4 次调用，
+  = 初稿 + 两位职责不同的审查员各自独立表态 + 必要时修订一次，最多 6 次调用
+  （每位审查员含一次结构重试），
   失败不落提案、不静默降级。
 - 生成前**至少聊成一轮**（III-01：模型回话失败那轮只留下你的话，不算数），且**最后一轮
   必须是它答的那句**（上一轮还没聊成不许出方案）：不允许「刚采纳就静默出树」，那正是
@@ -1161,11 +1162,65 @@ def _check_blueprint(text: str) -> tuple[dict[str, Any] | None, str | None]:
     return {"goal": blueprint.goal.strip(), "contract": contract_data, "stages": stages}, None
 
 
+_STANCE_ALIASES = {
+    "agree": "agree", "赞同": "agree", "同意": "agree", "认可": "agree",
+    "approve": "agree", "approved": "agree", "yes": "agree", "ok": "agree",
+    "disagree": "disagree", "反对": "disagree", "不同意": "disagree",
+    "不认可": "disagree", "object": "disagree", "reject": "disagree", "no": "disagree",
+}
+_SEVERITY_ALIASES = {
+    "revise": "revise", "must": "revise", "must_fix": "revise", "required": "revise",
+    "fix": "revise", "major": "revise", "high": "revise", "必须修改": "revise",
+    "confirm": "confirm", "optional": "confirm", "minor": "confirm", "info": "confirm",
+    "low": "confirm", "ask": "confirm", "confirm_only": "confirm", "需确认": "confirm",
+}
+_REVIEW_WRAP_KEYS = {"review", "report", "reviewer_report", "result"}
+
+
+def _normalize_review_data(data: Any) -> Any:
+    """审查输出的表层规范化：只认同义词、剥一层外壳、去首尾空白，不动意见内容。
+
+    模型常把 stance/severity 写成同义词（「赞同」「必须修改」）或整体多包一层
+    （{"review": {...}}）；这些不改变「对哪一点持什么立场」的事实，先规范化能省掉
+    一次重试。真正缺字段、内容空白或结构不对的仍交给校验如实报错。
+    """
+    if isinstance(data, dict) and len(data) == 1:
+        key = str(next(iter(data.keys()))).strip().lower()
+        only = next(iter(data.values()))
+        if key in _REVIEW_WRAP_KEYS and isinstance(only, dict):
+            data = only
+    if not isinstance(data, dict):
+        return data
+    if isinstance(data.get("summary"), str):
+        data = {**data, "summary": data["summary"].strip()}
+    points = data.get("points")
+    if not isinstance(points, list):
+        return data
+    cleaned: list[Any] = []
+    for item in points:
+        if not isinstance(item, dict):
+            cleaned.append(item)
+            continue
+        item = dict(item)
+        stance = _STANCE_ALIASES.get(str(item.get("stance", "")).strip().lower())
+        if stance is not None:
+            item["stance"] = stance
+        severity = _SEVERITY_ALIASES.get(str(item.get("severity", "")).strip().lower())
+        if severity is not None:
+            item["severity"] = severity
+        for field in ("target", "point", "reason", "adjustment"):
+            if isinstance(item.get(field), str):
+                item[field] = str(item[field]).strip()
+        cleaned.append(item)
+    return {**data, "points": cleaned}
+
+
 def _check_review(text: str) -> tuple[ReviewerReport | None, str | None]:
     """只接受结构完整、逐条有立场的审查报告；无效审查绝不静默改成标准模式。"""
     data = advisor.extract_json(text)
     if data is None:
         return None, "审查输出不是合法的 JSON 对象"
+    data = _normalize_review_data(data)
     try:
         report = ReviewerReport.model_validate(data)
     except ValidationError as error:
@@ -1260,7 +1315,10 @@ def _review_messages(
         "只有需要改动蓝图才能解决的反对标 severity=revise；缺少个人事实、需要用户确认的"
         "标 severity=confirm。target 用可读的阶段/任务位置；引用档案时只摘与问题直接相关的"
         f"短事实，不复述整段私人内容或无关敏感细节。最多 {MAX_REVIEW_POINTS} 条，"
-        "不把偏好差异当错误。",
+        "不把偏好差异当错误。"
+        '输出形状固定为 {"summary":"一句总评","points":[{"stance":"agree 或 disagree",'
+        '"target":"所审位置","point":"具体点","reason":"依据","adjustment":"建议怎么调整'
+        '（disagree 必填）","severity":"revise 或 confirm"}]}。',
         '只输出形如：{"summary":"一句话结论","points":[{"stance":"agree|disagree",'
         '"target":"第 1 阶段 / 任务 2","point":"认可或反对的具体点","reason":"依据或缺少的事实",'
         '"adjustment":"仅反对时：建议如何调整","severity":"revise|confirm"}]}。'
@@ -1466,8 +1524,9 @@ def generate_blueprint(
             raise BlueprintError("内部状态异常：验收通过却没有解析出蓝图")
     else:
         # 增强模式：初稿 → 审查席逐个独立表态 → 有「必须改」的反对才修订一次。
-        # 每个步骤最多调用一次，不把结构错误伪装成通过；失败不落提案、不静默降级。
-        operation = llm.Operation(conn, TASK_BLUEPRINT, limit=4, transport=transport)
+        # 初稿与修订各一次调用，每位审查员最多两次（结构不合格带原因重试一次）；
+        # 不把结构错误伪装成通过；失败不落提案、不静默降级。
+        operation = llm.Operation(conn, TASK_BLUEPRINT, limit=6, transport=transport)
         enhanced_messages = [
             *messages,
             {
@@ -1491,15 +1550,35 @@ def generate_blueprint(
         reviewers_payload: list[dict[str, Any]] = []
         required: list[tuple[str, int, ReviewPoint]] = []
         for lens in REVIEW_LENS:
+            review_messages = _review_messages(enhanced_messages, initial, lens=lens)
             review_raw = operation.chat(
-                _review_messages(enhanced_messages, initial, lens=lens),
+                review_messages,
                 provider_id=provider_id,
                 model=model,
             )
             report, problem = _check_review(review_raw)
             if problem is not None or report is None:
+                # 与初稿同款的「带原因重试一次」：模型被告知哪里不合格后通常能自纠。
+                review_messages = [
+                    *review_messages,
+                    {"role": "assistant", "content": review_raw},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"你上面的审查输出没通过结构检查：{problem}。"
+                            "请只输出合格的 JSON 对象，不要任何解释。"
+                        ),
+                    },
+                ]
+                review_raw = operation.chat(
+                    review_messages,
+                    provider_id=provider_id,
+                    model=model,
+                )
+                report, problem = _check_review(review_raw)
+            if problem is not None or report is None:
                 raise BlueprintError(
-                    f"增强模式「{lens['name']}」的审查没有通过结构检查"
+                    f"增强模式「{lens['name']}」的审查连着两次没通过结构检查"
                     f"（{problem or '没有解析出审查结果'}）；"
                     "没有创建提案，可以重试或改选标准模式"
                 )
