@@ -50,6 +50,13 @@ export function WorkbenchChat() {
   } | null>(null);
   // 右栏计划树的版本号：对话每刷新一次（换计划、建议被裁定）就重取一次树
   const [treeVersion, setTreeVersion] = useState(0);
+  // P3 复盘回流：从 /report 的复盘卡跳过来时 URL 带 report_id——下一句对话带上它
+  // （报告原文＋复盘卡进本轮上下文），发过一次就消费掉，不反复粘。
+  const [pendingReportId, setPendingReportId] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const raw = new URLSearchParams(window.location.search).get("report_id");
+    return raw !== null && /^[1-9]\d*$/.test(raw) ? Number(raw) : null;
+  });
 
   // 操作回执走右下角 toast；错误例外——不许被动画带走，仍留在输入框上方
   const [toasts, setToasts] = useState<ToastData[]>([]);
@@ -178,8 +185,13 @@ export function WorkbenchChat() {
       if (!opts?.silent) setOptimistic(content);
       setDraft("");
       setError(null);
-      return sayPlanDialogue(planId, content)
-        .then(() => getPlanDialogue(planId))
+      const reportForThisTurn = pendingReportId;
+      return sayPlanDialogue(planId, content, reportForThisTurn)
+        .then(() => {
+          // 报告上下文只服务一轮：送达即消费，失败则留着让用户原样重试
+          if (reportForThisTurn !== null) setPendingReportId(null);
+          return getPlanDialogue(planId);
+        })
         .then((data) => {
           if (planIdRef.current !== planId) return true;
           setDialogue(data);
@@ -202,7 +214,7 @@ export function WorkbenchChat() {
           setOptimistic(null);
         });
     },
-    [selectedPlanId, pending],
+    [selectedPlanId, pending, pendingReportId],
   );
 
   // 把这段对话提炼成待裁定的档案变更提案（只生成提案，不改档案）。
@@ -281,6 +293,24 @@ export function WorkbenchChat() {
               onRefresh={() => fetchDialogue(selectedPlanId)}
               onAnswer={send}
             />
+          )}
+
+          {pendingReportId !== null && (
+            <div className="w-full max-w-[92%] rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3">
+              <p className="text-[13px] font-medium text-amber-200/90">
+                复盘回流已就绪：报告 #{pendingReportId}
+              </p>
+              <p className="mt-1.5 text-[12px] leading-relaxed text-white/60">
+                你下一句对话会带上这份报告原文与它的复盘卡；只是闲聊不会产提案，明确要求调整才会。发过一次后自动解除。
+              </p>
+              <button
+                type="button"
+                onClick={() => setPendingReportId(null)}
+                className="mt-2 text-[12px] text-white/55 underline underline-offset-4 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70"
+              >
+                不带报告，普通聊
+              </button>
+            </div>
           )}
 
           {optimistic && (

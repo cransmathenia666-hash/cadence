@@ -289,10 +289,31 @@ export type ReportResult = {
   node_status: NodeStatus;
   /** 阶段因此收尾时，后端会产出一条推进提案，这里给它的 id。 */
   proposal_id: number | null;
+  /** P3：随回执返回的确定性复盘卡（零模型调用）。 */
+  review_card: ReviewCard | null;
+};
+
+/** 报告里自报的下一步（P3 五令牌）。 */
+export type ReportNextAction = "continue" | "narrow" | "defer" | "switch" | "stop";
+
+/**
+ * 确定性复盘卡（P3 OC-08）：后端按事实规则算出的下一步选择，不调模型。
+ * `choices` 是给用户看的动作选项；`facts` 是判定依据的事实明细。
+ */
+export type ReviewCard = {
+  plan_id: number;
+  mode: string;
+  rule: string;
+  action: string;
+  conclusion: string;
+  reason: string;
+  choices: { action: string; label: string; detail: string }[];
+  facts: Record<string, unknown>;
 };
 
 /**
- * 提交一条报告：状态四选一 + 一句话（必填），产物与资料评价可选。
+ * 提交一条报告：状态四选一 + 一句话（必填），产物与资料评价可选；
+ * P3 另可带成果复盘信息（涉及阶段 / 进展条件 / 下一步自报 / 是否要 AI 建议）。
  *
  * 这是闭环的第一段——你在别处学完，回来告诉系统结果。
  */
@@ -302,6 +323,10 @@ export async function submitReport(input: {
   note: string;
   artifactUrl?: string;
   materialFeedback?: string;
+  stageNodeIds?: number[];
+  progressedCriteria?: string[];
+  nextAction?: ReportNextAction | null;
+  reviewRequested?: boolean;
 }): Promise<ReportResult> {
   return request<ReportResult>("/api/report", {
     method: "POST",
@@ -312,8 +337,17 @@ export async function submitReport(input: {
       note: input.note,
       artifact_url: input.artifactUrl ?? null,
       material_feedback: input.materialFeedback ?? null,
+      stage_node_ids: input.stageNodeIds ?? null,
+      progressed_criteria: input.progressedCriteria ?? null,
+      next_action: input.nextAction ?? null,
+      review_requested: input.reviewRequested ?? false,
     }),
   });
+}
+
+/** 取一个计划当前的确定性复盘卡（只读；随最近一次报告/卡住/逾期状态走）。 */
+export async function getReviewCard(planId: number): Promise<ReviewCard> {
+  return request<ReviewCard>(`/api/plans/${planId}/review-card`);
 }
 
 // ---------- 计划的列表与生命周期（T24） ----------
@@ -1749,8 +1783,10 @@ export type Selection = string[];
  * **不会在 `/proposals` 页堆着**。已裁定的消息也带这个字段（界面就不给按钮了）。
  */
 export type DialogueSuggestion = {
-  /** 那条 `plan_change` 提案的 id——「确认」就是对它调 `decideProposal`。 */
+  /** 那条提案的 id——「确认」就是对它调 `decideProposal`。 */
   proposal_id: number;
+  /** 提案种类：`plan_change` 计划改动 / `contract_change` 成果契约修正（P3 新增）。 */
+  kind?: string;
   /** 后端拼好的人话一行，直接当确认条显示：「改『读 MDN』的截止日：10-01 → 10-08」。 */
   summary: string;
   /** `pending` 时界面给「确认 / 忽略」两个按钮，其余只显示结果。 */
@@ -1863,11 +1899,16 @@ export type DialogueTurn = {
  * 模型调用（工具轮与「输出不合格重说一次」共用这个额度）；撞上限或一直不合格就报错，
  * 并说清读了什么、还缺什么，你这句话仍留在对话里。
  */
-export async function sayPlanDialogue(planId: number, message: string): Promise<DialogueTurn> {
+export async function sayPlanDialogue(
+  planId: number,
+  message: string,
+  reportId?: number | null,
+): Promise<DialogueTurn> {
   return request<DialogueTurn>("/api/plan-dialogue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ plan_id: planId, message }),
+    // P3：带上报告编号时，本轮上下文会附该报告原文与复盘卡（复盘回流的明确入口）。
+    body: JSON.stringify({ plan_id: planId, message, report_id: reportId ?? null }),
   });
 }
 

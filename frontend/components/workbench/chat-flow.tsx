@@ -108,6 +108,7 @@ function SuggestionCard({
   };
 
   const isPending = suggestion.status === "pending";
+  const kindLabel = suggestion.kind === "contract_change" ? "成果契约修正建议" : "计划改动建议";
 
   // 裁定后收起成一行摘要，不再占画面；点开可回看建议原文。
   if (!isPending) {
@@ -116,7 +117,7 @@ function SuggestionCard({
         <CollapsedNote
           tone={suggestion.status === "accepted" ? "done" : "muted"}
           label={suggestion.status === "accepted" ? "已批准" : "已忽略"}
-          summary={`计划改动建议 · ${suggestion.summary}`}
+          summary={`${kindLabel} · ${suggestion.summary}`}
         >
           <p>{suggestion.summary}</p>
         </CollapsedNote>
@@ -141,7 +142,7 @@ function SuggestionCard({
           </span>
           {/* 状态是拍板依据，亮度不低于 white/70 一档 */}
           <h4 className="min-w-0 flex-1 truncate text-[15px] font-medium text-foreground/90">
-            计划改动建议
+            {kindLabel}
           </h4>
           <span className="shrink-0 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-400">
             待批准
@@ -171,7 +172,9 @@ function SuggestionCard({
         </div>
 
         <p className="mt-2.5 text-[11px] text-muted/70">
-          确认后才会真的改动计划；忽略会记入台账。
+          {suggestion.kind === "contract_change"
+            ? "确认后才会激活新版成果契约（旧版与受影响验收留痕）；忽略会记入台账。"
+            : "确认后才会真的改动计划；忽略会记入台账。"}
         </p>
       </div>
     </div>

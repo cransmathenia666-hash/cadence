@@ -13,6 +13,7 @@ import {
 import { JudgmentSection } from "./judgment-section";
 import { ProfileChangeSection } from "./profile-change-section";
 import { PlanChangeSection } from "./plan-change-section";
+import { ContractChangeSection } from "./contract-change-section";
 import { MemoryChangeSection } from "./memory-change-section";
 
 export function getProposalTitle(proposal: Proposal): string {
@@ -32,6 +33,10 @@ export function getProposalTitle(proposal: Proposal): string {
     const summary = typeof payload.summary === "string" ? payload.summary : "";
     return summary || "计划改动建议";
   }
+  if (proposal.kind === "contract_change") {
+    const summary = typeof payload.diff_summary === "string" ? payload.diff_summary : "";
+    return summary || "成果契约修正";
+  }
   if (proposal.kind === "memory_change") {
     const content = typeof payload.content === "string" ? payload.content : "";
     const target = typeof payload.target_content === "string" ? payload.target_content : "";
@@ -45,6 +50,7 @@ function getReadingTitle(proposal: Proposal): string {
     case "material_judgment": return "这一份资料如何判断";
     case "profile_change": return "拟写入长期档案";
     case "plan_change": return "计划将怎样改变";
+    case "contract_change": return "成果契约将怎样改变";
     case "memory_change": return "这条记忆将怎样变化";
     default: return getProposalTitle(proposal);
   }
@@ -186,6 +192,8 @@ export function ProposalCard({
         return <ProfileChangeSection proposal={proposal} />;
       case "plan_change":
         return <PlanChangeSection proposal={proposal} planName={planName} />;
+      case "contract_change":
+        return <ContractChangeSection proposal={proposal} planName={planName} />;
       case "memory_change":
         return <MemoryChangeSection proposal={proposal} />;
       default:

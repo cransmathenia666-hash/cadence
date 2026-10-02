@@ -30,6 +30,11 @@ export const KIND_CONFIG: Record<
     badge: "PLAN",
     badgeClass: "text-white/65 bg-white/[0.05] border-white/[0.1]",
   },
+  contract_change: {
+    label: "契约修正",
+    badge: "CONTRACT",
+    badgeClass: "text-amber-200/80 bg-amber-500/[0.08] border-amber-500/25",
+  },
   memory_change: {
     label: "记忆候选",
     badge: "MEMORY",
