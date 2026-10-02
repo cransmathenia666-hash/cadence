@@ -464,6 +464,9 @@ export default function CandidatesPage() {
       listCandidates(undefined, restoredThread).then(setStored).catch(() => setStored(null));
     } else if (restored.activeRequestId !== null) {
       listCandidates(restored.activeRequestId).then(setStored).catch(() => setStored(null));
+    } else {
+      // 全新会话（无存档）：默认取最近一轮有候选的「找」，目录区不空等一次搜索。
+      listCandidates().then(setStored).catch(() => setStored(null));
     }
     const restoredChat = restored.activeChat;
     if (restoredChat !== null) {
