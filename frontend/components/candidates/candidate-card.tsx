@@ -323,6 +323,7 @@ export function CandidateCard({
                 {row.status === "accepted" && (
                   <button
                     onClick={() => setChattingId(row.id)}
+                    data-rec="enter-planning"
                     className={`border border-white/[0.12] px-4 py-2 text-[13px] text-white/80 transition-colors hover:border-white/[0.3] hover:text-white ${isDossier ? "rounded-sm" : "rounded-full"}`}
                   >
                     进入规划对话

@@ -356,6 +356,7 @@ export function BlueprintSection({
                       role="checkbox"
                       aria-checked={selected}
                       aria-label={`勾选整个阶段 ${index + 1}：${item.title}`}
+                      data-rec={`stage-${index}`}
                       onClick={() => toggleStage(index)}
                       className="flex w-6 shrink-0 items-center justify-center self-start py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70"
                     >

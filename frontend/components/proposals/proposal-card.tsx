@@ -328,6 +328,7 @@ export function ProposalCard({
                       animation="roll"
                       variant="primary"
                       size="md"
+                      data-rec="approve"
                       onClick={() => runDecide(true)}
                       disabled={busy || approveBlocked}
                       className="px-6 text-[13px] bg-white text-black hover:bg-white/90"
