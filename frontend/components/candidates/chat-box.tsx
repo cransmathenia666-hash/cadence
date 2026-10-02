@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useReducedMotion } from "motion/react";
 import { ArrowUp, Check, CircleHelp, CornerDownRight, Loader2 } from "lucide-react";
-import { PlanChatView, ChatMessage, FindResult } from "@/lib/api";
+import { PlanChatView, ChatMessage, FindResult, type BlueprintMode } from "@/lib/api";
 import { HoverSelect } from "@/components/ui/hover-select";
 import { MessageScroller } from "@/components/agents/message-scroller";
 import { MessageBubble, MessageBubbleContent } from "@/components/agents/message-bubble";
@@ -36,6 +36,12 @@ const REVEAL_CAP = 4;
 const SHAPE_LABELS: Record<string, string> = {
   directions: "多方向",
   path: "一条路径",
+};
+
+/** 两种生成模式的一句话说明：切换控件的悬浮提示与选中后的旁注共用。 */
+const MODE_HINTS: Record<BlueprintMode, string> = {
+  standard: "标准：一次出稿，沿用原有流程",
+  enhanced: "增强：出稿后由水平核对员与结构审查员独立复核，有异议自动修订一次",
 };
 
 function ReplyStream({ content, animate }: { content: string; animate: boolean }) {
@@ -182,6 +188,8 @@ export function ChatBox({
   onSend,
   onGenerate,
   busy,
+  onReturnBlueprint,
+  onReopenPlanning,
   clarifyData,
   onClarifySend,
   clarifyError,
@@ -195,6 +203,7 @@ export function ChatBox({
   onFollowUpSend,
   findResultNotice,
   onFindResultNoticeClose,
+  variant = "plan",
 }: {
   view: PlanChatView | null;
   effectivePlanId: number | null;
@@ -202,8 +211,12 @@ export function ChatBox({
   chosenPlan: string;
   setChosenPlan: (val: string) => void;
   onSend: (msg: string) => Promise<PlanChatView | null>;
-  onGenerate: () => Promise<void>;
+  onGenerate: (mode: BlueprintMode) => Promise<void>;
   busy: boolean;
+  /** 把待裁定蓝图退回规划对话（理由必填，进台账）；resolve false = 退回没成功。 */
+  onReturnBlueprint?: (reason: string) => Promise<boolean>;
+  /** 终态会话（converted / abandoned / expired）的「重新规划」：开一段新会话。 */
+  onReopenPlanning?: () => Promise<boolean>;
   clarifyData?: FindResult["clarify"] | null;
   /** 发送回答；resolve `false` = 这轮失败，回答没被消费，输入框要把原话放回来。 */
   onClarifySend?: (answer: string) => Promise<boolean>;
@@ -211,7 +224,7 @@ export function ChatBox({
   findRequest?: string;
   /** 这段探索挂在哪个计划（线程自己的归属；「新方向」线程也明说）——头部的归属徽标。 */
   findPlanLabel?: string | null;
-  findTurns?: { id: number | null; utterance: string; reply: string | null; clarify: string | null }[];
+  findTurns?: { id: number | null; utterance: string; reply: string | null; clarify: string | null; candidates?: number | null }[];
   /** chat / need_info 轮模型的人话回应：对话流里的一条消息，不是候选卡。 */
   findReply?: string | null;
   /** 模型想换「多方向／一路径」形态、等用户拍板的说明（决策 44 ③）。 */
@@ -223,13 +236,25 @@ export function ChatBox({
   onFollowUpSend?: (text: string) => Promise<boolean>;
   findResultNotice?: { answer: string; count: number } | null;
   onFindResultNoticeClose?: () => void;
+  /** find = 找方向对话实例：空态与等待文案按「找方向」写，不借用意向规划的措辞。 */
+  variant?: "plan" | "find";
 }) {
   const [text, setText] = useState("");
+  const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>("standard");
+  const [pendingMode, setPendingMode] = useState<BlueprintMode | null>(null);
   const [optimistic, setOptimistic] = useState<string | null>(null);
   const [animateKey, setAnimateKey] = useState<string | null>(null);
   const [clarifyText, setClarifyText] = useState("");
   const [sentAnswer, setSentAnswer] = useState<string | null>(null);
+  // 蓝图退回（OC-06）：理由必填、进台账——表单只在用户点开「退回规划」后出现。
+  const [returnOpen, setReturnOpen] = useState(false);
+  const [returnReason, setReturnReason] = useState("");
+  const [returnPending, setReturnPending] = useState(false);
+  const [returnError, setReturnError] = useState<string | null>(null);
+  const [returnNotice, setReturnNotice] = useState<string | null>(null);
+  const [reopenPending, setReopenPending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const returnInputId = `blueprint-return-reason-${view?.planning_session?.id ?? view?.candidate_id ?? "chat"}`;
 
   const messages = useMemo(() => view?.messages ?? [], [view?.messages]);
   const isClarifyMode = !view && !!clarifyData;
@@ -241,6 +266,25 @@ export function ChatBox({
       ? plans.find((item) => item.id === effectivePlanId)?.goal ?? null
       : null;
 
+  // ---- 规划会话状态（OC-05）：全部读后端给的 planning_session / planning_status，
+  // 前端不自行推算业务判定。----
+  const session = view?.planning_session ?? null;
+  const planningStatus = view?.planning_status ?? null;
+  /** 有一份待裁定蓝图：普通发言锁定，先裁定（提案页）或退回（下面的表单）。 */
+  const blueprintPending = planningStatus === "blueprint_pending";
+  /** converted / abandoned / expired 是终态：整段只读，可「重新规划」开新会话。 */
+  const sessionTerminal =
+    session !== null &&
+    (session.status === "converted" || session.status === "abandoned" || session.status === "expired");
+  /** legacy 候选（从没进过规划会话）且落点没定：仍要先指明注入的计划。 */
+  const planBlocked = view !== null && session === null && effectivePlanId === null;
+  const composerLocked = blueprintPending || sessionTerminal || planBlocked;
+  const lockedPlaceholder = blueprintPending
+    ? "蓝图在等裁定——普通发言已锁定"
+    : sessionTerminal
+      ? "这段规划会话已结束，只读"
+      : "先指明落点计划";
+
   // 乐观回答气泡只在等待期间展示；落定后由会话历史（或错误态）接管。
   // 渲染期重置（React 官方模式）：busy 翻回 false 就地清掉，不进 effect。
   if (!busy && sentAnswer !== null) {
@@ -249,7 +293,8 @@ export function ChatBox({
 
   const handleSend = async () => {
     const content = text.trim();
-    if (!content || busy || effectivePlanId === null) return;
+    if (!content || busy || composerLocked) return;
+    setReturnNotice(null);
 
     setOptimistic(content);
     setText("");
@@ -267,6 +312,35 @@ export function ChatBox({
       .find((message) => message.role === "assistant");
     if (assistant) setAnimateKey(`${assistant.created_at}:${assistant.content}`);
     setOptimistic(null);
+  };
+
+  /** 提交蓝图退回：理由必填；成功后页面会刷新视图，会话恢复 active。 */
+  const submitReturn = async () => {
+    const reason = returnReason.trim();
+    if (!reason || returnPending || !onReturnBlueprint) return;
+    setReturnPending(true);
+    setReturnError(null);
+    const ok = await onReturnBlueprint(reason);
+    setReturnPending(false);
+    if (ok) {
+      setReturnOpen(false);
+      setReturnReason("");
+      setReturnNotice(
+        "已退回规划：那版蓝图不再等裁定（旧稿只读保留），对话历史都在——接着聊，聊成后可以再出一版。",
+      );
+    } else {
+      setReturnError("退回没成功；原因见页面的错误提示，改完可以重试。");
+    }
+  };
+
+  /** 重新规划：给终态会话开一段新的（旧会话只读保留）；成功后页面刷新视图。 */
+  const submitReopen = async () => {
+    if (reopenPending || !onReopenPlanning) return;
+    setReopenPending(true);
+    setReturnNotice(null);
+    const ok = await onReopenPlanning();
+    setReopenPending(false);
+    if (ok) setReturnError(null);
   };
 
   const sendClarify = () => {
@@ -340,22 +414,25 @@ export function ChatBox({
     );
   }
 
-  if (!view && !clarifyData && !isFindChat) {
+  if (!view && !clarifyData && !isFindChat && !busy) {
+    const isFind = variant === "find";
     return (
       <div className="mt-0 bg-surface2/60 rounded-[32px] border border-white/[0.04] flex flex-col h-full shadow-sm overflow-hidden relative">
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.04] bg-white/[0.01]">
-          <div className="text-[13px] font-medium text-primary/90">意向规划对话</div>
+          <div className="text-[13px] font-medium text-primary/90">{isFind ? "找方向对话" : "意向规划对话"}</div>
         </div>
         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-          <div className="text-[14px] text-white/[0.35] font-medium tracking-wide mb-5 max-w-[200px] leading-relaxed">
-            采纳候选后在此继续规划
+          <div className="text-[14px] text-white/[0.35] font-medium tracking-wide mb-5 max-w-[240px] leading-relaxed">
+            {isFind
+              ? "把你的困惑从上面发出去。寻找会带着你的长期档案——档案越全，方向越贴身；要补充就去「档案」页。"
+              : "采纳候选后在此继续规划"}
           </div>
           <button
             type="button"
             disabled
             className="px-6 py-2.5 border border-white/[0.08] text-white/50 rounded-full text-[13px] cursor-not-allowed bg-white/[0.01]"
           >
-            等待采纳候选
+            {isFind ? "等第一条发出去" : "等待采纳候选"}
           </button>
         </div>
       </div>
@@ -385,6 +462,11 @@ export function ChatBox({
               {chatPlanGoal}
             </div>
           )}
+          {session && session.landing_plan_id === null && !chatPlanGoal && (
+            <div className="text-[11px] text-white/50 font-medium px-2 py-0.5 rounded-full bg-white/[0.04] max-w-[240px] truncate">
+              新方向 · 还没有正式计划
+            </div>
+          )}
         </div>
 
         {view?.blueprint != null && view.blueprint.candidate_id === view.candidate_id && (
@@ -398,10 +480,10 @@ export function ChatBox({
         )}
       </div>
 
-      {view !== null && effectivePlanId === null && (
+      {planBlocked && (
         <div className="m-4 p-4 rounded-2xl bg-amber-500/5 border border-amber-500/10 flex flex-col gap-3">
           <div className="text-[13px] text-amber-500/90 font-medium">
-            该候选为「新方向」，请先指定注入的计划：
+            这条旧候选还没进过规划会话，请先指定注入的计划：
           </div>
           <HoverSelect
             value={chosenPlan}
@@ -460,6 +542,19 @@ export function ChatBox({
                 {turn.clarify && (turn.id !== findTurns[findTurns.length - 1]?.id || !clarifyData) && (
                   <div data-slot="message" data-from="assistant" className="w-full">
                     <ClarifyQuestionCard question={turn.clarify} />
+                  </div>
+                )}
+                {/* 出候选的轮次后端不写人话回复（候选本身就是回答）：给一条回执，
+                    不然这轮在对话流里只剩用户那句，看起来像模型没理你。 */}
+                {typeof turn.candidates === "number" && !turn.reply?.trim() && (
+                  <div data-slot="message" data-from="assistant" className="w-full max-w-[92%]">
+                    <div className="flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
+                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-green" aria-hidden="true" />
+                      <p className="text-[13px] leading-relaxed text-white/70">
+                        这一轮给出了 <span className="font-medium text-white">{turn.candidates}</span>{" "}
+                        条候选，已放进左侧清单——点开逐条看，或直接在这里接着说想调整的方向。
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>
@@ -581,6 +676,122 @@ export function ChatBox({
           </div>
         )}
 
+        {/* 会话状态条（OC-05）：只转述后端给的 planning_status，不自行判定。 */}
+        {view !== null && blueprintPending && (
+          <div className="w-full max-w-[92%] rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3">
+            <p className="text-[13px] font-medium text-amber-200/90">
+              蓝图已生成，这段规划在等你裁定
+            </p>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-white/60">
+              裁定之前普通发言已锁定。去提案页批准或驳回这版蓝图（驳回会退回这里继续聊）；
+              或者不裁定，直接把它退回规划，接着聊再出新版。
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <a
+                href="/proposals"
+                className="rounded-full bg-amber-500 px-3.5 py-1.5 text-[12px] font-medium text-black transition-colors hover:bg-amber-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+              >
+                去提案页裁定
+              </a>
+              {onReturnBlueprint && !returnOpen && (
+                <button
+                  type="button"
+                  onClick={() => { setReturnOpen(true); setReturnError(null); }}
+                  disabled={busy || returnPending}
+                  className="rounded-full border border-white/[0.12] px-3.5 py-1.5 text-[12px] font-medium text-white/80 transition-colors hover:border-white/[0.3] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:opacity-50"
+                >
+                  退回规划继续聊…
+                </button>
+              )}
+            </div>
+            {returnOpen && (
+              <div className="mt-3 border-t border-amber-500/15 pt-3">
+                <label htmlFor={returnInputId} className="block text-[12px] font-medium text-white/70">
+                  退回理由（必填，进台账）
+                </label>
+                <textarea
+                  id={returnInputId}
+                  value={returnReason}
+                  onChange={(event) => setReturnReason(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void submitReturn();
+                    }
+                  }}
+                  rows={2}
+                  placeholder="这版蓝图为什么先不裁定？例如：成果定义还不是我想要的…"
+                  disabled={returnPending || busy}
+                  className="mt-2 w-full resize-none rounded-lg border border-white/[0.1] bg-black/30 px-3 py-2 text-[13px] leading-relaxed text-primary placeholder-white/30 outline-none transition-colors focus:border-white/30 disabled:opacity-50"
+                />
+                {returnError && (
+                  <p role="alert" className="mt-2 text-[12px] leading-relaxed text-red-400">{returnError}</p>
+                )}
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void submitReturn()}
+                    disabled={returnPending || busy || !returnReason.trim()}
+                    className="rounded-full bg-white px-4 py-1.5 text-[12px] font-medium text-black transition-colors hover:bg-white/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:opacity-50"
+                  >
+                    {returnPending ? "退回中…" : "确认退回规划"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setReturnOpen(false); setReturnReason(""); setReturnError(null); }}
+                    disabled={returnPending || busy}
+                    className="rounded-full px-3 py-1.5 text-[12px] text-white/55 transition-colors hover:text-white/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:opacity-50"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {view !== null && sessionTerminal && (
+          <div className="w-full max-w-[92%] rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3">
+            <p className="text-[13px] font-medium text-white/80">
+              {session?.status === "converted"
+                ? "这段规划已转正：蓝图批准，会话只读保留"
+                : session?.status === "abandoned"
+                  ? "这段规划会话已被放弃，只读保留"
+                  : "这段规划会话超过无活动期限，已过期（只读保留）"}
+            </p>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-white/55">
+              {session?.closed_reason ? `结束原因：${session.closed_reason}。` : ""}
+              历史对话都在上面；想基于这条候选再规划一轮，可以开一段新的会话（旧会话不会被改动）。
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {onReopenPlanning && (
+                <button
+                  type="button"
+                  onClick={() => void submitReopen()}
+                  disabled={reopenPending || busy}
+                  className="rounded-full bg-white px-4 py-1.5 text-[12px] font-medium text-black transition-colors hover:bg-white/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:opacity-50"
+                >
+                  {reopenPending ? "开启中…" : "重新规划"}
+                </button>
+              )}
+              {session?.status === "converted" && session.landing_plan_id !== null && (
+                <a
+                  href={`/workbench?plan_id=${encodeURIComponent(String(session.landing_plan_id))}`}
+                  className="rounded-full border border-white/[0.12] px-3.5 py-1.5 text-[12px] font-medium text-white/80 transition-colors hover:border-white/[0.3] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+                >
+                  进入工作台看这棵树
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
+        {returnNotice && !blueprintPending && (
+          <p role="status" className="w-full max-w-[92%] text-[12px] leading-relaxed text-green/90">
+            {returnNotice}
+          </p>
+        )}
+
       </MessageScroller>
 
       {busy && (
@@ -588,9 +799,18 @@ export function ChatBox({
           <div className="flex items-center gap-3">
             <AgentProgress label="think" />
             <ThinkingShimmer className="text-[13px] text-muted/60">
-              {isClarifyMode ? "正在找候选…" : "正在整理思路…"}
+              {!view
+                ? "正在找候选，最慢要几分钟…"
+                : pendingMode === "enhanced"
+                  ? "出稿中，随后两位审查员独立复核…"
+                  : "正在整理思路…"}
             </ThinkingShimmer>
           </div>
+          {!view && (
+            <p className="mt-1.5 text-[11px] leading-snug text-muted/50">
+              这次寻找会参考你的长期档案；想补充就先去「档案」页加几条，下一次寻找就会带上
+            </p>
+          )}
         </div>
       )}
 
@@ -607,7 +827,7 @@ export function ChatBox({
             event.target.style.height = `${event.target.scrollHeight}px`;
           }}
           onKeyDown={handleKeyDown}
-          disabled={busy || (view !== null && effectivePlanId === null)}
+          disabled={busy || composerLocked}
           className="w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none text-[14px] text-primary placeholder-white/30 py-2.5 px-3 max-h-[160px] min-h-[44px] overflow-hidden leading-relaxed disabled:opacity-50"
           rows={1}
           placeholder={
@@ -618,7 +838,9 @@ export function ChatBox({
               : view
                 ? busy
                   ? "cadence 正在思考..."
-                  : "补充要求，例如：每周 5 小时..."
+                  : composerLocked
+                    ? lockedPlaceholder
+                    : "补充要求，例如：每周 5 小时..."
                 : busy
                   ? "cadence 正在思考…"
                   : "接着说，继续这段探索…"
@@ -634,15 +856,60 @@ export function ChatBox({
             </span>
           )}
           {!isClarifyMode && view?.can_generate && (
-            <button
-              type="button"
-              onClick={() => void onGenerate()}
-              disabled={busy || effectivePlanId === null}
-              className="px-4 py-2.5 bg-green/10 text-green hover:bg-green/20 rounded-xl transition-colors text-[13px] font-medium disabled:opacity-50 disabled:bg-transparent"
-              title="意向达成，生成蓝图"
-            >
-              生成蓝图
-            </button>
+            <>
+              {blueprintMode === "enhanced" && (
+                <span className="hidden md:block max-w-[220px] text-right text-[11px] leading-snug text-amber-200/70">
+                  出稿后两位独立审查员逐条复核，有异议自动修订一次
+                </span>
+              )}
+              {/* 模式切换用分段按钮而不是下拉：两种模式摆在一起，选中项带悬浮说明，
+                  增强「多了一道审查席」这件事在点生成之前就看得见。 */}
+              <div
+                role="radiogroup"
+                aria-label="本次蓝图生成模式"
+                className="flex shrink-0 items-center rounded-full border border-white/10 bg-white/[0.03] p-0.5"
+              >
+                {(["standard", "enhanced"] as const).map((mode) => {
+                  const active = blueprintMode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      title={MODE_HINTS[mode]}
+                      disabled={busy}
+                      onClick={() => setBlueprintMode(mode)}
+                      className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                        active
+                          ? mode === "enhanced"
+                            ? "bg-amber-400/15 text-amber-200"
+                            : "bg-white/[0.14] text-white"
+                          : "text-white/45 hover:text-white/80"
+                      }`}
+                    >
+                      {mode === "standard" ? "标准" : "增强"}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingMode(blueprintMode);
+                  setReturnNotice(null);
+                  void onGenerate(blueprintMode).finally(() => {
+                    setPendingMode(null);
+                    setBlueprintMode("standard");
+                  });
+                }}
+                disabled={busy || composerLocked}
+                className="px-4 py-2.5 bg-green/10 text-green hover:bg-green/20 rounded-xl transition-colors text-[13px] font-medium disabled:opacity-50 disabled:bg-transparent"
+                title="意向达成，生成蓝图"
+              >
+                生成蓝图
+              </button>
+            </>
           )}
           <button
             type="button"
@@ -650,7 +917,7 @@ export function ChatBox({
             disabled={
               isClarifyMode
                 ? !clarifyText.trim() || busy
-                : !text.trim() || busy || (view !== null && effectivePlanId === null)
+                : !text.trim() || busy || composerLocked
             }
             className="w-10 h-10 bg-white text-black rounded-xl hover:bg-gray-200 transition-colors flex items-center justify-center disabled:opacity-50 disabled:bg-white/10 disabled:text-white/50"
             aria-label={isClarifyMode ? "发送回答" : view ? "发送规划要求" : "发送续问"}

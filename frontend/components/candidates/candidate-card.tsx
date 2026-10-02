@@ -53,6 +53,9 @@ const GROUP_RADIUS = 14;
 export function CandidateCard({
   row,
   plans,
+  plansLoading,
+  plansError,
+  onRetryPlans,
   notes,
   isDecided,
   verdicting,
@@ -63,7 +66,6 @@ export function CandidateCard({
   adoptingId,
   setAdoptingId,
   onVerdict,
-  onAdoptIntoNewPlan,
   setChattingId,
   clarifyNote = false,
   open,
@@ -89,6 +91,9 @@ export function CandidateCard({
     steps: PathStep[];
   };
   plans: { id: number; goal: string }[];
+  plansLoading: boolean;
+  plansError: string | null;
+  onRetryPlans: () => void;
   notes: Record<number, string>;
   isDecided: boolean;
   verdicting: boolean;
@@ -99,7 +104,6 @@ export function CandidateCard({
   adoptingId: number | null;
   setAdoptingId: (id: number | null) => void;
   onVerdict: (id: number, accept: boolean, reason?: string, planId?: number) => void;
-  onAdoptIntoNewPlan: (id: number, title: string, goal: string) => void;
   setChattingId: (id: number | null) => void;
   /** 这轮「找」还挂着未答的追问：卡片上提示可先采纳（决策 44 ④）。 */
   clarifyNote?: boolean;
@@ -115,9 +119,10 @@ export function CandidateCard({
   const reduce = useReducedMotion() ?? false;
   const isRowPath = row.shape === "path";
   const isDossier = presentation === "dossier";
-  const [adoptMode, setAdoptMode] = useState<"existing" | "new">("existing");
+  // 采纳落点两档（OC-05）：「新方向」不落在任何现有计划上（正式计划等蓝图批准时才建），
+  // 或者明确延续一个现有计划。不再提供「先新建一个空计划」——那会绕过蓝图批准建树的门槛。
+  const [adoptMode, setAdoptMode] = useState<"fresh" | "existing">("fresh");
   const [adoptPlanChoice, setAdoptPlanChoice] = useState("");
-  const [newPlanGoal, setNewPlanGoal] = useState("");
   // 本卡是否正在出裁定（页面级 verdicting 对所有卡都为真，这里标记是哪张卡在处理，
   // 让「采纳 → 处理中」的 Action Swap 只出现在被点的那张卡上）。
   const [pendingAction, setPendingAction] = useState<"adopt" | "reject" | null>(null);
@@ -131,12 +136,12 @@ export function CandidateCard({
     e.stopPropagation();
     setPendingAction("adopt");
     if (row.planId) {
+      // 候选自带归属：落点就是它所属的计划，不用现选
       onVerdict(row.id, true);
       return;
     }
-    setAdoptMode("existing");
+    setAdoptMode("fresh");
     setAdoptPlanChoice("");
-    setNewPlanGoal(row.title);
     setAdoptingId(row.id);
   };
 
@@ -345,62 +350,96 @@ export function CandidateCard({
                   </div>
                 )}
 
-                {/* Inline Approval Bar */}
+                {/* Inline Approval Bar —— 采纳 = 进入规划（OC-05）：先定规划落点，
+                    「新方向」不落任何现有计划，正式计划等蓝图批准时才创建。 */}
                 {adoptingId === row.id && (
                   <div className={isDossier ? "flex min-w-0 flex-wrap items-center gap-4 border-t border-white/[0.09] py-4" : "flex min-w-0 flex-wrap items-center gap-4 rounded-xl border border-white/[0.06] bg-surface2/80 p-3"} onClick={e => e.stopPropagation()}>
-                    <div className="text-[13px] text-white/60 font-medium whitespace-nowrap pl-2">落入哪个计划？</div>
+                    <div className="text-[13px] text-white/60 font-medium whitespace-nowrap pl-2">规划落点</div>
 
-                    <div className={`flex shrink-0 gap-1 bg-white/[0.04] p-1 ${isDossier ? "rounded-sm" : "rounded-full"}`}>
+                    <div
+                      role="radiogroup"
+                      aria-label="规划落点"
+                      className={`flex shrink-0 gap-1 bg-white/[0.04] p-1 ${isDossier ? "rounded-sm" : "rounded-full"}`}
+                    >
                       <button
+                        type="button"
+                        role="radio"
+                        aria-checked={adoptMode === "fresh"}
+                        onClick={() => setAdoptMode("fresh")}
+                        className={`px-4 py-1.5 text-[12px] font-medium transition-colors ${isDossier ? "rounded-sm" : "rounded-full"} ${adoptMode === "fresh" ? "bg-white/[0.08] text-white" : "text-white/50 hover:text-white/80"}`}
+                      >
+                        新方向
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={adoptMode === "existing"}
                         onClick={() => setAdoptMode("existing")}
                         className={`px-4 py-1.5 text-[12px] font-medium transition-colors ${isDossier ? "rounded-sm" : "rounded-full"} ${adoptMode === "existing" ? "bg-white/[0.08] text-white" : "text-white/50 hover:text-white/80"}`}
                       >
-                        现有
-                      </button>
-                      <button
-                        onClick={() => setAdoptMode("new")}
-                        className={`px-4 py-1.5 text-[12px] font-medium transition-colors ${isDossier ? "rounded-sm" : "rounded-full"} ${adoptMode === "new" ? "bg-white/[0.08] text-white" : "text-white/50 hover:text-white/80"}`}
-                      >
-                        新建
+                        现有计划
                       </button>
                     </div>
 
                     {adoptMode === "existing" ? (
-                      <HoverSelect
-                        value={adoptPlanChoice}
-                        onChange={setAdoptPlanChoice}
-                        placeholder="选择现有计划..."
-                        className="min-w-0 w-full flex-1 sm:min-w-[160px]"
-                        searchable
-                        options={[
-                          { value: "", label: "选择现有计划..." },
-                          ...plans.map(p => ({ value: String(p.id), label: p.goal })),
-                        ]}
-                      />
+                      plansLoading ? (
+                        <span className="min-w-[180px] text-[12px] text-white/55" role="status">
+                          正在读取现有计划…
+                        </span>
+                      ) : plansError ? (
+                        <span className="flex min-w-0 items-center gap-2 text-[12px] text-red-300" role="alert">
+                          <span>计划读取失败：{plansError}</span>
+                          <button
+                            type="button"
+                            onClick={onRetryPlans}
+                            className="shrink-0 text-white/80 underline underline-offset-4 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70"
+                          >
+                            重试
+                          </button>
+                        </span>
+                      ) : plans.length === 0 ? (
+                        <span className="min-w-0 text-[12px] text-white/55" role="status">
+                          暂无进行中的现有计划，请改选「新方向」
+                        </span>
+                      ) : (
+                        <HoverSelect
+                          value={adoptPlanChoice}
+                          onChange={setAdoptPlanChoice}
+                          placeholder="选择现有计划..."
+                          className="min-w-0 w-full flex-1 sm:min-w-[160px]"
+                          searchable
+                          options={[
+                            { value: "", label: "选择现有计划..." },
+                            ...plans.map(p => ({ value: String(p.id), label: p.goal })),
+                          ]}
+                        />
+                      )
                     ) : (
-                      <input
-                        value={newPlanGoal}
-                        onChange={e => setNewPlanGoal(e.target.value)}
-                        placeholder="新计划目标 (选填)..."
-                        aria-label="新计划目标（选填）"
-                        className={`min-w-[160px] flex-1 border border-white/[0.08] bg-black/40 px-4 py-2 text-[13px] text-primary/90 outline-none focus:border-white/[0.15] ${isDossier ? "rounded-sm" : "rounded-full"}`}
-                      />
+                      <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-white/50">
+                        不落进任何现有计划——先把成果和验收标准聊清楚，蓝图批准时才创建正式计划与阶段。
+                      </p>
                     )}
 
                     <button
+                      type="button"
                       onClick={() => {
                         setPendingAction("adopt");
                         if (adoptMode === "existing") onVerdict(row.id, true, undefined, Number(adoptPlanChoice));
-                        else onAdoptIntoNewPlan(row.id, row.title, newPlanGoal);
+                        else onVerdict(row.id, true);
                       }}
-                      disabled={verdicting || (adoptMode === "existing" && !adoptPlanChoice)}
+                      disabled={
+                        verdicting ||
+                        (adoptMode === "existing" &&
+                          (plansLoading || plansError !== null || plans.length === 0 || !adoptPlanChoice))
+                      }
                       className={`shrink-0 bg-white px-5 py-2 text-[13px] font-medium text-black transition-colors hover:bg-gray-200 disabled:opacity-50 ${isDossier ? "rounded-sm" : "rounded-full"}`}
                     >
                       <ActionSwapRollText value={verdicting && pendingAction === "adopt" ? "busy" : "idle"}>
-                        {verdicting && pendingAction === "adopt" ? "处理中…" : "确认"}
+                        {verdicting && pendingAction === "adopt" ? "处理中…" : adoptMode === "fresh" ? "采纳为新方向" : "采纳进所选计划"}
                       </ActionSwapRollText>
                     </button>
                     <button
+                      type="button"
                       onClick={() => setAdoptingId(null)}
                       aria-label="取消采纳"
                       className="p-2 text-white/50 hover:text-white/80 transition-colors ml-auto mr-1"

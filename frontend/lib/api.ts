@@ -22,6 +22,82 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8
 /** 节点状态：与后端 NODE_STATUSES 一致。 */
 export type NodeStatus = "not_started" | "in_progress" | "done" | "stuck" | "skipped";
 
+export type CompletionMode = "legacy" | "outcome";
+export type ContractStatus = "active" | "missing" | "needs_review" | "affected";
+export type AcceptanceCriterionState = "met" | "unmet" | "unknown";
+export type ReviewDecision = "accepted" | "needs_work" | "not_met";
+export type AcceptanceStatus = "pending" | "accepted" | "needs_work" | "not_met" | "invalidated" | "skipped";
+export type EvidenceKind = "repository" | "link" | "document" | "demo" | "screenshot" | "text" | "other";
+export type CloseKind = "completed" | "stopped";
+
+export type AcceptanceCriterion = {
+  id: string;
+  text: string;
+  required: boolean;
+};
+
+export type EvidenceRequirement = {
+  id: string;
+  kind: EvidenceKind;
+  required: boolean;
+  description: string;
+};
+
+/** 创建时不造业务编号；编辑已有条件时保留后端分配的编号。 */
+export type AcceptanceCriterionInput = Omit<AcceptanceCriterion, "id"> & { id?: string | null };
+export type EvidenceRequirementInput = Omit<EvidenceRequirement, "id"> & { id?: string | null };
+
+export type OutcomeContract = {
+  id: number;
+  plan_id: number;
+  version: number;
+  source_kind: string;
+  title: string;
+  outcome: string;
+  value: string;
+  success_statement: string;
+  acceptance_criteria: AcceptanceCriterion[];
+  evidence_requirements: EvidenceRequirement[];
+  constraints: string[] | null;
+  stop_conditions: string[] | null;
+  source_candidate_id: number | null;
+  status: "active" | "superseded";
+  created_at: string;
+  activated_at: string | null;
+  superseded_at: string | null;
+};
+
+export type StageReview = {
+  id: number;
+  decision: ReviewDecision;
+  contract_id: number;
+  criteria_state: Record<string, AcceptanceCriterionState>;
+  submission_ids: number[];
+  note: string;
+  is_current: boolean;
+  invalidated_at: string | null;
+  created_at: string;
+};
+
+export type StageEvidence = {
+  id: number;
+  kind: EvidenceKind | "legacy";
+  reference: string | null;
+  note: string;
+  submitted_by: string;
+  created_at: string;
+};
+
+export type StageAcceptance = {
+  status: AcceptanceStatus;
+  contract_id: number | null;
+  criteria: AcceptanceCriterion[];
+  evidence_requirements: EvidenceRequirement[];
+  latest_review: StageReview | null;
+  reviews: StageReview[];
+  evidence: StageEvidence[];
+};
+
 /** 阶段进度：后端 stage_completion() 的返回。只数任务（周打卡不进分母）。 */
 export type StageProgress = {
   stage_id: number;
@@ -49,7 +125,7 @@ export type Checkpoint = {
 /** 任务与检查点同形状（都是阶段下的子节点）。 */
 export type TaskNode = Checkpoint;
 
-/** 交付物提交（阶段上的独立动作，可重新提交）。 */
+/** 兼容旧流程的交付物提交；成果流程使用 acceptance.evidence。 */
 export type DeliverableSubmission = {
   url: string;
   note: string;
@@ -61,14 +137,18 @@ export type Stage = {
   title: string;
   /** 计划时写下的交付物描述（不是提交物本身）。 */
   deliverable: string | null;
+  purpose: string | null;
+  why_now: string | null;
+  contract_id: number | null;
   due_date: string | null;
   status: NodeStatus;
   sort_order: number;
   lag_days: number | null;
   progress: StageProgress;
-  /** 2026-09-17 起的新判定：任务全收尾 + 交付物已提交。 */
+  /** 这个布尔值完全来自后端，前端不自行计算。 */
   finished: boolean;
-  /** 最新一次交付物提交；没交过就是 null。 */
+  acceptance: StageAcceptance;
+  /** 旧流程兼容字段；不能被当作成果验收结果。 */
   deliverable_submission: DeliverableSubmission | null;
   tasks: TaskNode[];
   checkpoints: Checkpoint[];
@@ -76,7 +156,23 @@ export type Stage = {
 
 export type PlanTree = {
   /** 没有计划时后端返回 null（不是错误）。 */
-  plan: { id: number; goal: string; status: string; valid_from: string } | null;
+  plan: {
+    id: number;
+    goal: string;
+    status: string;
+    valid_from: string;
+    flow_version: number;
+    completion_mode: CompletionMode;
+    contract_review_status: string;
+    closure_kind: CloseKind | null;
+    closure_reason: string | null;
+  } | null;
+  completion_mode?: CompletionMode;
+  upgrade_required?: boolean;
+  contract?: OutcomeContract | null;
+  contract_history?: OutcomeContract[];
+  contract_status?: ContractStatus;
+  can_complete?: boolean | null;
   current_stage: {
     id: number;
     title: string;
@@ -252,15 +348,19 @@ export async function listPlans(includeInactive = false): Promise<PlanSummary[]>
   return data.plans;
 }
 
-/** 收尾一个计划（做完了）。可重复调用。 */
+/** 收尾一个计划：成果完成与提前停止必须由调用方明确选择。 */
 export async function closePlan(
   planId: number,
-  reason?: string,
-): Promise<{ plan_id: number; status: string; changed: boolean }> {
+  input: { closeKind?: CloseKind; reason?: string },
+): Promise<{ plan_id: number; status: string; changed: boolean; closure_kind?: CloseKind | null }> {
+  const body: { close_kind?: CloseKind; reason: string | null } = {
+    reason: input.reason ?? null,
+  };
+  if (input.closeKind !== undefined) body.close_kind = input.closeKind;
   return request(`/api/plans/${planId}/close`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason: reason ?? null }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -308,15 +408,42 @@ export type NodeLevel = "stage" | "checkpoint" | "task";
 /** 建计划的回执。 */
 export type CreatedPlan = { id: number; goal: string };
 
+export type CreatedOutcomePlan = CreatedPlan & {
+  contract: OutcomeContract;
+  completion_mode: "outcome";
+  flow_version: 2;
+};
+
 /** 建节点的回执。 */
 export type CreatedNode = { id: number; level: NodeLevel; title: string };
 
-/** 建一个计划。`goal` 是唯一必填项。 */
+/** 建一个旧流程计划；成果闭环新入口请使用 createPlanWithContract。 */
 export async function createPlan(goal: string): Promise<CreatedPlan> {
   return request<CreatedPlan>("/api/plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ goal }),
+  });
+}
+
+/** 以完整成果契约创建 outcome 计划；契约校验与事务由后端负责。 */
+export async function createPlanWithContract(input: {
+  goal?: string;
+  contract: {
+    title: string;
+    outcome: string;
+    value: string;
+    success_statement: string;
+    acceptance_criteria: Array<Pick<AcceptanceCriterion, "text" | "required">>;
+    evidence_requirements: Array<Pick<EvidenceRequirement, "kind" | "required" | "description">>;
+    constraints?: string[];
+    stop_conditions?: string[];
+  };
+}): Promise<CreatedOutcomePlan> {
+  return request<CreatedOutcomePlan>("/api/plans/with-contract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ goal: input.goal ?? null, contract: input.contract }),
   });
 }
 
@@ -336,6 +463,11 @@ export async function createNode(input: {
   parentId?: number | null;
   deliverable?: string | null;
   dueDate?: string | null;
+  purpose?: string | null;
+  whyNow?: string | null;
+  acceptanceCriteria?: AcceptanceCriterionInput[] | null;
+  evidenceRequirements?: EvidenceRequirementInput[] | null;
+  contractCriterionIds?: string[] | null;
 }): Promise<CreatedNode> {
   return request<CreatedNode>("/api/plan/nodes", {
     method: "POST",
@@ -347,6 +479,11 @@ export async function createNode(input: {
       parent_id: input.parentId ?? null,
       deliverable: input.deliverable ?? null,
       due_date: input.dueDate ?? null,
+      purpose: input.purpose ?? null,
+      why_now: input.whyNow ?? null,
+      acceptance_criteria: input.acceptanceCriteria ?? null,
+      evidence_requirements: input.evidenceRequirements ?? null,
+      contract_criterion_ids: input.contractCriterionIds ?? null,
       sort_order: 0,
     }),
   });
@@ -823,15 +960,54 @@ export async function listCandidates(
   return request<CandidateList>(`/api/candidates${query}`);
 }
 
-/** 采纳或否决的回执。 */
+/** 规划会话（planning_session）的状态：active / blueprint_pending 是活的，其余三个是终态。 */
+export type PlanningSessionStatus =
+  | "active"
+  | "blueprint_pending"
+  | "converted"
+  | "abandoned"
+  | "expired";
+
+/** 后端算好的规划进度（GET /api/plan-chat 的 planning_status）；前端只展示，不自行推算。 */
+export type PlanningStatus =
+  | "needs_blueprint"
+  | "blueprint_pending"
+  | "blueprint_approved"
+  | "abandoned"
+  | "expired";
+
+/** 规划会话对象（方案 §6.2）：采纳之后、蓝图批准之前的临时规划容器。 */
+export type PlanningSession = {
+  id: number;
+  status: PlanningSessionStatus;
+  candidate_id: number;
+  /** 规划落点；null = 「新方向」——正式计划要等蓝图批准时才创建。 */
+  landing_plan_id: number | null;
+  created_at: string | null;
+  last_activity_at: string | null;
+  expires_at: string | null;
+  closed_at: string | null;
+  closed_reason: string | null;
+};
+
+/** 采纳或否决的回执（OC-05 起：采纳 = 进入规划会话，不再建阶段）。 */
 export type VerdictResult = {
   id: number;
   status: string;
   reject_reason: string | null;
-  /** 采纳时后端自动落的阶段：建进了哪个计划（最新 active 的那个）。否决时为 null。 */
+  /** **规划落点**（语义已从「已建阶段的归属」改）；「新方向」的采纳为 null。 */
   plan_id: number | null;
-  /** 自动建出的阶段节点 id。否决时为 null。 */
-  node_id: number | null;
+  /** 与 plan_id 同值的新字段：规划落点计划。 */
+  landing_plan_id: number | null;
+  /** 采纳不再建阶段，恒为 null——旧形状保留，别再显示「已建阶段」。 */
+  node_id: null;
+  /** 采纳创建的规划会话；否决时为 null。 */
+  planning_session_id: number | null;
+  /** 采纳后的规划进度（needs_blueprint）；否决时为 null。 */
+  planning_status: PlanningStatus | null;
+  created_planning_session: boolean;
+  /** 后端给的下一步说明（采纳时有值）；界面原样展示，不改写。 */
+  message: string | null;
   /** 这条候选的形状（T34）。 */
   shape: CandidateShape;
   /** 采纳一条**路径**候选时带回来的步骤草案；否决时是空数组。 */
@@ -843,8 +1019,9 @@ export type VerdictResult = {
  *
  * 否决**必须写理由**（缺理由后端回 400）：理由进台账，并成为下次「找」的禁区——
  * 这是「你否决过的候选不再出现」的入口。
- * 采纳（2026-09-17 起）会在最新 active 计划里自动建一个同名阶段；落不了阶段
- * （没有 active 计划、有同名未收尾阶段）回 409，候选保持 proposed 可重试。
+ * 采纳（OC-05 起）= **进入规划**：标 accepted、记规划落点（「新方向」可以没有落点）、
+ * 创建规划会话；正式阶段要等蓝图批准后才建立。落点与候选归属冲突回 409，
+ * 候选保持 proposed 可重试。
  * 采纳一条路径候选（T34）时回执带 `steps` —— 那是这条路的分步草案，进规划对话当底稿。
  */
 export async function verdictCandidate(
@@ -856,8 +1033,31 @@ export async function verdictCandidate(
   return request<VerdictResult>(`/api/candidates/${candidateId}/verdict`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // plan_id 只在候选没有归属（「新方向」）时需要——决定采纳落到哪个计划
+    // plan_id 只在候选没有归属（「新方向」）且想落到已有计划时才传——规划落点
     body: JSON.stringify({ accept, reason: reason ?? null, plan_id: planId ?? null }),
+  });
+}
+
+/** 「重新开始规划」的回执（方案 §5.2）：旧会话只读保留，这里给一段新的。 */
+export type PlanningReopenResult = {
+  candidate_id: number;
+  planning_session_id: number;
+  /** false = 这条候选还有活着的会话，幂等返回它，没有新建。 */
+  created: boolean;
+  landing_plan_id: number | null;
+  planning_status: PlanningStatus;
+};
+
+/**
+ * 给一条**已采纳**的候选重新开一段规划会话：会话过期 / 被放弃 / 已转正之后，
+ * 旧会话只读保留，但候选不该从此进不了规划。已有活会话时幂等返回它（created=false）；
+ * 落点计划没了或已收尾回 409。
+ */
+export async function reopenCandidatePlanning(
+  candidateId: number,
+): Promise<PlanningReopenResult> {
+  return request<PlanningReopenResult>(`/api/candidates/${candidateId}/planning`, {
+    method: "POST",
   });
 }
 
@@ -929,6 +1129,62 @@ export async function submitDeliverable(
   });
 }
 
+/** 成果流程的真实证据提交：只增加历史，不代表阶段已完成。 */
+export type EvidenceResult = {
+  id: number;
+  node_id: number;
+  level: "stage";
+  kind: EvidenceKind;
+  reference: string | null;
+  note: string;
+  created_at: string;
+};
+
+export async function submitEvidence(input: {
+  nodeId: number;
+  kind: EvidenceKind;
+  reference?: string;
+  note: string;
+}): Promise<EvidenceResult> {
+  return request<EvidenceResult>(`/api/plan/nodes/${input.nodeId}/evidence`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: input.kind,
+      reference: input.reference?.trim() || null,
+      note: input.note,
+    }),
+  });
+}
+
+export type StageReviewResult = StageReview & {
+  stage_status: NodeStatus;
+  invalidated_review_id?: number | null;
+  duplicate?: boolean;
+};
+
+/** 提交逐条件验收；conditions 与决定原样交给后端，不在前端计算达标。 */
+export async function reviewStage(input: {
+  nodeId: number;
+  contractId: number;
+  submissionIds: number[];
+  criteriaState: Record<string, AcceptanceCriterionState>;
+  decision: ReviewDecision;
+  note: string;
+}): Promise<StageReviewResult> {
+  return request<StageReviewResult>(`/api/plan/nodes/${input.nodeId}/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contract_id: input.contractId,
+      submission_ids: input.submissionIds,
+      criteria_state: input.criteriaState,
+      decision: input.decision,
+      note: input.note,
+    }),
+  });
+}
+
 /**
  * 改一个已经建好的节点的字段（T30，SPEC 决策 38）。
  *
@@ -940,6 +1196,8 @@ export type NodeFieldsInput = {
   title?: string;
   deliverable?: string;
   due_date?: string;
+  acceptance_criteria?: AcceptanceCriterionInput[];
+  evidence_requirements?: EvidenceRequirementInput[];
   reason: string;
 };
 
@@ -962,6 +1220,8 @@ export async function updateNodeFields(
       title: input.title ?? null,
       deliverable: input.deliverable ?? null,
       due_date: input.due_date ?? null,
+      acceptance_criteria: input.acceptance_criteria ?? null,
+      evidence_requirements: input.evidence_requirements ?? null,
       reason: input.reason,
     }),
   });
@@ -1058,7 +1318,9 @@ export type ProposalDecision = {
   kind: string;
   status: string;
   /**
-   * `blueprint_built` = 按勾选把树建进了计划（`built` 里列出建了哪些）；
+   * `blueprint_built` = **确认成果契约 + 建树 + 关闭规划会话**的原子批准（OC-07，
+   * 回执里另有 `plan_id` / `contract` / `contract_id` / `landing_mode` /
+   * `planning_session_id`，`built` 列出建了哪些节点）；
    * `profile_written` = 真把一条写进了长期档案（`written` 里是哪一条）；
    * `node_updated` = **原地改**了一个已有节点的字段（`updated` 里是改前改后，**id 不变**）；
    * `node_added` = 往计划里加了节点（`added.nodes` 里按建的顺序列出每一条——加阶段时
@@ -1099,6 +1361,15 @@ export type ProposalDecision = {
     before: Record<string, string | null>;
     after: Record<string, string | null>;
   } | null;
+  /** v2 蓝图原子批准（OC-07）：树建进的正式计划（new_plan 时是刚创建的那个）。 */
+  plan_id?: number | null;
+  /** v2 蓝图原子批准：激活的**最终契约快照**（含 overrides 合并后的正文）。 */
+  contract?: BlueprintContractDraft | null;
+  contract_id?: number | null;
+  /** 后端按规划会话落点自动分流的结果；前端没传 landing_mode 时它就是「自动」的那条。 */
+  landing_mode?: "new_plan" | "continue_plan" | "revise_plan" | null;
+  /** 随批准关闭（converted）的规划会话。 */
+  planning_session_id?: number | null;
 };
 
 /**
@@ -1107,23 +1378,39 @@ export type ProposalDecision = {
  * 驳回**必须写理由**（缺理由后端回 400）；已裁定过回 409、不存在回 404。
  * （T29 起没有 `option`：需要选方向的那一类已随 `plan_replan` 整类删除。）
  * 批准 `plan_blueprint` 时用 `selected` 给勾中的阶段 / 任务下标（见 `Selection`）。
+ *
+ * 批准 **v2 蓝图**（OC-07）额外要：`confirmContract=true`（缺了后端回 400、提案保持
+ * pending）；`contractOverrides` 可选（直接覆盖契约字段，过同一套确定性校验）；
+ * `landingMode` 可选——**不传就按规划会话落点自动分流**（新方向 → new_plan 新建正式
+ * 计划；已有落点 → continue_plan 延续该计划），前端默认不传。
  */
 export async function decideProposal(
   proposalId: number,
-  input: { approved: boolean; reason?: string; selected?: string[] },
+  input: {
+    approved: boolean;
+    reason?: string;
+    selected?: string[];
+    confirmContract?: boolean;
+    contractOverrides?: Record<string, unknown> | null;
+    landingMode?: "new_plan" | "continue_plan" | "revise_plan" | null;
+  },
 ): Promise<ProposalDecision> {
+  const body: Record<string, unknown> = {
+    approved: input.approved,
+    reason: input.reason ?? null,
+    selected: input.selected ?? null,
+  };
+  if (input.confirmContract !== undefined) body.confirm_contract = input.confirmContract;
+  if (input.contractOverrides !== undefined) body.contract_overrides = input.contractOverrides;
+  if (input.landingMode !== undefined) body.landing_mode = input.landingMode;
   return request<ProposalDecision>(`/api/proposals/${proposalId}/decide`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      approved: input.approved,
-      reason: input.reason ?? null,
-      selected: input.selected ?? null,
-    }),
+    body: JSON.stringify(body),
   });
 }
 
-// ---------- 对话式规划与蓝图（T26：SPEC 决策 36） ----------
+// ---------- 对话式规划与蓝图（T26：SPEC 决策 36；OC-05 起按规划会话走） ----------
 
 /** 蓝图里的一个任务。`due_date` 为空 = 没定日期（带了才进落后量）。 */
 export type BlueprintTask = {
@@ -1131,25 +1418,146 @@ export type BlueprintTask = {
   due_date: string | null;
 };
 
-/** 蓝图里的一个阶段：名字 + 可验收的交付物 + 为什么先做它 + 任务。 */
+/** v2 阶段验收条件：id 由服务端补齐（`stage-N-cK`），批准后原样写进 plan_node。 */
+export type StageAcceptanceCriterion = {
+  id: string;
+  text: string;
+  required: boolean;
+};
+
+/** v2 阶段证据要求：kind 与成果契约同一套枚举；id 由服务端补齐（`stage-N-eK`）。 */
+export type StageEvidenceRequirement = {
+  id: string;
+  kind: EvidenceKind;
+  required: boolean;
+  description: string;
+};
+
+/**
+ * 蓝图里的一个阶段。
+ *
+ * v2（OC-06）：`purpose`（目的）、`why_now`（为什么现在）、`acceptance_criteria`、
+ * `evidence_requirements`、`contract_criterion_ids`（承接的契约条件 id）。
+ * 旧 v1 只有 `why`（只读兼容为 why_now）+ `deliverable` + `tasks`。
+ */
 export type BlueprintStage = {
   title: string;
   deliverable: string;
-  why: string;
+  purpose?: string;
+  why_now?: string;
+  /** 旧 v1 字段：阶段衔接与排序理由。 */
+  why?: string;
+  acceptance_criteria?: StageAcceptanceCriterion[];
+  evidence_requirements?: StageEvidenceRequirement[];
+  contract_criterion_ids?: string[];
   tasks: BlueprintTask[];
+};
+
+/**
+ * 蓝图 payload 里的**成果契约草稿**（contract.validate 规范化后的形状）。
+ * 与已激活的 `OutcomeContract` 不同：它还没有 id / version / plan_id——版本号在
+ * 批准激活那一刻由后端分配。
+ */
+export type BlueprintContractDraft = {
+  title: string;
+  outcome: string;
+  value: string;
+  success_statement: string;
+  acceptance_criteria: AcceptanceCriterion[];
+  evidence_requirements: EvidenceRequirement[];
+  constraints: string[] | null;
+  stop_conditions: string[] | null;
+  source_candidate_id?: number | null;
+};
+
+export type BlueprintMode = "standard" | "enhanced";
+
+export type BlueprintReviewFinding = {
+  category:
+    | "level_mismatch"
+    | "missing_prerequisite"
+    | "sequence"
+    | "task_alignment"
+    | "workload"
+    | "missing_evidence";
+  severity: "revise" | "confirm";
+  target: string;
+  problem: string;
+  basis: string;
+  recommendation: string;
+};
+
+/** 审查员对初稿某一点的态度：赞同说认可哪一点、为什么；反对说反对哪一点、理由和怎么调整。 */
+export type BlueprintReviewPoint = {
+  stance: "agree" | "disagree";
+  target: string;
+  point: string;
+  reason: string;
+  /** 仅反对时有值：建议怎么调整（后端校验反对必填）。 */
+  adjustment: string;
+  severity: "revise" | "confirm";
+};
+
+/** 一位独立审查员的结论。增强模式固定两位（水平核对员／结构审查员），撞现有计划时再加系统检查。 */
+export type BlueprintReviewer = {
+  key: string;
+  name: string;
+  lens: string;
+  stance: "agree" | "disagree";
+  summary: string;
+  points: BlueprintReviewPoint[];
+};
+
+export type BlueprintReview = {
+  mode: "enhanced";
+  /** 多审查员（当前）：每人独立表态，提案页默认展开成审查席。 */
+  reviewers?: BlueprintReviewer[];
+  /** 兼容字段：更早的单审查员版本生成的增强稿没有 reviewers，界面按单卡兜底渲染。 */
+  summary?: string;
+  findings?: BlueprintReviewFinding[];
+  initial: { goal: string; stages: BlueprintStage[] } | null;
+  revision_resolution: {
+    reviewer_key?: string;
+    point_index?: number;
+    /** 旧稿的定位方式。 */
+    finding_index?: number;
+    resolution: string;
+  }[];
 };
 
 /**
  * 一棵蓝图的 payload（`proposal.kind === "plan_blueprint"` 时）。
  *
  * **树 = 版本**：同一计划同时只有一份待裁定蓝图，新版落库时旧的变成 `superseded`。
+ * **v2（OC-06）**：`version=2` + 成果契约 `contract` + 规划会话归属 `planning_session_id`；
+ * 「新方向」会话的 `plan_id` 为 null（批准时才创建正式计划）。旧 v1 没有 version 字段。
  */
 export type BlueprintPayload = {
-  plan_id: number;
+  version?: number;
+  plan_id: number | null;
   candidate_id: number;
+  planning_session_id?: number | null;
+  mode?: BlueprintMode;
   goal: string;
+  contract?: BlueprintContractDraft | null;
   stages: BlueprintStage[];
+  review?: BlueprintReview | null;
 };
+
+/**
+ * 提案 payload 是不是蓝图 v2（与后端 `blueprint.is_v2_payload` 同一判据）：
+ * version=2 且带契约对象。旧 v1 一律 false——只读展示，不允许直接批准。
+ */
+export function isBlueprintV2(payload: Record<string, unknown> | BlueprintPayload): boolean {
+  const candidate = payload as BlueprintPayload;
+  return (
+    candidate !== null &&
+    typeof candidate === "object" &&
+    candidate.version === 2 &&
+    typeof candidate.contract === "object" &&
+    candidate.contract !== null
+  );
+}
 
 /** 对话里的一条消息。助手那侧 `content` 是它输出的 JSON 原文。 */
 export type ChatMessage = {
@@ -1160,14 +1568,20 @@ export type ChatMessage = {
 
 export type PlanChatView = {
   candidate_id: number;
-  /** 这段对话属于哪个计划；null = 还没定下来（「新方向」的候选，得先指明落点）。 */
+  /** 这段对话的落点计划；null = 「新方向」（正式计划等蓝图批准时才建）。 */
   plan_id: number | null;
+  /** 按会话看时的规划会话（OC-05）；legacy 路径为 null。 */
+  planning_session: PlanningSession | null;
+  /** 后端算好的规划进度；legacy 路径为 null。前端只展示。 */
+  planning_status: PlanningStatus | null;
+  /** 待批稿在哪一份提案：界面据此引导去提案页裁定或退回。 */
+  pending_blueprint_proposal_id?: number | null;
   messages: ChatMessage[];
   turns_used: number;
   /** **聊成的轮数**（决策 44 / III-01）：模型回话成功才算数——只留下话、没聊成的不算。 */
   valid_turns_used: number;
   max_turns: number;
-  /** 聊成至少一轮才能出方案。 */
+  /** 聊成至少一轮才能出方案；会话路径下还要求会话是 active（后端判）。 */
   can_generate: boolean;
   /**
    * 这条候选自带的**步骤草案**（T34，只有路径候选有）：对话区顶部把它列出来，
@@ -1181,64 +1595,136 @@ export type PlanChatView = {
   blueprint: { id: number; created_at: string; candidate_id: number } | null;
 };
 
-/** 看这段对话（历史 + 聊了几轮 + 能不能出方案）。 */
-export async function getPlanChat(
-  candidateId: number,
-  planId?: number | null,
-): Promise<PlanChatView> {
-  const plan = planId === undefined || planId === null ? "" : `&plan_id=${planId}`;
-  return request<PlanChatView>(`/api/plan-chat?candidate_id=${candidateId}${plan}`);
+/**
+ * 看这段对话（历史 + 聊了几轮 + 能不能出方案 + 会话状态）。
+ *
+ * `planningSessionId`（OC-05 新流程）与 `candidateId`（旧候选兼容）二选一；给会话时
+ * 候选与落点由服务端从会话解析。终态会话（converted / abandoned / expired）也能看——只读。
+ */
+export async function getPlanChat(input: {
+  planningSessionId?: number | null;
+  candidateId?: number | null;
+  planId?: number | null;
+}): Promise<PlanChatView> {
+  const params = new URLSearchParams();
+  if (input.planningSessionId != null) {
+    params.set("planning_session_id", String(input.planningSessionId));
+  }
+  if (input.candidateId != null) params.set("candidate_id", String(input.candidateId));
+  if (input.planId != null) params.set("plan_id", String(input.planId));
+  return request<PlanChatView>(`/api/plan-chat?${params.toString()}`);
 }
 
 /** 聊一轮的回执。`reply.question` 是模型这一轮问你的（最多 3 个）。 */
 export type PlanChatTurn = {
   candidate_id: number;
-  plan_id: number;
+  /** 会话路径下「新方向」为 null（还没有正式计划）。 */
+  plan_id: number | null;
+  planning_session_id: number | null;
   reply: { questions: string[]; ready: boolean; note: string };
   turns_used: number;
   max_turns: number;
+  can_generate: boolean;
   calls: number;
 };
 
-/** 聊一轮：每轮 1 次调用、整段上限 6 轮，输出不合格不重试（SPEC 决策 6 修订）。 */
-export async function sayPlanChat(
-  candidateId: number,
-  message: string,
-  planId?: number | null,
-): Promise<PlanChatTurn> {
+/**
+ * 聊一轮：每轮 1 次调用、整段上限 6 轮，输出不合格不重试（SPEC 决策 6 修订）。
+ *
+ * `planningSessionId` 给了就优先按会话走（服务端从会话解析候选与落点，不信任另传的
+ * plan_id）；只有 `active` 的会话能发普通消息——`blueprint_pending` 要先裁定或退回，
+ * 终态会话只读（后端 409，错误文案会说明）。
+ */
+export async function sayPlanChat(input: {
+  planningSessionId?: number | null;
+  candidateId?: number | null;
+  message: string;
+  planId?: number | null;
+}): Promise<PlanChatTurn> {
   return request<PlanChatTurn>("/api/plan-chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      candidate_id: candidateId,
-      message,
-      plan_id: planId ?? null,
+      planning_session_id: input.planningSessionId ?? null,
+      candidate_id: input.candidateId ?? null,
+      message: input.message,
+      plan_id: input.planId ?? null,
     }),
   });
 }
 
-/** 出方案的回执。`superseded_ids` = 被这一版顶掉的旧蓝图。 */
+/** 出方案的回执（OC-06 起为蓝图 v2）。`superseded_ids` = 被这一版顶掉的旧蓝图。 */
 export type BlueprintCreated = {
   proposal_id: number;
-  plan_id: number;
+  /** 「新方向」会话为 null——批准时才创建正式计划。 */
+  plan_id: number | null;
   candidate_id: number;
+  planning_session_id: number | null;
   version: number;
+  /** payload 版本：v2 恒为 2。 */
+  payload_version: number;
   goal: string;
+  contract: BlueprintContractDraft;
   stages: BlueprintStage[];
+  mode: BlueprintMode;
+  review: BlueprintReview | null;
   superseded_ids: number[];
+  attempts: number;
   calls: number;
 };
 
-/** 沿对话出一版蓝图，落成一条待裁定提案。必须先聊过一轮。 */
-export async function generateBlueprint(
-  candidateId: number,
-  planId?: number | null,
-): Promise<BlueprintCreated> {
+/**
+ * 沿对话出一版蓝图，落成一条待裁定提案。必须先聊成一轮。
+ * `planningSessionId` 给了就优先按会话走；生成成功会话置为 `blueprint_pending`，
+ * 失败保持 `active`（后端判，前端只展示回执）。
+ */
+export async function generateBlueprint(input: {
+  planningSessionId?: number | null;
+  candidateId?: number | null;
+  planId?: number | null;
+  mode?: BlueprintMode;
+}): Promise<BlueprintCreated> {
   return request<BlueprintCreated>("/api/plan-chat/blueprint", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ candidate_id: candidateId, plan_id: planId ?? null }),
+    body: JSON.stringify({
+      planning_session_id: input.planningSessionId ?? null,
+      candidate_id: input.candidateId ?? null,
+      plan_id: input.planId ?? null,
+      mode: input.mode ?? "standard",
+    }),
   });
+}
+
+/** 蓝图退回规划的回执：提案终态化为 superseded，会话回到 active，理由进台账。 */
+export type BlueprintReturnResult = {
+  proposal_id: number;
+  proposal_status: string;
+  planning_session_id: number;
+  session_status: PlanningSessionStatus;
+  reason: string;
+};
+
+/**
+ * 把一份待裁定蓝图**退回规划对话**（OC-06）：提案标成 `superseded`（业务终态，
+ * 不是否决）、会话恢复 `active`、对话历史保留，可以接着聊再出一版。
+ * 理由必填（进台账）；提案不属于这条会话或已裁定过时后端回 409。
+ */
+export async function returnBlueprintToPlanning(
+  proposalId: number,
+  input: { planningSessionId: number; reason: string },
+): Promise<BlueprintReturnResult> {
+  return request<BlueprintReturnResult>(
+    `/api/plan-chat/blueprint/${proposalId}/return`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        planning_session_id: input.planningSessionId,
+        reason: input.reason,
+      }),
+    },
+  );
 }
 
 /**

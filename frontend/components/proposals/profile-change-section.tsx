@@ -6,29 +6,26 @@ export function ProfileChangeSection({ proposal }: { proposal: Proposal }) {
   const payload = proposal.payload as unknown as ProfileChangePayload;
 
   return (
-    <div className="py-2 space-y-3">
-      <div className="flex items-center gap-2">
-        <span className="text-[11px] font-medium text-sky-400 bg-sky-500/10 px-2.5 py-0.5 rounded-full border border-sky-500/20 uppercase tracking-wider">
-          {payload.category}
-        </span>
-        <span className="text-[13px] text-white/60 font-medium">
-          {CATEGORY_LABELS[payload.category] ?? payload.category}
-        </span>
-      </div>
-
-      <div className="text-[15px] font-bold text-white/90 leading-relaxed">
-        {payload.content}
+    <section aria-label="拟写入档案的内容" className="max-w-[76ch]">
+      <div className="border-t border-white/15 pt-5">
+        <p className="text-[13px] text-white/65">
+          归入 <span className="font-medium text-white/85">{CATEGORY_LABELS[payload.category] ?? payload.category}</span>
+          {payload.plan_id && <span className="ml-3">· 来自计划 #{payload.plan_id}</span>}
+        </p>
+        <blockquote className="mt-8 border-l border-white/35 pl-5 text-[clamp(1.25rem,2.2vw,1.75rem)] font-medium leading-[1.5] tracking-[-0.015em] text-white [overflow-wrap:anywhere]">
+          {payload.content}
+        </blockquote>
       </div>
 
       {payload.why && (
-        <details className="group cursor-pointer">
-          <summary className="inline-flex items-center gap-1.5 text-[12px] text-white/50 hover:text-white/60 transition-colors select-none">
-            <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
-            提炼依据
+        <details className="group mt-9 border-t border-white/10 pt-4">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-2 text-[13px] text-white/70 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70">
+            <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90 motion-reduce:transition-none" />
+            为什么建议这样记
           </summary>
-          <div className="mt-1.5 text-[12px] text-white/50">{payload.why}</div>
+          <p className="mt-4 max-w-[70ch] text-[14px] leading-7 text-white/75">{payload.why}</p>
         </details>
       )}
-    </div>
+    </section>
   );
 }

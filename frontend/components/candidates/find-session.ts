@@ -118,6 +118,8 @@ export function groupFindRounds(rounds: FindRound[]): FindThread[] {
 export type ActiveFindChat = {
   candidateId: number;
   planId: number | null;
+  /** 规划会话（OC-05）：采纳回执 / 重开回执给的会话号；旧存档没有就是 null。 */
+  planningSessionId?: number | null;
 };
 
 /**

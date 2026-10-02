@@ -9,7 +9,6 @@ import { AgentProgress } from "@/components/agents/loading-states/agent-progress
 import { ThinkingShimmer } from "@/components/agents/loading-states/thinking-shimmer";
 import {
   ApiError,
-  createPlan,
   findCandidates,
   generateBlueprint,
   getPlanChat,
@@ -19,9 +18,12 @@ import {
   listLearningRequests,
   listPlans,
   PROFILE_CATEGORIES,
+  reopenCandidatePlanning,
+  returnBlueprintToPlanning,
   sayPlanChat,
   verdictCandidate,
   type CandidateList,
+  type BlueprintMode,
   type FindResult,
   type LearningRequestHistory,
   type PlanSummary,
@@ -241,7 +243,11 @@ export default function CandidatesPage() {
   const session = getFindSession();
   const isDesktop = useIsDesktop();
   const [profile, setProfile] = useState<ProfileView | null>(null);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [plans, setPlans] = useState<PlanSummary[]>([]);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [plansError, setPlansError] = useState<string | null>(null);
 
   const [planChoice, setPlanChoice] = useState("");
   const [rawText, setRawTextState] = useState(session.rawText);
@@ -351,8 +357,8 @@ export default function CandidatesPage() {
   const [adoptingId, setAdoptingId] = useState<number | null>(null);
 
   const [landingPlans, setLandingPlans] = useState<Record<number, number>>({});
-  // 「新建计划成功但落库裁定还没成」时给一句安抚提示（不带编号，见 V-01）。
-  const [createdPlanPending, setCreatedPlanPending] = useState(false);
+  // 规划会话号（OC-05）：采纳 / 重开回执给的，或从视图读回的——查看 / 发言 / 出蓝图一律按会话走。
+  const [chatSessions, setChatSessions] = useState<Record<number, number>>({});
   const [decidedNow, setDecidedNow] = useState<Record<number, string>>({});
   const [chattingId, setChattingId] = useState<number | null>(null);
   // 手风琴单开：当前展开明细的候选 id（null = 全部收起，信息密度优先）。
@@ -361,6 +367,10 @@ export default function CandidatesPage() {
 
   const [chatViews, setChatViews] = useState<Record<number, PlanChatView | null>>({});
   const [chatBusy, setChatBusy] = useState<Record<number, boolean>>({});
+  // 首次打开规划对话的取数等待（与发言 / 出方案的 busy 分开记）。
+  const [chatLoading, setChatLoading] = useState<Record<number, boolean>>({});
+  // 规划栏（对话/生成蓝图）自己的错误通道：生成失败不说成「裁定失败」——两码事。
+  const [planningError, setPlanningError] = useState<string | null>(null);
   const [chatChosenPlan, setChatChosenPlan] = useState<Record<number, string>>({});
   const [actionResults, setActionResults] = useState<CandidateActionResult[]>([]);
   const [findResultNotice, setFindResultNotice] = useState<{
@@ -421,8 +431,34 @@ export default function CandidatesPage() {
       setHistory([...restored.history]);
     });
 
-    getProfile().then(setProfile).catch(() => setProfile(null));
-    listPlans().then(setPlans).catch(() => setPlans([]));
+    getProfile()
+      .then((value) => {
+        if (!alive) return;
+        setProfile(value);
+        setProfileError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!alive) return;
+        setProfile(null);
+        setProfileError(messageOf(cause, "读取长期档案失败"));
+      })
+      .finally(() => {
+        if (alive) setProfileLoading(false);
+      });
+    listPlans()
+      .then((value) => {
+        if (!alive) return;
+        setPlans(value);
+        setPlansError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!alive) return;
+        setPlans([]);
+        setPlansError(messageOf(cause, "读取计划失败"));
+      })
+      .finally(() => {
+        if (alive) setPlansLoading(false);
+      });
     if (restoredThread !== null) {
       // 按线程取最近有候选的一轮：活跃轮本身没出候选（追问 / 闲聊）时旧候选照样回来。
       listCandidates(undefined, restoredThread).then(setStored).catch(() => setStored(null));
@@ -434,13 +470,41 @@ export default function CandidatesPage() {
       Promise.resolve().then(() => {
         if (!alive) return;
         setChattingId(restoredChat.candidateId);
+        if (restoredChat.planningSessionId != null) {
+          setChatSessions((previous) => ({
+            ...previous,
+            [restoredChat.candidateId]: restoredChat.planningSessionId as number,
+          }));
+        }
+        setChatLoading((previous) => ({ ...previous, [restoredChat.candidateId]: true }));
       });
-      getPlanChat(restoredChat.candidateId, restoredChat.planId)
-        .then((view) => setChatViews((previous) => ({
-          ...previous,
-          [restoredChat.candidateId]: view,
-        })))
-        .catch(() => undefined);
+      getPlanChat({
+        planningSessionId: restoredChat.planningSessionId ?? null,
+        candidateId: restoredChat.candidateId,
+        planId: restoredChat.planningSessionId == null ? restoredChat.planId : null,
+      })
+        .then((view) => {
+          if (!alive) return;
+          setChatViews((previous) => ({
+            ...previous,
+            [restoredChat.candidateId]: view,
+          }));
+          if (view.planning_session) {
+            setChatSessions((previous) => ({
+              ...previous,
+              [restoredChat.candidateId]: view.planning_session!.id,
+            }));
+          }
+        })
+        .catch((cause: unknown) => {
+          if (!alive) return;
+          setPlanningError(messageOf(cause, "恢复规划对话失败"));
+        })
+        .finally(() => {
+          if (alive) {
+            setChatLoading((previous) => ({ ...previous, [restoredChat.candidateId]: false }));
+          }
+        });
     }
     let pendingTimer: number | null = null;
     const absorb = (requests: LearningRequestHistory[]) => {
@@ -535,24 +599,46 @@ export default function CandidatesPage() {
     };
   }, []);
 
-  async function openChat(id: number | null, explicitPlanId?: number) {
-    if (id === null || chattingId === id) {
+  const [planningRetryCandidateId, setPlanningRetryCandidateId] = useState<number | null>(null);
+
+  async function openChat(
+    id: number | null,
+    opts?: { planId?: number | null; planningSessionId?: number | null; retry?: boolean },
+  ) {
+    if (id === null || (chattingId === id && opts?.retry !== true)) {
       setChattingId(null);
       setActiveFindChat(null);
       return;
     }
     setPeekId(null);
     setShowFindConversation(true);
+    setPlanningError(null);
+    setPlanningRetryCandidateId(null);
     const r = rows?.find(row => row.id === id);
-    const pId = explicitPlanId ?? landingPlans[id] ?? r?.landingPlanId ?? r?.planId ?? null;
-    const nextChat = { candidateId: id, planId: pId };
+    // 会话优先（OC-05）：采纳 / 重开回执给过会话号就直接按会话看；没有就按候选看——
+    // 进过规划的候选后端会自动改走它的会话（视图里带回 planning_session），旧候选走 legacy。
+    const sessionId = opts?.planningSessionId ?? chatSessions[id] ?? null;
+    const pId = opts?.planId ?? landingPlans[id] ?? r?.landingPlanId ?? r?.planId ?? null;
+    const nextChat = { candidateId: id, planId: pId, planningSessionId: sessionId };
     setChattingId(id);
     setActiveFindChat(nextChat);
+    setChatLoading(prev => ({ ...prev, [id]: true }));
     try {
-      const view = await getPlanChat(id, pId);
+      const view = await getPlanChat({
+        planningSessionId: sessionId,
+        candidateId: id,
+        planId: sessionId == null ? pId : null,
+      });
       setChatViews(prev => ({ ...prev, [id]: view }));
+      if (view.planning_session) {
+        setChatSessions(prev => ({ ...prev, [id]: view.planning_session!.id }));
+        setActiveFindChat({ ...nextChat, planningSessionId: view.planning_session.id });
+      }
     } catch (err) {
-      console.error(err);
+      setPlanningError(messageOf(err, "读取规划对话失败"));
+      setPlanningRetryCandidateId(id);
+    } finally {
+      setChatLoading(prev => ({ ...prev, [id]: false }));
     }
   }
 
@@ -707,54 +793,43 @@ export default function CandidatesPage() {
     }
   }
 
-  async function onAdoptIntoNewPlan(candidateId: number, title: string, goalStr: string) {
-    const goal = goalStr.trim() || title;
-    setVerdicting(true);
-    setVerdictError(null);
-    let createdId: number | null = null;
-    try {
-      const created = await createPlan(goal);
-      createdId = created.id;
-      setCreatedPlanPending(true);
-      setPlans(await listPlans());
-    } catch (cause) {
-      setVerdictError(messageOf(cause, "新建计划失败，原因不明"));
-      setVerdicting(false);
-      return;
-    }
-    await onVerdict(candidateId, true, undefined, createdId);
-  }
-
   async function onVerdict(candidateId: number, accepted: boolean, reason?: string, explicitPlanId?: number) {
     setVerdicting(true);
     setVerdictError(null);
     try {
       const done = await verdictCandidate(candidateId, accepted, reason, explicitPlanId);
-      const landedPlanId = done.plan_id == null ? null : Number(done.plan_id);
+      // OC-05 新语义：plan_id = **规划落点**（「新方向」为 null），node_id 恒为 null——
+      // 采纳不再建阶段，回执只说「已进入规划会话」。
+      const landedPlanId = done.landing_plan_id ?? done.plan_id ?? null;
       const landedPlan = landedPlanId !== null
         ? plans.find((item) => item.id === landedPlanId) ??
           workspacePlans.find((item) => item.id === landedPlanId) ??
           null
         : null;
-      if (accepted && done.plan_id !== null && done.node_id !== null) {
+      if (accepted) {
+        if (done.planning_session_id !== null) {
+          setChatSessions((prev) => ({ ...prev, [candidateId]: done.planning_session_id as number }));
+        }
         setActionResults((previous) => [
           {
             kind: "adopted",
             candidateId,
             candidateTitle: getRow(candidateId)?.title ?? "候选",
-            planId: landedPlanId ?? Number(done.plan_id),
-            planGoal: landedPlan?.goal ?? null,
-            stageId: Number(done.node_id),
-            stageTitle: getRow(candidateId)?.title ?? "新阶段",
+            planningSessionId: done.planning_session_id,
+            planningStatus: done.planning_status,
+            message: done.message,
+            landingPlanId: landedPlanId,
+            landingPlanGoal: landedPlan?.goal ?? null,
           },
           ...previous.filter((item) => !(item.kind === "adopted" && item.candidateId === candidateId)),
         ]);
-        void refreshPlans();
       }
       setNotes((prev) => ({
         ...prev,
         [candidateId]: accepted
-          ? `已采纳：已落进${landedPlan ? `计划「${landedPlan.goal}」` : "所选计划"}，建立阶段「${getRow(candidateId)?.title ?? ""}」`
+          ? landedPlanId !== null
+            ? `已采纳：进入规划会话，规划落点是${landedPlan ? `计划「${landedPlan.goal}」` : "所选计划"}；正式阶段等蓝图批准后才建立`
+            : "已采纳：进入规划会话（新方向，还没有正式计划）；蓝图批准时才创建计划与阶段"
           : "已否决：这段探索里不再推荐它，别的探索不受影响",
       }));
       if (landedPlanId !== null) {
@@ -766,7 +841,6 @@ export default function CandidatesPage() {
       }));
       setRejectingId(null);
       setAdoptingId(null);
-      setCreatedPlanPending(false);
       // 裁定后刷新左栏快照：活跃轮自己带候选就按轮取；否则按线程取最近有候选的
       // 一轮（活跃轮可能是追问 / 闲聊）。刷不动就留着旧的，不挡裁定主流程。
       try {
@@ -792,9 +866,12 @@ export default function CandidatesPage() {
           // 快照刷不动就留着旧的，不挡裁定主流程
         }
       }
-      // 采纳成功即点亮右栏进入规划对话；显式传入本次回执的计划 id，避免依赖异步 state。
+      // 采纳成功即点亮右栏进入规划对话：直接带上回执里的会话号，按会话看。
       if (accepted) {
-        await openChat(candidateId, landedPlanId ?? undefined);
+        await openChat(candidateId, {
+          planId: landedPlanId,
+          planningSessionId: done.planning_session_id,
+        });
       }
     } catch (cause) {
       setVerdictError(messageOf(cause, "裁定候选失败"));
@@ -850,6 +927,8 @@ export default function CandidatesPage() {
       utterance: round.utterance ?? round.requestText,
       reply: round.reply ?? (round.requestId === fresh?.request_id ? fresh.reply : null),
       clarify: round.clarify?.question ?? null,
+      // 出候选的轮次后端不写人话回复：带上条数，对话流里好给回执
+      candidates: round.intent === "candidates" ? round.count ?? 0 : null,
     }));
   const findReply = activeRound?.reply ?? fresh?.reply ?? null;
   // 这段探索挂在哪个计划（复核整改）：以线程自己的归属为准——计划选择器被动过也不变；
@@ -867,6 +946,8 @@ export default function CandidatesPage() {
     clarifyPending ||
     findResultNotice !== null ||
     findConversationOpen ||
+    // 首条寻找在途时也要把右栏摆出来：只带原话的对话流 + 进度提示，别让用户对着空页面等
+    asking ||
     (isDesktop && rows !== null && rows.length > 0);
 
   // 列宽动画：网格列全用 px 表述（1fr 之间不可插值），容器宽度靠 ResizeObserver 量。
@@ -901,38 +982,68 @@ export default function CandidatesPage() {
     ? peekRow ?? (clarifyPending ? null : rows?.[0] ?? null)
     : null;
 
-  async function handleChatSend(candidateId: number, message: string, effPlanId: number) {
+  /** 这段规划对话按哪条会话走：视图里的会话优先，其次采纳 / 重开回执记下的；都没有 = legacy。 */
+  function sessionOf(candidateId: number): number | null {
+    return chatViews[candidateId]?.planning_session?.id ?? chatSessions[candidateId] ?? null;
+  }
+
+  /** legacy 候选（从没进过规划）才需要落点计划兜底；会话路径的落点由服务端从会话解析。 */
+  function legacyPlanOf(candidateId: number): number | null {
+    const r = getRow(candidateId);
+    return landingPlans[candidateId] ?? r?.landingPlanId ?? r?.planId ?? null;
+  }
+
+  async function handleChatSend(candidateId: number, message: string) {
     setChatBusy(prev => ({ ...prev, [candidateId]: true }));
+    setPlanningError(null);
+    const sessionId = sessionOf(candidateId);
+    const planId = sessionId == null ? legacyPlanOf(candidateId) : null;
     try {
-      await sayPlanChat(candidateId, message, effPlanId);
-      const view = await getPlanChat(candidateId, effPlanId);
+      await sayPlanChat({ planningSessionId: sessionId, candidateId, message, planId });
+      const view = await getPlanChat({ planningSessionId: sessionId, candidateId, planId });
       setChatViews(prev => ({ ...prev, [candidateId]: view }));
+      if (view.planning_session) {
+        setChatSessions(prev => ({ ...prev, [candidateId]: view.planning_session!.id }));
+      }
       return view;
     } catch (err) {
-      console.error(err);
-      setVerdictError(messageOf(err, "规划对话请求失败"));
+      setPlanningError(messageOf(err, "规划对话这轮没发出去"));
       return null;
     } finally {
       setChatBusy(prev => ({ ...prev, [candidateId]: false }));
     }
   }
 
-  async function handleChatGenerate(candidateId: number, effPlanId: number) {
+  async function handleChatGenerate(candidateId: number, mode: BlueprintMode) {
     setChatBusy(prev => ({ ...prev, [candidateId]: true }));
+    setPlanningError(null);
+    const sessionId = sessionOf(candidateId);
+    const planId = sessionId == null ? legacyPlanOf(candidateId) : null;
     try {
-      const created = await generateBlueprint(candidateId, effPlanId);
-      const view = await getPlanChat(candidateId, effPlanId);
+      const created = await generateBlueprint({
+        planningSessionId: sessionId,
+        candidateId,
+        planId,
+        mode,
+      });
+      const view = await getPlanChat({ planningSessionId: sessionId, candidateId, planId });
       setChatViews(prev => ({ ...prev, [candidateId]: view }));
+      if (view.planning_session) {
+        setChatSessions(prev => ({ ...prev, [candidateId]: view.planning_session!.id }));
+      }
       const row = getRow(candidateId);
-      const plan = plans.find((item) => item.id === effPlanId) ??
-        workspacePlans.find((item) => item.id === effPlanId) ??
-        null;
+      const landedPlanId = created.plan_id;
+      const plan = landedPlanId === null
+        ? null
+        : plans.find((item) => item.id === landedPlanId) ??
+          workspacePlans.find((item) => item.id === landedPlanId) ??
+          null;
       setActionResults((previous) => [
         {
           kind: "blueprint",
           candidateId,
           candidateTitle: row?.title ?? "候选",
-          planId: effPlanId,
+          planId: landedPlanId,
           planGoal: plan?.goal ?? null,
           proposalId: created.proposal_id,
           version: created.version,
@@ -940,7 +1051,64 @@ export default function CandidatesPage() {
         ...previous.filter((item) => !(item.kind === "blueprint" && item.candidateId === candidateId)),
       ]);
     } catch (err) {
-      setVerdictError(messageOf(err, "生成蓝图方案失败"));
+      setPlanningError(messageOf(err, "生成蓝图方案失败"));
+    } finally {
+      setChatBusy(prev => ({ ...prev, [candidateId]: false }));
+    }
+  }
+
+  /** 把待裁定蓝图退回规划对话（理由必填，进台账）；成功返回 true，会话恢复 active。 */
+  async function handleReturnBlueprint(candidateId: number, reason: string): Promise<boolean> {
+    const view = chatViews[candidateId];
+    const sessionId = view?.planning_session?.id ?? null;
+    const proposalId = view?.pending_blueprint_proposal_id ?? view?.blueprint?.id ?? null;
+    if (sessionId === null || proposalId === null) {
+      setPlanningError("这段规划对话里没有可退回的待裁定蓝图——刷新后再试");
+      return false;
+    }
+    setChatBusy(prev => ({ ...prev, [candidateId]: true }));
+    setPlanningError(null);
+    try {
+      await returnBlueprintToPlanning(proposalId, { planningSessionId: sessionId, reason });
+      const next = await getPlanChat({ planningSessionId: sessionId, candidateId });
+      setChatViews(prev => ({ ...prev, [candidateId]: next }));
+      // 退回后这份蓝图不再等裁定：清掉同候选的「蓝图已生成」回执卡，别引导去裁定已作废的稿子
+      setActionResults((previous) =>
+        previous.filter((item) => !(item.kind === "blueprint" && item.candidateId === candidateId)),
+      );
+      return true;
+    } catch (err) {
+      setPlanningError(messageOf(err, "退回蓝图失败"));
+      return false;
+    } finally {
+      setChatBusy(prev => ({ ...prev, [candidateId]: false }));
+    }
+  }
+
+  /** 终态会话（converted / abandoned / expired）的「重新规划」：开一段新会话，旧的只读保留。 */
+  async function handleReopenPlanning(candidateId: number): Promise<boolean> {
+    setChatBusy(prev => ({ ...prev, [candidateId]: true }));
+    setPlanningError(null);
+    try {
+      const reopened = await reopenCandidatePlanning(candidateId);
+      setChatSessions(prev => ({ ...prev, [candidateId]: reopened.planning_session_id }));
+      setActiveFindChat({
+        candidateId,
+        planId: reopened.landing_plan_id,
+        planningSessionId: reopened.planning_session_id,
+      });
+      const view = await getPlanChat({
+        planningSessionId: reopened.planning_session_id,
+        candidateId,
+      });
+      setChatViews(prev => ({ ...prev, [candidateId]: view }));
+      if (reopened.landing_plan_id !== null) {
+        setLandingPlans(prev => ({ ...prev, [candidateId]: reopened.landing_plan_id as number }));
+      }
+      return true;
+    } catch (err) {
+      setPlanningError(messageOf(err, "重新开始规划失败"));
+      return false;
     } finally {
       setChatBusy(prev => ({ ...prev, [candidateId]: false }));
     }
@@ -952,14 +1120,18 @@ export default function CandidatesPage() {
     router.push(`/workbench?plan_id=${encodeURIComponent(String(planId))}`);
   }
 
-  function goToProposals(planId: number) {
-    setSelectedPlanId(planId);
-    router.push(`/proposals?plan_id=${encodeURIComponent(String(planId))}`);
+  /** 蓝图可能属于「新方向」（还没有正式计划）：没有落点就只去提案页，不选计划。 */
+  function goToProposals(planId: number | null) {
+    if (planId !== null) setSelectedPlanId(planId);
+    router.push("/proposals");
   }
 
-  function continuePlanning(candidateId: number, planId: number) {
-    setSelectedPlanId(planId);
-    void openChat(candidateId, planId);
+  function continuePlanning(candidateId: number, planId: number | null) {
+    if (planId !== null) setSelectedPlanId(planId);
+    void openChat(candidateId, {
+      planId,
+      planningSessionId: chatSessions[candidateId] ?? null,
+    });
   }
 
   function renderRightPanel() {
@@ -1008,22 +1180,29 @@ export default function CandidatesPage() {
           onFollowUpSend={(text) => ask(text, null, { followUp: true })}
           findResultNotice={findResultNotice}
           onFindResultNoticeClose={() => setFindResultNotice(null)}
+          variant="find"
         />
       );
     }
     const id = chattingId;
-    const r = getRow(id);
-    const effPlanId = r ? (landingPlans[r.id] ?? r.landingPlanId ?? r.planId) : null;
+    const planView = chatViews[id] ?? null;
+    // 会话路径的落点跟着会话走（landing_plan_id 可为 null =「新方向」，照样能聊能出方案）；
+    // 从没进过规划的 legacy 候选才退回行上的落点，并在对话区提示先指明计划。
+    const effPlanId = planView?.planning_session
+      ? planView.planning_session.landing_plan_id
+      : legacyPlanOf(id);
     return (
       <ChatBox
-        view={chatViews[id] ?? null}
+        view={planView}
         effectivePlanId={effPlanId}
         plans={plans}
         chosenPlan={chatChosenPlan[id] ?? ""}
         setChosenPlan={(val) => setChatChosenPlan(prev => ({ ...prev, [id]: val }))}
-        onSend={(msg) => handleChatSend(id, msg, effPlanId!)}
-        onGenerate={() => handleChatGenerate(id, effPlanId!)}
-        busy={chatBusy[id] ?? false}
+        onSend={(msg) => handleChatSend(id, msg)}
+        onGenerate={(mode) => handleChatGenerate(id, mode)}
+        busy={(chatBusy[id] ?? false) || (chatLoading[id] ?? false)}
+        onReturnBlueprint={(reason) => handleReturnBlueprint(id, reason)}
+        onReopenPlanning={() => handleReopenPlanning(id)}
       />
     );
   }
@@ -1039,16 +1218,26 @@ export default function CandidatesPage() {
           <h1 className="text-[27px] font-medium tracking-tight text-primary">找方向</h1>
           <span className="text-[12px] text-white/45">描述困惑，比较方向，再决定是否采纳</span>
         </div>
-        <PromptInput 
-          plans={plans}
-          planChoice={planChoice}
-          setPlanChoice={setPlanChoice}
-          rawText={rawText}
-          setRawText={setRawText}
-          onSubmit={(e) => { e.preventDefault(); ask(rawText, null); }}
-          asking={asking}
-          bannedCount={fresh?.banned_titles?.length ?? 0}
-        />
+          <PromptInput
+            plans={plans}
+            planChoice={planChoice}
+            setPlanChoice={setPlanChoice}
+            rawText={rawText}
+            setRawText={setRawText}
+            onSubmit={(e) => { e.preventDefault(); ask(rawText, null); }}
+            asking={asking}
+            bannedCount={fresh?.banned_titles?.length ?? 0}
+            plansLoading={plansLoading}
+            plansError={plansError}
+            onRetryPlans={() => {
+              setPlansLoading(true);
+              setPlansError(null);
+              listPlans()
+                .then(setPlans)
+                .catch((cause: unknown) => setPlansError(messageOf(cause, "读取计划失败")))
+                .finally(() => setPlansLoading(false));
+            }}
+          />
       </div>
 
       <div className="w-full">
@@ -1079,12 +1268,25 @@ export default function CandidatesPage() {
         <div className="flex flex-col w-full min-w-0">
           {isDesktop && panelOpen ? (
             <>
-              {(askError || historyError || verdictError) && (
+              {(askError || historyError || verdictError || planningError) && (
                 <div className="flex flex-col gap-2 mb-5 px-1">
                   {askError && <p className="text-[12px] leading-relaxed text-red-400">{askError}</p>}
                   {historyError && <p className="text-[12px] leading-relaxed text-red-400">{historyError}</p>}
+                  {planningError && (
+                    <div className="flex flex-wrap items-center gap-3 text-[12px] leading-relaxed text-red-400" role="alert">
+                      <span>{planningError}</span>
+                      {planningRetryCandidateId !== null && (
+                        <button
+                          type="button"
+                          onClick={() => void openChat(planningRetryCandidateId, { retry: true })}
+                          className="text-white/80 underline underline-offset-4 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70"
+                        >
+                          重新读取
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {verdictError && <p className="text-[12px] leading-relaxed text-red-400">裁定失败：{verdictError}</p>}
-                  {createdPlanPending && verdictError && <p className="text-[11px] text-red-300/80">新计划已经建好；选中它后可重试确认归入。</p>}
                 </div>
               )}
               <CandidateRail
@@ -1122,11 +1324,17 @@ export default function CandidatesPage() {
           <div className="flex items-center justify-between mb-10">
             <div className="flex items-center gap-4">
               <h2 className="text-[26px] font-semibold text-primary/90 tracking-tight">候选清单</h2>
-              {profile !== null && (
+              {profileLoading ? (
+                <span className="h-6 w-24 animate-pulse rounded-full bg-white/[0.05]" role="status" aria-label="正在读取长期档案" />
+              ) : profileError ? (
+                <span className="text-[12px] text-red-300" role="alert">
+                  档案读取失败：{profileError}
+                </span>
+              ) : profile !== null ? (
                 <span className="px-3 py-1 bg-white/[0.03] border border-white/[0.06] rounded-full text-[11px] font-medium text-white/60 shadow-sm shrink-0">
                   长期档案 {profile.items.length} 条
                 </span>
-              )}
+              ) : null}
             </div>
           </div>
 
@@ -1149,11 +1357,23 @@ export default function CandidatesPage() {
           {verdictError && (
             <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]">
               <strong>裁定失败：</strong>{verdictError}
-              {createdPlanPending && (
-                <div className="mt-1 text-red-400/80">
-                  新计划已经建好了，落点已选中它，再点一次「确认归入」即可。
-                </div>
-              )}
+            </div>
+          )}
+
+          {planningError && (
+            <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl p-4 mb-8 text-[13px]" role="alert">
+              <div className="flex flex-wrap items-center gap-3">
+                <span>{planningError}</span>
+                {planningRetryCandidateId !== null && (
+                  <button
+                    type="button"
+                    onClick={() => void openChat(planningRetryCandidateId, { retry: true })}
+                    className="text-white/80 underline underline-offset-4 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70"
+                  >
+                    重新读取
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -1329,7 +1549,7 @@ export default function CandidatesPage() {
                   <span className="text-[11px] text-white/60">
                     {isPath
                       ? "整条采纳或否决，去留在生成蓝图时调整"
-                      : "采纳将新建阶段，否决只在这段探索里避开"}
+                      : "采纳进入规划（蓝图批准后才建正式阶段），否决只在这段探索里避开"}
                   </span>
                 </div>
               </div>
@@ -1410,6 +1630,16 @@ export default function CandidatesPage() {
                     prevOpen={openCandidateId === rows[index - 1]?.id}
                     nextOpen={openCandidateId === rows[index + 1]?.id}
                     plans={plans}
+                    plansLoading={plansLoading}
+                    plansError={plansError}
+                    onRetryPlans={() => {
+                      setPlansLoading(true);
+                      setPlansError(null);
+                      listPlans()
+                        .then(setPlans)
+                        .catch((cause: unknown) => setPlansError(messageOf(cause, "读取计划失败")))
+                        .finally(() => setPlansLoading(false));
+                    }}
                     notes={notes}
                     isDecided={row.status !== "proposed"}
                     verdicting={verdicting}
@@ -1420,7 +1650,6 @@ export default function CandidatesPage() {
                     adoptingId={adoptingId}
                     setAdoptingId={setAdoptingId}
                     onVerdict={onVerdict}
-                    onAdoptIntoNewPlan={onAdoptIntoNewPlan}
                     setChattingId={openChat}
                     clarifyNote={clarifyPending && !historyView}
                   />
@@ -1481,6 +1710,16 @@ export default function CandidatesPage() {
                           prevOpen={false}
                           nextOpen={false}
                           plans={plans}
+                          plansLoading={plansLoading}
+                          plansError={plansError}
+                          onRetryPlans={() => {
+                            setPlansLoading(true);
+                            setPlansError(null);
+                            listPlans()
+                              .then(setPlans)
+                              .catch((cause: unknown) => setPlansError(messageOf(cause, "读取计划失败")))
+                              .finally(() => setPlansLoading(false));
+                          }}
                           notes={notes}
                           isDecided={reviewRow.status !== "proposed"}
                           verdicting={verdicting}
@@ -1491,7 +1730,6 @@ export default function CandidatesPage() {
                           adoptingId={adoptingId}
                           setAdoptingId={setAdoptingId}
                           onVerdict={onVerdict}
-                          onAdoptIntoNewPlan={onAdoptIntoNewPlan}
                           setChattingId={openChat}
                           clarifyNote={clarifyPending && !historyView}
                         />

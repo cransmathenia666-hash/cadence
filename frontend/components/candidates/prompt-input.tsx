@@ -11,6 +11,9 @@ export function PromptInput({
   onSubmit,
   asking,
   bannedCount,
+  plansLoading,
+  plansError,
+  onRetryPlans,
 }: {
   plans: { id: number; goal: string }[];
   planChoice: string;
@@ -20,6 +23,9 @@ export function PromptInput({
   onSubmit: (e: FormEvent<HTMLFormElement>) => void;
   asking: boolean;
   bannedCount: number;
+  plansLoading: boolean;
+  plansError: string | null;
+  onRetryPlans: () => void;
 }) {
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -52,17 +58,34 @@ export function PromptInput({
       />
       
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 mt-2 px-1">
-        <HoverSelect
-          value={planChoice}
-          onChange={setPlanChoice}
-          disabled={asking}
-          placeholder="新方向 (不从属现有计划)"
-          className="min-w-0 w-full sm:min-w-[220px] sm:w-auto sm:flex-1"
-          options={[
-            { value: "", label: "新方向 (不从属现有计划)" },
-            ...plans.map((item) => ({ value: String(item.id), label: item.goal })),
-          ]}
-        />
+        <div className="min-w-0 w-full sm:min-w-[220px] sm:w-auto sm:flex-1">
+          {plansLoading ? (
+            <div className="h-8 w-full animate-pulse rounded-full bg-white/[0.05]" role="status" aria-label="正在读取计划" />
+          ) : plansError ? (
+            <div className="flex items-center gap-2 text-[12px] text-red-300" role="alert">
+              <span className="min-w-0">计划读取失败：{plansError}</span>
+              <button
+                type="button"
+                onClick={onRetryPlans}
+                className="shrink-0 text-white/80 underline underline-offset-4 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70"
+              >
+                重试
+              </button>
+            </div>
+          ) : (
+            <HoverSelect
+              value={planChoice}
+              onChange={setPlanChoice}
+              disabled={asking}
+              placeholder="新方向 (不从属现有计划)"
+              className="w-full"
+              options={[
+                { value: "", label: "新方向 (不从属现有计划)" },
+                ...plans.map((item) => ({ value: String(item.id), label: item.goal })),
+              ]}
+            />
+          )}
+        </div>
         
         <div className="flex items-center gap-4">
           {bannedCount > 0 && (

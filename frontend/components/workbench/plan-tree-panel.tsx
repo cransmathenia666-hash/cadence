@@ -14,17 +14,26 @@ import {
   reopenPlan,
   voidPlan,
   getPlan,
+  reviewStage,
   skipNode,
-  submitDeliverable,
+  submitEvidence,
   updateNodeFields,
+  type AcceptanceCriterionInput,
+  type AcceptanceCriterionState,
+  type CloseKind,
+  type EvidenceKind,
+  type EvidenceRequirementInput,
+  type OutcomeContract,
   type NodeFieldsInput,
   type PlanTree,
+  type ReviewDecision,
   type Stage,
 } from "@/lib/api";
-import { ArrowLeft, ArrowRight, Check, ChevronRight, List, Loader2, RefreshCw, Upload } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, List, Loader2, RefreshCw, Upload } from "lucide-react";
 import { EASE_OUT, SPRING_PRESS } from "@/lib/ease";
 import { useWorkspace } from "@/components/shell/workspace-context";
 import { cn } from "@/lib/utils";
+import { StageReviewSection } from "./stage-review-section";
 
 const STATUS_LABELS: Record<string, string> = {
   not_started: "未开始",
@@ -42,14 +51,53 @@ const STATUS_DOT: Record<string, string> = {
   skipped: "bg-white/30",
 };
 
+const EVIDENCE_KIND_LABELS: Record<EvidenceKind, string> = {
+  repository: "代码仓库",
+  link: "网页链接",
+  document: "文档",
+  demo: "演示 / 录屏",
+  screenshot: "截图",
+  text: "文字结果",
+  other: "其他",
+};
+
+function ContractSummary({ contract }: { contract: OutcomeContract }) {
+  return <section aria-label="成果契约摘要" className="space-y-4">
+    <div className="flex items-baseline justify-between gap-3">
+      <h2 className="text-[18px] font-medium tracking-tight text-primary">{contract.title}</h2>
+      <span className="shrink-0 text-[10px] text-white/45">第 {contract.version} 版 · {contract.status === "active" ? "当前有效" : "已被取代"}</span>
+    </div>
+    <dl className="space-y-3 text-[12px] leading-relaxed">
+      <div><dt className="text-[10px] tracking-[0.16em] text-white/40">最终结果</dt><dd className="mt-1 text-primary/80">{contract.outcome}</dd></div>
+      <div><dt className="text-[10px] tracking-[0.16em] text-white/40">为什么值得做</dt><dd className="mt-1 text-white/65">{contract.value}</dd></div>
+      <div><dt className="text-[10px] tracking-[0.16em] text-white/40">做到什么算够</dt><dd className="mt-1 text-white/75">{contract.success_statement}</dd></div>
+    </dl>
+    <div className="border-t border-white/[0.06] pt-3">
+      <h3 className="text-[10px] font-medium tracking-[0.16em] text-white/40">证据要求</h3>
+      <ul className="mt-2 space-y-2 text-[11px] leading-relaxed text-white/65">{contract.evidence_requirements.map((item) => <li key={item.id}><span className="mr-2 text-white/40">{EVIDENCE_KIND_LABELS[item.kind]} · {item.required ? "必需" : "可选"}</span>{item.description}</li>)}</ul>
+    </div>
+  </section>;
+}
+
+function stageStatusLabel(stage: Stage): string {
+  if (stage.acceptance.status === "skipped" || stage.status === "skipped") return "阶段已跳过";
+  if (stage.contract_id !== null) {
+    if (stage.finished) return "验收已通过";
+    if (stage.acceptance.status === "pending") return stage.status === "done" ? "执行已完成 · 待验收" : "待验收";
+    if (stage.acceptance.status === "invalidated") return "验收已失效 · 需重看";
+    if (stage.acceptance.status === "needs_work") return "验收未通过 · 还需继续";
+    if (stage.acceptance.status === "not_met") return "验收未通过 · 未达标";
+    if (stage.acceptance.status === "accepted") return "验收已确认 · 待任务收尾";
+  }
+  return STATUS_LABELS[stage.status] ?? stage.status;
+}
+
 function stageDotClass(stage: Stage): string {
-  const { settled, total } = stage.progress;
-  const allSettled = total === 0 || settled === total;
-  if (stage.status === "skipped") return "bg-white/30";
-  if (stage.status === "stuck") return "bg-red-400";
-  if (allSettled && stage.deliverable_submission) return "bg-green";
-  if (allSettled && settled > 0) return "bg-amber-400";
-  if (settled > 0 || stage.status === "in_progress" || stage.deliverable_submission) return "bg-white";
+  if (stage.acceptance.status === "skipped" || stage.status === "skipped") return "bg-white/30";
+  if (stage.finished || stage.acceptance.status === "accepted") return "bg-green";
+  if (stage.status === "stuck" || stage.acceptance.status === "not_met") return "bg-red-400";
+  if (stage.contract_id !== null && (stage.status === "done" || stage.acceptance.status === "needs_work" || stage.acceptance.status === "invalidated")) return "bg-amber-300";
+  if (stage.status === "in_progress") return "bg-white";
   return STATUS_DOT[stage.status] ?? "bg-white/25";
 }
 
@@ -192,17 +240,25 @@ function ReasonPrompt({
 function NodeFieldsForm({
   node,
   withDeliverable,
+  acceptance,
   onCancel,
   onSubmit,
 }: {
   node: { id: number; title: string; due_date: string | null; deliverable?: string | null };
   withDeliverable: boolean;
+  acceptance?: Stage["acceptance"];
   onCancel: () => void;
   onSubmit: (input: NodeFieldsInput) => Promise<void>;
 }) {
   const [title, setTitle] = useState(node.title);
   const [dueDate, setDueDate] = useState(node.due_date ?? "");
   const [deliverable, setDeliverable] = useState(node.deliverable ?? "");
+  const [criteria, setCriteria] = useState<AcceptanceCriterionInput[]>(
+    acceptance?.criteria.map(({ id, text, required }) => ({ id, text, required })) ?? [],
+  );
+  const [evidenceRequirements, setEvidenceRequirements] = useState<EvidenceRequirementInput[]>(
+    acceptance?.evidence_requirements.map(({ id, kind, required, description }) => ({ id, kind, required, description })) ?? [],
+  );
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -218,6 +274,10 @@ function NodeFieldsForm({
       reason: reason.trim(),
     };
     if (withDeliverable) input.deliverable = deliverable.trim();
+    if (acceptance) {
+      input.acceptance_criteria = criteria.map((item) => ({ ...item, text: item.text.trim() }));
+      input.evidence_requirements = evidenceRequirements.map((item) => ({ ...item, description: item.description.trim() }));
+    }
     onSubmit(input)
       .catch((err) => setError(err instanceof ApiError ? err.message : "保存字段失败"))
       .finally(() => setSaving(false));
@@ -239,6 +299,18 @@ function NodeFieldsForm({
             <span className="mb-1 block text-[10px] text-white/40">阶段交付物（留空清除）</span>
             <input value={deliverable} onChange={(event) => setDeliverable(event.target.value)} className={FIELD_INPUT} />
           </label>
+        )}
+        {acceptance && (
+          <>
+            <fieldset className="space-y-2 border-t border-white/[0.07] pt-3">
+              <legend className="text-[10px] text-white/40">阶段验收条件（整组替换）</legend>
+              {criteria.map((criterion, index) => <label key={criterion.id ?? index} className="block"><span className="mb-1 block text-[10px] text-white/40">条件 {index + 1}</span><input aria-label={`阶段验收条件 ${index + 1}`} value={criterion.text} onChange={(event) => setCriteria((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, text: event.target.value } : item))} className={FIELD_INPUT} /></label>)}
+            </fieldset>
+            <fieldset className="space-y-2 border-t border-white/[0.07] pt-3">
+              <legend className="text-[10px] text-white/40">阶段证据要求（整组替换）</legend>
+              {evidenceRequirements.map((requirement, index) => <div key={requirement.id ?? index} className="grid gap-2 sm:grid-cols-[9rem_1fr]"><label className="block"><span className="mb-1 block text-[10px] text-white/40">证据类型 {index + 1}</span><select value={requirement.kind} onChange={(event) => setEvidenceRequirements((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, kind: event.target.value as EvidenceKind } : item))} className={cn(FIELD_INPUT, "rounded-sm")}><option value="repository">代码仓库</option><option value="link">网页链接</option><option value="document">文档</option><option value="demo">演示 / 录屏</option><option value="screenshot">截图</option><option value="text">文字结果</option><option value="other">其他</option></select></label><label className="block"><span className="mb-1 block text-[10px] text-white/40">说明 {index + 1}</span><input aria-label={`阶段证据要求说明 ${index + 1}`} value={requirement.description} onChange={(event) => setEvidenceRequirements((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} className={FIELD_INPUT} /></label></div>)}
+            </fieldset>
+          </>
         )}
         <label className="block">
           <span className="mb-1 block text-[10px] text-white/40">修改理由（必填，进台账）</span>
@@ -288,29 +360,70 @@ function StageChapter({
   const [editOpen, setEditOpen] = useState(false);
   const [skipOpen, setSkipOpen] = useState(false);
   const [reopenOpen, setReopenOpen] = useState(false);
-  const [url, setUrl] = useState("");
+  const [evidenceKind, setEvidenceKind] = useState<EvidenceKind>("repository");
+  const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doneNote, setDoneNote] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewDecision, setReviewDecision] = useState<ReviewDecision>("needs_work");
+  const [criteriaState, setCriteriaState] = useState<Record<string, AcceptanceCriterionState>>({});
+  const [reviewSubmissionIds, setReviewSubmissionIds] = useState<number[]>([]);
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const settled = stage.status === "done" || stage.status === "skipped";
+  const outcomeStage = stage.contract_id !== null;
 
-  const canSubmit = url.trim() !== "" && note.trim() !== "" && !busy;
+  const canSubmit = note.trim() !== "" && (evidenceKind === "text" || reference.trim() !== "") && !busy;
 
   const submit = () => {
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
-    submitDeliverable(stage.id, url.trim(), note.trim())
+    submitEvidence({ nodeId: stage.id, kind: evidenceKind, reference, note: note.trim() })
       .then(() => {
-        setDoneNote("交付物已提交");
+        setDoneNote("证据已提交；提交本身不会让阶段完成");
         setFormOpen(false);
-        setUrl("");
+        setReference("");
         setNote("");
         onChanged();
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : "提交失败，原因不明"))
       .finally(() => setBusy(false));
+  };
+
+  const openReview = () => {
+    const next: Record<string, AcceptanceCriterionState> = {};
+    stage.acceptance.criteria.forEach((criterion) => {
+      next[criterion.id] = stage.acceptance.latest_review?.criteria_state[criterion.id] ?? "unknown";
+    });
+    setCriteriaState(next);
+    setReviewSubmissionIds(stage.acceptance.evidence.map((item) => item.id));
+    setReviewNote("");
+    setReviewError(null);
+    setReviewOpen(true);
+  };
+
+  const submitReview = () => {
+    if (stage.contract_id === null || !reviewNote.trim() || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewError(null);
+    reviewStage({
+      nodeId: stage.id,
+      contractId: stage.contract_id,
+      submissionIds: reviewSubmissionIds,
+      criteriaState,
+      decision: reviewDecision,
+      note: reviewNote.trim(),
+    })
+      .then(() => {
+        setReviewOpen(false);
+        onChanged();
+      })
+      .catch((err) => setReviewError(err instanceof ApiError ? err.message : "验收提交失败，原因不明"))
+      .finally(() => setReviewBusy(false));
   };
 
   return (
@@ -322,7 +435,7 @@ function StageChapter({
         </div>
         <h2 className="max-w-[22ch] text-[23px] font-medium leading-[1.28] tracking-tight text-primary">{stage.title}</h2>
         <div className="mt-5 flex items-center justify-between text-[11px] text-white/55">
-          <span className="flex items-center gap-2"><span className={cn("size-1.5 rounded-full", stageDotClass(stage))} />{stage.finished ? "阶段已兑现" : STATUS_LABELS[stage.status] ?? stage.status}</span>
+          <span className="flex items-center gap-2"><span className={cn("size-1.5 rounded-full", stageDotClass(stage))} />{stageStatusLabel(stage)}</span>
           <span className="font-mono tabular-nums">任务 {stage.progress.settled} / {stage.progress.total}</span>
         </div>
         <div className="mt-3 flex h-px bg-white/10" aria-hidden="true">
@@ -330,35 +443,55 @@ function StageChapter({
         </div>
       </div>
 
-      <section className="border-b border-white/[0.08] px-6 py-6" aria-label="阶段交付物">
+      <section className="border-b border-white/[0.08] px-6 py-6" aria-label="阶段成果与证据">
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-[10px] font-medium tracking-[0.2em] text-white/45">01 / 交付物</h3>
+          <div>
+            <h3 className="text-[10px] font-medium tracking-[0.2em] text-white/45">01 / 证据</h3>
+            <p className="mt-1 text-[11px] text-white/40">提交证据不会自动完成阶段。</p>
+          </div>
           <button type="button" onClick={() => { setFormOpen(!formOpen); setDoneNote(null); setError(null); }} aria-expanded={formOpen} className="inline-flex items-center gap-1.5 text-[11px] text-primary/80 underline decoration-white/25 underline-offset-4 transition-colors hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">
-            <Upload className="size-3" />{formOpen ? "返回交付物" : stage.deliverable_submission ? "重新提交" : "提交交付物"}
+            <Upload className="size-3" />{formOpen ? "返回证据" : "提交证据"}
           </button>
         </div>
         {formOpen ? <div className="flex flex-col gap-3">
-          <label className="text-[11px] text-white/55">交付物链接<input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="粘贴链接" className={cn(FIELD_INPUT, "mt-1.5 rounded-sm")} /></label>
-          <label className="text-[11px] text-white/55">一句话说明<input value={note} onChange={(e) => setNote(e.target.value)} placeholder="这次交付了什么" className={cn(FIELD_INPUT, "mt-1.5 rounded-sm")} /></label>
-          {error && <p className="text-[11px] text-red-300">{error}</p>}
+          <label className="text-[11px] text-white/55">证据类型<select value={evidenceKind} onChange={(e) => setEvidenceKind(e.target.value as EvidenceKind)} className={cn(FIELD_INPUT, "mt-1.5 rounded-sm")}><option value="repository">代码仓库</option><option value="link">网页链接</option><option value="document">文档</option><option value="demo">演示 / 录屏</option><option value="screenshot">截图</option><option value="text">文字结果</option><option value="other">其他</option></select></label>
+          <label className="text-[11px] text-white/55">链接、路径或引用{evidenceKind === "text" ? "（文字结果可留空）" : "（必填）"}<input value={reference} onChange={(e) => setReference(e.target.value)} placeholder={evidenceKind === "text" ? "可留空" : "粘贴链接或写明引用"} className={cn(FIELD_INPUT, "mt-1.5 rounded-sm")} /></label>
+          <label className="text-[11px] text-white/55">证据说明（必填）<input value={note} onChange={(e) => setNote(e.target.value)} placeholder="它证明了什么、应该看哪里" className={cn(FIELD_INPUT, "mt-1.5 rounded-sm")} /></label>
+          {error && <p role="alert" className="text-[11px] text-red-300">{error}</p>}
           <div className="flex items-center gap-2">
             <button type="button" onClick={submit} disabled={!canSubmit} className="inline-flex items-center gap-1 rounded-sm bg-white px-3 py-1.5 text-[11px] font-medium text-black disabled:opacity-40">
               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-              提交
+              提交证据
             </button>
             <button type="button" onClick={() => setFormOpen(false)} className="text-[11px] text-white/50 hover:text-white/80">取消</button>
           </div>
         </div> : <div className="border-l border-white/25 pl-4">
-          <p className="text-[13px] leading-relaxed text-primary/80">{stage.deliverable || "这个阶段还没有写明交付物"}</p>
-          {stage.deliverable_submission && (/^https?:\/\//i.test(stage.deliverable_submission.url)
-            ? <a href={stage.deliverable_submission.url} target="_blank" rel="noopener noreferrer" className="mt-3 block break-all text-[11px] text-green/80 underline decoration-green/30 underline-offset-4 hover:text-green">已提交 · {stage.deliverable_submission.url}</a>
-            : <p className="mt-3 break-all text-[11px] text-green/80">已提交 · {stage.deliverable_submission.url}</p>)}
+          <p className="text-[13px] leading-relaxed text-primary/80">{stage.deliverable || "这个阶段还没有写明交付结果"}</p>
+          {stage.acceptance.evidence.length > 0 ? <ul className="mt-3 space-y-2">{stage.acceptance.evidence.slice(0, 4).map((item) => <li key={item.id} className="text-[11px] text-green/80"><span className="mr-2 text-white/35">{item.kind}</span>{item.reference ? (/^https?:\/\//i.test(item.reference) ? <a href={item.reference} target="_blank" rel="noopener noreferrer" className="break-all underline decoration-green/30 underline-offset-4 hover:text-green">{item.reference}<ExternalLink className="ml-1 inline size-3" aria-hidden="true" /></a> : <span className="break-all">{item.reference}</span>) : "文字结果"}<span className="ml-2 text-white/40">· {item.note}</span></li>)}</ul> : <p className="mt-3 text-[11px] text-white/40">还没有提交证据。</p>}
           {doneNote && <p role="status" className="mt-2 text-[11px] text-green/90">{doneNote}</p>}
         </div>}
       </section>
 
+      {outcomeStage && <StageReviewSection
+        stage={stage}
+        open={reviewOpen}
+        decision={reviewDecision}
+        criteriaState={criteriaState}
+        submissionIds={reviewSubmissionIds}
+        note={reviewNote}
+        busy={reviewBusy}
+        error={reviewError}
+        onOpen={openReview}
+        onDecision={setReviewDecision}
+        onCriteriaState={setCriteriaState}
+        onSubmissionIds={setReviewSubmissionIds}
+        onNote={setReviewNote}
+        onSubmit={submitReview}
+        onCancel={() => setReviewOpen(false)}
+      />}
+
       <section className="border-b border-white/[0.08] px-6 py-6" aria-label="阶段任务">
-        <h3 className="mb-3 text-[10px] font-medium tracking-[0.2em] text-white/45">02 / 执行清单</h3>
+        <h3 className="mb-3 text-[10px] font-medium tracking-[0.2em] text-white/45">03 / 执行清单</h3>
         {stage.tasks.length > 0 ? (
           <ul className="divide-y divide-white/[0.06]">
             {stage.tasks.map((task) => <TaskRow key={task.id} task={task} onChanged={onChanged} />)}
@@ -427,6 +560,7 @@ function StageChapter({
             <NodeFieldsForm
               node={stage}
               withDeliverable
+              acceptance={outcomeStage ? stage.acceptance : undefined}
               onCancel={() => setEditOpen(false)}
               onSubmit={async (input) => {
                 await updateNodeFields(stage.id, input);
@@ -595,12 +729,14 @@ function TaskRow({
   );
 }
 
-function PlanManagement({ planId, onChanged }: { planId: number; onChanged: () => void }) {
+function PlanManagement({ planId, tree, onChanged }: { planId: number; tree: PlanTree; onChanged: () => void }) {
   const { plans, refreshPlans } = useWorkspace();
   const plan = plans.find((item) => item.id === planId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voiding, setVoiding] = useState(false);
+  const [closeOpen, setCloseOpen] = useState(false);
+  const [closeKind, setCloseKind] = useState<CloseKind>("completed");
   const [reason, setReason] = useState("");
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -608,6 +744,7 @@ function PlanManagement({ planId, onChanged }: { planId: number; onChanged: () =
     try {
       await action();
       setVoiding(false);
+      setCloseOpen(false);
       setReason("");
       await refreshPlans();
       onChanged();
@@ -625,16 +762,33 @@ function PlanManagement({ planId, onChanged }: { planId: number; onChanged: () =
       <summary className="cursor-pointer text-primary/70 marker:text-white/40">计划管理 <span className="ml-2 text-white/40">{labels[plan.status] ?? plan.status}</span></summary>
       <p className="my-2">暂停可继续，收尾可重开；作废不可恢复。</p>
       {plan.ended_reason && <p className="mb-2">原因：{plan.ended_reason}</p>}
+      {tree?.completion_mode === "legacy" && <p className="mb-3 border-l border-amber-300/40 pl-3 text-amber-200/80">这是旧流程计划，现有交付物不会自动变成成果验收。要按成果完成，请先补全成果契约。</p>}
+      {tree?.completion_mode === "outcome" && <p className="mb-3 text-white/45">成果完成门槛：{tree.can_complete ? "后端已确认可以完成" : "尚未满足，不能把计划伪装成完成"}。</p>}
       <div className="flex flex-wrap gap-2">
-        {plan.status === "active" && <button className={buttonClass} disabled={busy} onClick={() => void run(() => pausePlan(planId))}>暂停</button>}
-        {(plan.status === "active" || plan.status === "paused") && <button className={buttonClass} disabled={busy} onClick={() => void run(() => closePlan(planId))}>收尾</button>}
-        {(plan.status === "paused" || plan.status === "closed") && <button className={buttonClass} disabled={busy} onClick={() => void run(() => reopenPlan(planId))}>{plan.status === "paused" ? "继续做" : "重开"}</button>}
-        {plan.status === "active" && !voiding && <button className={buttonClass} disabled={busy} onClick={() => setVoiding(true)}>作废</button>}
+        {plan.status === "active" && <button type="button" className={buttonClass} disabled={busy} onClick={() => void run(() => pausePlan(planId))}>暂停</button>}
+        {(plan.status === "active" || plan.status === "paused") && <button type="button" className={buttonClass} disabled={busy} onClick={() => { setCloseOpen(!closeOpen); setError(null); }}>收尾</button>}
+        {(plan.status === "paused" || plan.status === "closed") && <button type="button" className={buttonClass} disabled={busy} onClick={() => void run(() => reopenPlan(planId))}>{plan.status === "paused" ? "继续做" : "重开"}</button>}
+        {plan.status === "active" && !voiding && <button type="button" className={buttonClass} disabled={busy} onClick={() => setVoiding(true)}>作废</button>}
       </div>
+      {closeOpen && <div className="mt-3 border-l border-white/15 pl-3">
+        {tree.completion_mode === "legacy" ? <>
+          <p className="mb-2 text-[11px] text-amber-200/75">旧流程计划沿用兼容收尾语义；这不是成果契约验收。</p>
+          <label className="block text-[11px] text-white/55">收尾说明（可选）<input aria-label="完成收尾说明" placeholder="完成收尾说明" value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-w-0 w-full rounded-sm border border-white/10 bg-transparent px-2 py-1 text-primary" /></label>
+          <div className="mt-2 flex flex-wrap gap-2"><button type="button" className={buttonClass} disabled={busy} onClick={() => void run(() => closePlan(planId, { reason: reason.trim() || undefined }))}>确认完成收尾</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setCloseOpen(false)}>取消</button></div>
+        </> : <>
+          <fieldset className="space-y-2">
+            <legend className="text-[11px] text-white/55">选择收尾语义</legend>
+            <label className="flex items-start gap-2 text-[11px] text-white/70"><input type="radio" name={`close-kind-${planId}`} checked={closeKind === "completed"} onChange={() => setCloseKind("completed")} />按成果完成（必须通过后端验收门槛）</label>
+            <label className="flex items-start gap-2 text-[11px] text-white/70"><input type="radio" name={`close-kind-${planId}`} checked={closeKind === "stopped"} onChange={() => setCloseKind("stopped")} />提前停止（不是成果已验收，必须写理由）</label>
+          </fieldset>
+          <label className="mt-2 block text-[11px] text-white/55">{closeKind === "stopped" ? "停止理由（必填）" : "收尾说明（可选）"}<input aria-label={closeKind === "stopped" ? "提前停止理由" : "完成收尾说明"} placeholder={closeKind === "stopped" ? "为什么决定停止" : "完成收尾说明"} value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-w-0 w-full rounded-sm border border-white/10 bg-transparent px-2 py-1 text-primary" /></label>
+          <div className="mt-2 flex flex-wrap gap-2"><button type="button" className={buttonClass} disabled={busy || (closeKind === "stopped" && !reason.trim())} onClick={() => void run(() => closePlan(planId, { closeKind, reason: reason.trim() || undefined }))}>确认{closeKind === "stopped" ? "停止" : "完成收尾"}</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setCloseOpen(false)}>取消</button></div>
+        </>}
+      </div>}
       {voiding && <div className="mt-2 flex flex-wrap gap-2">
-        <input aria-label="作废计划的理由" placeholder="作废理由（必填）" value={reason} onChange={(event) => setReason(event.target.value)} className="min-w-0 w-full rounded-lg border border-white/10 bg-transparent px-2 py-1 text-primary" />
-        <button className={buttonClass} disabled={busy || !reason.trim()} onClick={() => void run(() => voidPlan(planId, reason.trim()))}>确认作废</button>
-        <button className={buttonClass} disabled={busy} onClick={() => setVoiding(false)}>取消</button>
+        <label className="w-full text-[11px] text-white/55">作废理由（必填）<input aria-label="作废计划的理由" placeholder="为什么作废" value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-w-0 w-full rounded-sm border border-white/10 bg-transparent px-2 py-1 text-primary" /></label>
+        <button type="button" className={buttonClass} disabled={busy || !reason.trim()} onClick={() => void run(() => voidPlan(planId, reason.trim()))}>确认作废</button>
+        <button type="button" className={buttonClass} disabled={busy} onClick={() => setVoiding(false)}>取消</button>
       </div>}
       {error && <p role="alert" className="mt-2 text-red-300">{error}</p>}
     </details>
@@ -705,8 +859,13 @@ export function PlanTreePanel({
         ) : tree?.plan ? (
           <>
             <div className="border-b border-white/[0.08] px-6 py-5">
-              <p className="mb-2 text-[10px] tracking-[0.2em] text-white/40">计划目标</p>
-              <p className="line-clamp-2 text-[13px] leading-relaxed text-white/75" title={tree.plan.goal}>{tree.plan.goal}</p>
+              {tree.contract ? <ContractSummary contract={tree.contract} /> : <>
+                <p className="mb-2 text-[10px] tracking-[0.2em] text-white/40">计划目标</p>
+                <p className="text-[13px] leading-relaxed text-white/75">{tree.plan.goal}</p>
+                {tree.completion_mode === "legacy" && <p className="mt-3 border-l border-amber-300/40 pl-3 text-[11px] leading-relaxed text-amber-200/80">这是旧流程计划，尚未补成果契约；任务与旧交付物不代表成果验收。升级需要完整契约及阶段条件映射。</p>}
+              </>}
+              {tree.contract_status === "needs_review" && <p className="mt-3 text-[11px] text-amber-200/80">契约需要复核，当前不能按成果完成。</p>}
+              {tree.contract_status === "affected" && <p className="mt-3 text-[11px] text-amber-200/80">契约标准已变化，请按新标准重新核对阶段验收。</p>}
               <div className="mt-5 flex items-center justify-between border-t border-white/[0.06] pt-4">
                 <button type="button" onClick={toggleIndex} aria-expanded={showIndex} className="inline-flex items-center gap-2 text-[12px] text-primary/85 transition-colors hover:text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">
                   {showIndex ? <ArrowLeft className="size-3.5" /> : <List className="size-3.5" />}
@@ -729,14 +888,14 @@ export function PlanTreePanel({
                         <span className={cn("pt-0.5 font-mono text-[12px] tabular-nums", selectedStage?.id === stage.id ? "text-primary" : "text-white/35")}>{String(index + 1).padStart(2, "0")}</span>
                         <span className="min-w-0 flex-1">
                           <span className="block text-[13px] leading-snug text-primary/80 group-hover:text-primary">{stage.title}</span>
-                          <span className="mt-1.5 block text-[10px] text-white/45">{stage.id === currentId ? "当前阶段 · " : ""}{stage.finished ? "已兑现" : STATUS_LABELS[stage.status] ?? stage.status} · {stage.progress.settled}/{stage.progress.total}</span>
+                          <span className="mt-1.5 block text-[10px] text-white/45">{stage.id === currentId ? "当前阶段 · " : ""}{stageStatusLabel(stage)} · {stage.progress.settled}/{stage.progress.total}</span>
                         </span>
                         <ChevronRight className="mt-1 size-3.5 shrink-0 text-white/25 group-hover:text-white/70" aria-hidden="true" />
                       </button>
                     </li>
                   ))}
                 </ol>
-                <PlanManagement key={planId} planId={planId} onChanged={load} />
+                <PlanManagement key={planId} planId={planId} tree={tree} onChanged={load} />
               </div>
             ) : selectedStage ? (
               <>
