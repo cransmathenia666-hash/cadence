@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -15,7 +16,8 @@ from pathlib import Path
 
 # app/db.py -> app -> backend -> 项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = PROJECT_ROOT / "data" / "cadence.db"
+# 默认仍是真实库；CADENCE_DB_PATH 只给演示/录制等隔离场景换库（2026-10-02 黑客松交付）。
+DB_PATH = Path(os.environ.get("CADENCE_DB_PATH") or (PROJECT_ROOT / "data" / "cadence.db"))
 SCHEMA_PATH = PROJECT_ROOT / "backend" / "sql" / "schema.sql"
 
 
