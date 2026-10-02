@@ -4,6 +4,8 @@
 
 按依赖顺序排列，不按重要性。每个任务能在一次专注里做完，都带验收与验证方式。
 
+**v0.17 变更（2026-10-01）**：用户已授权“成果闭环”重构文档同步，新增 OC/KB 施工任务，统一标为**待实现/施工中**。前面带 `[x]` 的 T23/T24/T26 等记录仍是既有流程的历史证据，不代表成果契约、证据/review、规划会话或知识库 v2 已完成；新流程按 **P1 → P2 → P5** 施工。
+
 **v0.16 变更（2026-09-29）**：**P4 触达兜底落地（T15–T17）**——`notify` 接口（SMTP 邮件实现 + 空实现）、每周检查点 job（`--dry-run`、补发、按 U2 第四节降频、接上记忆周扫描的定时入口）、四个只读 Markdown 的单向导出；界面按用户 2026-09-29 的拍板**融入设置页**（新增「每周提醒」一节），不新开页面。新增一张极小的键值表 `app_setting`（放「界面能拧、后端要用」的开关与收件邮箱；密钥仍按 SPEC 第 16 节放 `.env`）。SPEC 第 11 节补三条契约行、第 13 节结构树补 `export.py`。
 
 **v0.15 变更（2026-09-21）**：新增并完成 P3.9 记忆系统（T38–T41）——用户给出方案 `docs/记忆系统.md` 并要求照它开发：三层记忆（工作 / 经历 / 长期）、记忆候选进收件箱由人裁定、扫描只产候选、到期复核、彻底删除要能证明清干净。规格落 **SPEC 决策 42**（另补第 10 节两条调用纪律与第 11 节十一条契约行），新增三张表（`plan_memory` / `memory_evidence` / `memory_scan`）与一张墓碑表，`profile_item` 加三列可空元数据。
@@ -23,6 +25,8 @@
 **v0.8 变更（2026-09-18）**：T25/T26 补入「实现要点」（反馈流水的上限与位置、追问槽位形状、对话轮数与历史存储、蓝图 payload、树=版本的取代语义、勾选部分采纳后剩余处理）——SPEC 决策 6/35/36 同步写死，新窗口可照做无需再问。
 
 **v0.7 变更（2026-09-17）**：新增 P3.5 一节（排在 P4 之前）——T23 任务层与交付物验收（三级结构，**取代 T4 定下的旧完成判定**：阶段完成＝周检查点全部收尾 → 任务全打勾/跳过 + 交付物已提交）、T24 多计划与严格分开、T25 「找」的加宽、T26 对话式规划与蓝图。对应 SPEC 决策 30–36。
+
+> **历史记录说明（2026-10-01）**：上面已完成的 T23/T24/T26 等条目记录的是既有流程的实现证据；成果闭环重构已授权后，P1 的新契约/证据/review 门槛、P2 的 planning_session/蓝图批准建树和 P5 的知识库受限读取均另列为未勾选施工任务，不覆盖或删除历史记录。
 
 **v0.6 变更**：P3 补 T22（档案录入）——档案此前只有读、没有写入口，四问缺判据；用户 2026-09-16 点名要做，任务补记进清单。
 
@@ -327,9 +331,84 @@
   - Files：`backend/app/export.py`、`backend/tests/test_export.py`
   - 实施记录（2026-09-29）：四个写入函数都是「读库 → 排版 → 落盘」，**没有任何解析 Markdown 的代码**——这就是单向的落实；每个文件头两行写明「只读快照 · 改了会被下次导出覆盖」。周编号三处同源（`plan.week_key`：判定、文件名、通知记录）。落点默认仓库根 `exports/`（已在 .gitignore），可用 `CADENCE_EXPORT_DIR` 改（冒烟与测试都往临时目录写）。界面上的手动导出在 `/providers` 的「每周提醒」一节
 
-## P5 验收
+## P1 成果契约、证据与阶段验收（已实现 2026-10-01；桌面走查归用户）
 
-- [ ] **T18 两周试用与成功标准走查**
-  - Acceptance：SPEC 第 9 节成功标准 1–5 逐条通过，或记录未通过项与原因
-  - Verify：完成一次真实闭环（找 → 认同 → 计划 → 执行 → 报告 → 推进），并留存走查记录
+- [x] **OC-01 成果契约模型与版本服务**
+  - 实施记录（2026-10-01，E-73）：`outcome_contract`/`evidence_submission`/`stage_review` 三表进 schema.sql；`contract.py` 为唯一写入口（校验、稳定 id、版本激活、台账流水）；契约改版只逐阶段失效受影响阶段的当前验收（未受影响阶段保留 accepted），验收响应带条件/证据快照。全量 pytest 632 passed、隔离冒烟 20 步。
+  - Acceptance：新计划以成果契约为中心；契约含外部结果、价值、成功标准、2–5 条稳定 id 的验收条件、1–5 条稳定 id 的证据要求、约束、停止条件和版本；同一计划同时只有一条 active 契约，改版保留旧版本与历史验收。禁止前端自行生成条件 id。
+  - Verify：合法/缺必填/条件越界/重复 id/版本冲突单测；契约写入经领域服务和台账。
+  - Files：`backend/sql/schema.sql`、`backend/app/contract.py`（新）、`backend/app/plan.py`、`backend/tests/`
+
+- [x] **OC-02 证据提交与阶段 review**
+  - 实施记录（2026-10-01，E-73）：`/api/plan/nodes/{id}/evidence` 与 `/review` 落地；accepted 需必需条件全 met、必需证据齐、至少关联一条本阶段证据；重复验收幂等；证据提交/任务 done/报告 done 均不改验收状态；旧交付物转 kind=legacy 证据但不满足任何必需证据要求。
+  - Acceptance：新增 `/api/plan/nodes/{id}/evidence` 与 `/review`；证据提交只追加历史，不改阶段验收状态；用户逐条确认条件。`accepted` 必须有当前阶段证据、所有必需条件为 `met`、必需证据要求齐备；保存条件/证据快照、说明、时间和台账事件。任务 `done`、报告 `done`、贴链接或旧交付物提交均不等于阶段完成。旧 `deliverable_submission` 保留只读兼容，不自动转 accepted。
+  - Verify：只提交证据、条件 unknown/unmet、跨阶段证据、重复 review、重开失效与历史保留等路径；`pytest -q`，契约/台账写入变更时再跑 `tools\smoke_p1.py`。
+  - Files：`backend/sql/schema.sql`、`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/`
+
+- [x] **OC-03 计划完成/停止收尾门槛**
+  - 实施记录（2026-10-01，E-73）：outcome 收尾必须显式 `close_kind`；completed 须过 `plan_can_complete`（每阶段达标/跳过 + 契约必需条件全部被阶段承接并兑现，coverage 随树返回）；stopped 必写理由；legacy 不传 kind 走旧语义、显式 completed 被拒。
+  - Acceptance：v2 `close_kind=completed` 只在所有阶段已验收或跳过时通过；`stopped` 可提前停止但必须有停止理由，页面/台账/导出明确是停止而非成果完成。计划状态仍只有 `active / paused / closed / void`，不新增 `draft`；legacy 计划按旧判定兼容。
+  - Verify：未验收 completed 被拒、stopped 缺理由被拒、暂停/重开/作废语义不变；API 契约同步测试。
+  - Files：`backend/app/plan.py`、`backend/app/main.py`、`backend/tests/`
+
+- [x] **OC-04 legacy 双模式读取与明确升级**
+  - 实施记录（2026-10-01，E-73）：老库 additive migration、旧计划标 needs_review 不建空契约；`POST /api/plans/{id}/upgrade` 一次事务升级（每个现有阶段 include/skipped/history 处置、失败整体回滚、done 阶段也可裁定跳过）。已知小缺口：tools/smoke_p1.py 未含升级步骤（升级入口只有单测覆盖）。
+  - Acceptance：旧计划只增表/增列，不自动伪装 v2；不把旧目标猜成契约，不创建空 `NOT NULL` 契约，不把旧交付物/报告自动变成 accepted。升级必须由用户明确补契约、阶段条件映射和必要证据要求，事务失败不落半成品；新 API 返回升级所需状态。
+  - Verify：复制老库重复 `db.init`，确认历史可读、契约可为空且标记 needs_review、旧证据只读；升级成功/失败回滚路径。
+  - Files：`backend/app/db.py`、`backend/sql/schema.sql`、`backend/app/contract.py`、`backend/tests/`
+
+## P2 候选采纳进入规划、蓝图批准后建树（已实现 2026-10-02；桌面走查归用户）
+
+- [x] **OC-05 采纳候选改为 planning_session**
+  - Acceptance：采纳只标记 accepted 并进入独立 `planning_session`；新方向不建 draft 计划、不建阶段、不占 active 列表、不参与报告/落后量/收尾；已有计划落点需用户明确选择，计划结构不变。既有已采纳候选和旧阶段按 legacy 兼容读取。
+  - Verify：新方向、延续已有计划、冲突落点、重复采纳与规划会话状态单测；确认采纳回执不宣称已建阶段。
+  - Files：`backend/sql/schema.sql`、`backend/app/db.py`、`backend/app/advisor.py`、`backend/app/blueprint.py`、`backend/app/main.py`、`backend/tests/`
+  - 实施记录（2026-10-02，E-74/E-75）：planning_session 新表＋plan_chat.planning_session_id additive 迁移；decide_candidate 只标 accepted、记规划落点、开/挂会话（14 天滑动过期），不再建阶段；新方向无落点也可采纳；候选与落点由服务端从会话解析防串线，进过规划的候选走 legacy 形态被明确拦下；`POST /api/candidates/{id}/planning` 幂等开/挂会话并支持终态后「重新开始规划」（旧会话只读保留）。独立复核确认 6 项问题（嵌套事务 500、双会话互卡、终态无法再规划、落点未回填、legacy 绕开会话、v2 批到 legacy 计划绕过升级闸）均已修复，全量 679 passed、隔离冒烟 29 步。
+
+- [x] **OC-06 蓝图 v2 与成果契约提案**
+  - Acceptance：蓝图同时携带成果契约、阶段目的/承接、阶段验收条件、证据要求、任务和未勾选项；标准/增强模式都保留，增强模式审查失败不落提案、不静默降级；旧蓝图缺契约只读或明确拒绝，不能半猜。
+  - Verify：假模型覆盖契约缺失、条件/证据不完整、阶段未承接必需条件、增强审查员指出模糊/断裂/冲突、标准/增强失败路径。
+  - Files：`backend/app/blueprint.py`、`backend/app/llm.py`、`backend/tests/`
+  - 实施记录（2026-10-02，E-74/E-75）：v2 payload（version=2＋contract＋阶段带 purpose/why_now/acceptance_criteria/evidence_requirements/contract_criterion_ids）；契约复用 contract.validate，必需条件未被阶段承接不出蓝图；standard/enhanced 同形状、E-71 审查席保留；校验/审查失败不落提案、会话保持 active；v1 批准明确拒绝提示重新生成；退回入口 `POST /api/plan-chat/blueprint/{proposal_id}/return`（提案按 superseded 终态化、理由进台账、会话回 active）。
+
+- [x] **OC-07 蓝图批准原子建树与契约激活**
+  - Acceptance：用户必须逐条勾选阶段/任务并明确确认成果契约；批准后同一事务激活契约、创建新 active 计划或更新明确选择的已有计划、建立选中树、关闭 planning session、终结提案并写台账；任何失败不落半棵树。不自动改档案。
+  - Verify：部分勾选、重名、目标计划状态冲突、缺确认标记、事务回滚、历史 payload 可还原；API/OpenAPI 与前端类型同步。
+  - Files：`backend/app/proposals.py`、`backend/app/blueprint.py`、`backend/app/plan.py`、`backend/tests/`
+  - 实施记录（2026-10-02，E-74/E-75）：ProposalDecideIn 增 confirm_contract/contract_overrides/landing_mode；v2 批准必须显式确认契约（缺则 400 且提案保持 pending）；预检全只读（会话/归属/计划状态/重名/承接），同一 db.atomic 完成建或确认计划＋契约激活＋按勾选建树＋提案终态＋会话 converted＋台账，任一失败整体回滚；selected=None 整份采纳语义保留；批准快照（原稿/overrides/最终契约）可还原；continue_plan 拒绝无契约的 legacy 计划（须先走升级入口）；冒烟第 21–29 步覆盖升级与 P2 端到端。前端（E-75）：提案页 v2 契约摘要、确认勾选、契约正文 overrides 编辑与就地校验、退回入口；候选页会话化接线，lint 0 错、tsc 0。
+
+## P3 复盘回流（已授权、待实现）
+
+- [ ] **OC-08 报告复盘卡与明确调整意图**
+  - Acceptance：报告仍服务节奏，不直接完成阶段或写 accepted；返回确定性复盘卡（验收缺口、证据缺口、逾期/卡住信号与下一步选择）；只有用户明确要求调整时才进入计划对话并允许产生 plan_change/contract_change 提案，仍需用户批准。
+  - Verify：报告字段兼容、复盘卡规则、无明确意图不落提案、报告上下文可追溯；接口契约变更同步测试。
+  - Files：`backend/app/plan.py`、`backend/app/dialogue.py`、`backend/app/main.py`、`backend/tests/`
+
+## P5 知识库受限读取与档案候选（已授权、待实现）
+
+- [ ] **KB-01 根目录与文件安全层**
+  - Acceptance：只读本地配置的白名单根目录；模型/前端不能传绝对路径、`..`、符号链接逃逸或禁止扩展名；前端只见 alias/相对路径，不暴露绝对路径。知识库内容不直接创建计划、任务或修改档案。
+  - Verify：越界、绝对路径、符号链接、禁止文件和脱敏响应单测；只用临时目录。
+  - Files：`backend/app/knowledge_base.py`（新）、`backend/sql/schema.sql`、`backend/tests/`
+
+- [ ] **KB-02 受限读取循环与覆盖账**
+  - Acceptance：列目录/读文件在受限工具循环内完成，读取次数/单篇/总字符配额真实生效；文件变化、中断、模型失败或配额耗尽不得标记 covered；不把原文写入普通计划上下文或运行账。
+  - Verify：中断、额度、文件变化、重扫和部分成功路径；扫描失败不伪装成功。
+  - Files：`backend/app/knowledge_base.py`、`backend/app/agent_runtime.py`、`backend/sql/schema.sql`、`backend/tests/`
+
+- [ ] **KB-03 档案候选、出处校验与用户裁定**
+  - Acceptance：扫描只产 `profile_change` 档案候选；每条带相对路径、逐字摘录和范围，摘录找不到/重复/不确定时不落可批准候选；用户逐条裁定后才进入档案，不能由扫描直接写入计划或档案。现有批量批准仅适用于新增 + 用户明确陈述。
+  - Verify：假模型覆盖新增/取代/存疑、出处逐字校验、近似重复提示、完全重复拦截、批准后才可作为后续找方向/规划依据。
+  - Files：`backend/app/knowledge_base.py`、`backend/app/profile.py`、`backend/app/memory.py`、`backend/app/proposals.py`、`backend/tests/`
+
+- [ ] **KB-04 知识库扫描 API 与周期入口**
+  - Acceptance：手动扫描和周期扫描复用受限规则，运行账记录处理状态、额度、失败原因和候选数；扫描结果不是成功 HTTP 的伪装，失败不推进覆盖账。
+  - Verify：临时库 API、job dry-run 与失败回归；不得读取真实知识库。
+  - Files：`backend/app/main.py`、`backend/jobs/weekly_checkpoint.py`、`backend/tests/`
+
+## P6 真实使用与质量调参
+
+- [ ] **T18 两周试用与成果闭环走查**
+  - Acceptance：成果契约、候选→规划→蓝图→建树、证据→逐条验收、报告复盘、继续/调整/改道/停止和知识库候选裁定按 SPEC 成功标准逐条走查；未实现项记录原因，不把代码绿灯当成产品完成。
+  - Verify：至少 2–3 个不同性质目标，记录继续、调整、停止三种结局与证据。
   - Files：`docs/试用记录.md`
