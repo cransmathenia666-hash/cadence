@@ -118,6 +118,26 @@ export function ProposalCard({
   const nothingTicked = isBlueprint && selection.length === 0;
   const confirmMissing = blueprintV2 && !confirmContract;
   const contractDraftError = blueprintV2 ? contractDraftErrorOf(contractDraft) : null;
+  // 待确认清单（审查席 severity=confirm 的反对）：点「补充信息」时把它们摊开成逐条待答，
+  // 用户一眼看到要补什么，而不是对着一句泛泛的「为什么不批准」。
+  const pendingConfirmPoints = isBlueprint
+    ? (blueprintPayload.review?.reviewers ?? []).flatMap((reviewer) =>
+        reviewer.points
+          .filter((point) => point.stance === "disagree" && point.severity === "confirm")
+          .map((point) => ({ target: point.target, question: point.point })),
+      )
+    : [];
+  const pendingPrefill =
+    pendingConfirmPoints.length > 0
+      ? `待确认的问题（逐条补充你的实际情况）：\n${pendingConfirmPoints
+          .map((point, index) => `${index + 1}. ${point.question}（${point.target}）`)
+          .join("\n")}\n补充：`
+      : "";
+
+  function openReturn() {
+    setReturnOpen(true);
+    if (!returnReason.trim() && pendingPrefill) setReturnReason(pendingPrefill);
+  }
   const approveBlocked = nothingTicked || blueprintV1 || confirmMissing || contractDraftError !== null;
   const approveBlockedReason = blueprintV1
     ? "旧版蓝图（没有成果契约）不能直接批准——请在规划对话里重新生成 v2 蓝图后再来"
@@ -267,11 +287,26 @@ export function ProposalCard({
         {canReturnToPlanning && returnOpen && (
           <div className="mb-4 border-l border-amber-400/70 bg-amber-500/[0.06] px-4 py-3">
             <label htmlFor={`return-blueprint-${proposal.id}`} className="block text-[13px] font-medium text-white/85">
-              为什么先不批准这版蓝图？
+              {pendingConfirmPoints.length > 0
+                ? `把这 ${pendingConfirmPoints.length} 条待确认的事实补充进来`
+                : "为什么先不批准这版蓝图？"}
             </label>
             <p className="mt-1 text-[12px] leading-5 text-white/55">
-              写清缺少的事实或需要调整的地方；提交后会回到同一条规划对话，蓝图本身不再等待裁定。
+              {pendingConfirmPoints.length > 0
+                ? "下面是审查员在等你说清的事实；在预填的清单后逐条写你的实际情况，提交后回到同一条规划对话继续聊。"
+                : "写清缺少的事实或需要调整的地方；提交后会回到同一条规划对话，蓝图本身不再等待裁定。"}
             </p>
+            {pendingConfirmPoints.length > 0 && (
+              <ul className="mt-3 space-y-1.5 border-t border-amber-500/15 pt-3 text-[12px] leading-5 text-amber-100/85">
+                {pendingConfirmPoints.map((point, index) => (
+                  <li key={`${point.target}-${index}`}>
+                    <span className="mr-1.5 font-mono text-[11px] text-amber-200/70">{index + 1}.</span>
+                    {point.question}
+                    <span className="text-white/50">（{point.target}）</span>
+                  </li>
+                ))}
+              </ul>
+            )}
             <textarea
               id={`return-blueprint-${proposal.id}`}
               value={returnReason}
@@ -314,7 +349,7 @@ export function ProposalCard({
                     {canReturnToPlanning && !returnOpen && (
                       <button
                         type="button"
-                        onClick={() => setReturnOpen(true)}
+                        onClick={openReturn}
                         disabled={busy || returnPending}
                         className="inline-flex items-center gap-2 rounded-md border border-white/[0.12] px-4 py-2.5 text-[13px] font-medium text-white/75 transition-colors hover:border-white/[0.3] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70 disabled:opacity-50"
                       >
