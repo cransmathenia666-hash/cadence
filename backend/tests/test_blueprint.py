@@ -847,6 +847,37 @@ def test_enhanced_review_with_blank_reason_still_fails_closed(conn):
     assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
 
 
+def test_enhanced_confirm_points_carry_user_question(conn):
+    """待确认条目必须带一句直接问用户的问句：原样进 payload，退回表单拿它当「要补什么」。"""
+    make_provider(conn)
+    add_profile(conn)
+    confirm_point = {
+        "stance": "disagree",
+        "target": "第 1 阶段",
+        "point": "不应把已有可运行代码当作事实前提",
+        "reason": "档案只说在学命令行工具，没有可运行代码的证据",
+        "severity": "confirm",
+        "question": "你现在是否已有可运行的 Python 代码？",
+    }
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP")),
+        review_json(confirm_point),
+        review_json(summary="没有问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    row = conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()
+    level = json.loads(row["payload"])["review"]["reviewers"][0]
+    assert level["points"][0]["severity"] == "confirm"
+    assert level["points"][0]["question"] == "你现在是否已有可运行的 Python 代码？"
+    # 提示词里带 question 指令与例句：模型被明确要求写问句，而不是复述结论
+    reviewer_call = transport.seen[2]
+    assert any("question" in (message.get("content") or "") for message in reviewer_call["payload"]["messages"])
+
+
 def test_enhanced_revision_must_account_for_every_required_finding(conn):
     make_provider(conn)
     add_profile(conn)

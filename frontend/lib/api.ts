@@ -1527,9 +1527,11 @@ export type BlueprintReviewPoint = {
   target: string;
   point: string;
   reason: string;
-  /** 仅反对时有值：建议怎么调整（后端校验反对必填）。 */
+  /** 仅反对时有值：建议怎么调整（要求修改的反对必填）。 */
   adjustment: string;
   severity: "revise" | "confirm";
+  /** 仅待确认（confirm）条目：审查员留给用户的一句直接问句；旧稿没有就回退用 point。 */
+  question?: string;
 };
 
 /** 一位独立审查员的结论。增强模式固定两位（水平核对员／结构审查员），撞现有计划时再加系统检查。 */

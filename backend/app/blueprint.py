@@ -864,6 +864,9 @@ class ReviewPoint(BaseModel):
     reason: str = Field(min_length=1, max_length=400)
     adjustment: str = Field(default="", max_length=400)
     severity: Literal["revise", "confirm"] = "revise"
+    # 待确认（confirm）条目给用户的一句直接问句：问缺失的个人事实，不是结论复述。
+    # 退回规划对话的表单拿它当「要补什么」的清单；缺了不判不合格，前端回退用 point 正文。
+    question: str = Field(default="", max_length=200)
 
 
 class ReviewerReport(BaseModel):
@@ -1208,7 +1211,7 @@ def _normalize_review_data(data: Any) -> Any:
         severity = _SEVERITY_ALIASES.get(str(item.get("severity", "")).strip().lower())
         if severity is not None:
             item["severity"] = severity
-        for field in ("target", "point", "reason", "adjustment"):
+        for field in ("target", "point", "reason", "adjustment", "question"):
             if isinstance(item.get(field), str):
                 item[field] = str(item[field]).strip()
         cleaned.append(item)
@@ -1354,15 +1357,20 @@ def _review_messages(
         "反对：stance=disagree，point 写反对的具体点，reason 写依据（引用具体事实，"
         "或明确说缺了什么），adjustment 写清建议怎么调整。"
         "只有需要改动蓝图才能解决的反对标 severity=revise；缺少个人事实、需要用户确认的"
-        "标 severity=confirm。target 用可读的阶段/任务位置；引用档案时只摘与问题直接相关的"
+        "标 severity=confirm。severity=confirm 的条目**必须再写 question**：一句直接问用户的"
+        "问句，问的是缺失的那件个人事实（例：「你现在是否已有可运行的 Python 代码？」），"
+        "只问事实、不问偏好，也别把结论复述成问句——退回规划对话的表单拿它当「要补什么」的清单。"
+        "target 用可读的阶段/任务位置；引用档案时只摘与问题直接相关的"
         f"短事实，不复述整段私人内容或无关敏感细节。最多 {MAX_REVIEW_POINTS} 条，"
         "不把偏好差异当错误。"
         '输出形状固定为 {"summary":"一句总评","points":[{"stance":"agree 或 disagree",'
         '"target":"所审位置","point":"具体点","reason":"依据","adjustment":"建议怎么调整'
-        '（disagree 必填）","severity":"revise 或 confirm"}]}。',
+        '（disagree 必填）","severity":"revise 或 confirm","question":"仅 confirm：'
+        '直接问用户的一句问句"}]}。',
         '只输出形如：{"summary":"一句话结论","points":[{"stance":"agree|disagree",'
         '"target":"第 1 阶段 / 任务 2","point":"认可或反对的具体点","reason":"依据或缺少的事实",'
-        '"adjustment":"仅反对时：建议如何调整","severity":"revise|confirm"}]}。'
+        '"adjustment":"仅反对时：建议如何调整","severity":"revise|confirm",'
+        '"question":"仅 confirm：直接问用户的一句问句"}]}。'
         "没有想说的就 points 为空数组。",
     ]
     user = "\n\n".join(sections)

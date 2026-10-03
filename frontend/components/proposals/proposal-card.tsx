@@ -124,7 +124,11 @@ export function ProposalCard({
     ? (blueprintPayload.review?.reviewers ?? []).flatMap((reviewer) =>
         reviewer.points
           .filter((point) => point.stance === "disagree" && point.severity === "confirm")
-          .map((point) => ({ target: point.target, question: point.point })),
+          .map((point) => ({
+            target: point.target,
+            // 审查员留给用户的问句优先——它是「要补什么」的直接答案；旧稿没有就回退结论句。
+            question: (point.question ?? "").trim() || point.point,
+          })),
       )
     : [];
   const pendingPrefill =

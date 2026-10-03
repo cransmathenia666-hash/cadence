@@ -64,6 +64,12 @@ function ReviewPointRow({
         )}
       </div>
       <p className="text-[13px] leading-6 text-white/85">{point.point}</p>
+      {!agree && point.severity !== "revise" && (point.question ?? "").trim() && (
+        <p className="text-[12px] leading-5">
+          <span className="mr-1.5 text-[11px] font-medium text-white/70">问你</span>
+          <span className="font-medium text-amber-100/90">{point.question}</span>
+        </p>
+      )}
       {!agree && point.adjustment && (
         <p className="text-[12px] leading-5">
           <span className="mr-1.5 text-[11px] font-medium text-amber-200/80">建议调整</span>
