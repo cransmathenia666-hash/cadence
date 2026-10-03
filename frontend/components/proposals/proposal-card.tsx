@@ -118,23 +118,24 @@ export function ProposalCard({
   const nothingTicked = isBlueprint && selection.length === 0;
   const confirmMissing = blueprintV2 && !confirmContract;
   const contractDraftError = blueprintV2 ? contractDraftErrorOf(contractDraft) : null;
-  // 待确认清单（审查席 severity=confirm 的反对）：点「补充信息」时把它们摊开成逐条待答，
-  // 用户一眼看到要补什么，而不是对着一句泛泛的「为什么不批准」。
+  // 待确认清单（审查席 severity=confirm 的反对）：每条优先用模型写的问句——它回答
+  // 「要补什么」；旧稿没有问句字段就显示结论句，但**绝不把结论句复制进输入框**。
   const pendingConfirmPoints = isBlueprint
     ? (blueprintPayload.review?.reviewers ?? []).flatMap((reviewer) =>
         reviewer.points
           .filter((point) => point.stance === "disagree" && point.severity === "confirm")
           .map((point) => ({
             target: point.target,
-            // 审查员留给用户的问句优先——它是「要补什么」的直接答案；旧稿没有就回退结论句。
-            question: (point.question ?? "").trim() || point.point,
+            question: (point.question ?? "").trim(),
+            conclusion: point.point,
           })),
       )
     : [];
+  const pendingQuestions = pendingConfirmPoints.filter((point) => point.question !== "");
   const pendingPrefill =
-    pendingConfirmPoints.length > 0
-      ? `待确认的问题（逐条补充你的实际情况）：\n${pendingConfirmPoints
-          .map((point, index) => `${index + 1}. ${point.question}（${point.target}）`)
+    pendingQuestions.length > 0
+      ? `待确认的问题（逐条补充你的实际情况）：\n${pendingQuestions
+          .map((point, index) => `${index + 1}. ${point.question}`)
           .join("\n")}\n补充：`
       : "";
 
@@ -297,7 +298,9 @@ export function ProposalCard({
             </label>
             <p className="mt-1 text-[12px] leading-5 text-white/55">
               {pendingConfirmPoints.length > 0
-                ? "下面是审查员在等你说清的事实；在预填的清单后逐条写你的实际情况，提交后回到同一条规划对话继续聊。"
+                ? pendingQuestions.length > 0
+                  ? "下面是审查员留给你的问句；在预填清单后逐条写你的实际情况，提交后回到同一条规划对话继续聊。"
+                  : "这份蓝图生成于问句机制之前：下面是审查员的结论，按每一条用大白话补充实际情况即可。"
                 : "写清缺少的事实或需要调整的地方；提交后会回到同一条规划对话，蓝图本身不再等待裁定。"}
             </p>
             {pendingConfirmPoints.length > 0 && (
@@ -305,7 +308,12 @@ export function ProposalCard({
                 {pendingConfirmPoints.map((point, index) => (
                   <li key={`${point.target}-${index}`}>
                     <span className="mr-1.5 font-mono text-[11px] text-amber-200/70">{index + 1}.</span>
-                    {point.question}
+                    <span className={point.question !== "" ? "font-medium" : ""}>
+                      {point.question !== "" ? point.question : point.conclusion}
+                    </span>
+                    {point.question === "" && (
+                      <span className="ml-1 text-white/45">（旧稿没有问句）</span>
+                    )}
                     <span className="text-white/50">（{point.target}）</span>
                   </li>
                 ))}
