@@ -802,18 +802,41 @@ def test_enhanced_review_retries_once_when_first_output_is_broken(conn):
     assert "结构检查" in transport.seen[3]["payload"]["messages"][-1]["content"]
 
 
-def test_enhanced_disagreement_without_adjustment_fails_closed(conn):
+def test_enhanced_disagreement_without_adjustment_downgrades_to_confirm(conn):
+    """重试后仍只缺建议调整：降为待确认反对——意见保留、整稿保留、不触发修订。"""
     make_provider(conn)
     add_profile(conn)
+    bare = {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
     transport = ScriptedTransport(
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP")),
-        review_json(
-            {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
-        ),
-        review_json(
-            {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
-        ),  # 重试仍缺 adjustment：内容不合格不是结构问题能自愈的
+        review_json(bare),
+        review_json(bare),  # 重试仍缺 adjustment：触发降级而非整稿作废
+        review_json(summary="没有问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    row = conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()
+    payload = json.loads(row["payload"])
+    level = payload["review"]["reviewers"][0]
+    assert level["points"][0]["stance"] == "disagree"
+    assert level["points"][0]["severity"] == "confirm"
+    assert payload["review"]["initial"] is None  # 待确认反对不触发修订
+    assert created["calls"] == 4
+
+
+def test_enhanced_review_with_blank_reason_still_fails_closed(conn):
+    """缺调整建议之外的结构问题（空白依据）不降级：重试仍不合格就整稿不落。"""
+    make_provider(conn)
+    add_profile(conn)
+    blank = {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": " ", "adjustment": "拆成两阶段"}
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP")),
+        review_json(blank),
+        review_json(blank),
         review_json(summary="没有问题"),
     )
     candidate_id, _ = ready_thread(conn, transport=transport)

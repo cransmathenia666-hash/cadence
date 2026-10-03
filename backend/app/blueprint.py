@@ -1233,9 +1233,9 @@ def _check_review(text: str) -> tuple[ReviewerReport | None, str | None]:
         values = (point.target.strip(), point.point.strip(), point.reason.strip())
         if any(not value for value in values):
             return None, f"第 {index} 条意见有空白字段"
-        if point.stance == "disagree" and not point.adjustment.strip():
+        if point.stance == "disagree" and not point.adjustment.strip() and point.severity == "revise":
             return None, (
-                f"第 {index} 条是反对意见但没有写建议调整（adjustment）——"
+                f"第 {index} 条是要求修改的反对意见但没有写建议调整（adjustment）——"
                 "反对要说清怎么改，修订环节和用户都要按它对账"
             )
         if point.stance == "agree" and point.adjustment:
@@ -1247,6 +1247,47 @@ def _check_review(text: str) -> tuple[ReviewerReport | None, str | None]:
             return None, f"第 {index} 条意见重复了同一点"
         seen.add(key)
     return report, None
+
+
+def _relax_missing_adjustment(text: str) -> dict[str, Any] | None:
+    """重试后仍只缺「反对的建议调整」时，把该条降为待确认反对（severity=confirm）。
+
+    意见本身（反对哪点、依据）原样保留，只是不再触发自动修订——审查席上显示为
+    「待确认」，与缺个人事实的反对同一待遇；绝不替模型编一条调整建议。
+    还带任何其他结构问题（空白字段、非法立场、重复意见、摘要空白）就返回 None，
+    照旧 fail-closed 整稿不落。
+    """
+    data = advisor.extract_json(text)
+    if data is None:
+        return None
+    data = _normalize_review_data(data)
+    if not isinstance(data, dict):
+        return None
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    points = data.get("points")
+    if not isinstance(points, list) or not points:
+        return None
+    relaxed = False
+    seen: set[tuple[str, str, str]] = set()
+    for item in points:
+        if not isinstance(item, dict):
+            return None
+        stance = str(item.get("stance", "")).strip()
+        target = str(item.get("target", "")).strip()
+        point_text = str(item.get("point", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        if stance not in ("agree", "disagree") or not target or not point_text or not reason:
+            return None
+        key = (stance, target, point_text)
+        if key in seen:
+            return None
+        seen.add(key)
+        if stance == "disagree" and not str(item.get("adjustment") or "").strip():
+            item["severity"] = "confirm"
+            relaxed = True
+    return data if relaxed else None
 
 
 def _check_revision(
@@ -1576,6 +1617,12 @@ def generate_blueprint(
                     model=model,
                 )
                 report, problem = _check_review(review_raw)
+            if problem is not None or report is None:
+                # 第三层防线：只差「反对的建议调整」时降为待确认反对，保住整稿；
+                # 其余结构问题照旧 fail-closed。
+                relaxed = _relax_missing_adjustment(review_raw)
+                if relaxed is not None:
+                    report, problem = _check_review(json.dumps(relaxed, ensure_ascii=False))
             if problem is not None or report is None:
                 raise BlueprintError(
                     f"增强模式「{lens['name']}」的审查连着两次没通过结构检查"
