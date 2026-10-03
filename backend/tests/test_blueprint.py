@@ -293,7 +293,8 @@ def open_v1_proposal(conn, plan_id: int, candidate_id: int, *stages: dict) -> in
 
 def task_titles(conn, stage_id: int) -> list[str]:
     rows = conn.execute(
-        "SELECT title FROM plan_node WHERE parent_id = ? ORDER BY sort_order, id", (stage_id,)
+        "SELECT title FROM plan_node WHERE parent_id = ? AND level = 'task' ORDER BY sort_order, id",
+        (stage_id,),
     ).fetchall()
     return [str(row["title"]) for row in rows]
 
@@ -1015,6 +1016,14 @@ def test_build_tree_reuses_a_stage_and_overwrites_an_old_deliverable_with_a_note
     # 它没在计划里多建一个同名阶段
     assert len(plan.get_stages(conn, plan_id)) == 1
 
+    # 再次批准同一阶段（复用）：打卡已存在就跳过，不撞防重名闸、也不重复建
+    blueprint.build_tree(conn, payload)
+    checkpoint_rows = conn.execute(
+        "SELECT COUNT(*) AS n FROM plan_node WHERE parent_id = ? AND level = 'checkpoint'",
+        (stage_id,),
+    ).fetchone()
+    assert checkpoint_rows["n"] == 1
+
 
 def test_build_tree_with_no_selection_means_the_whole_blueprint(conn):
     candidate_id, plan_id = adopted_candidate(conn, title="学 HTTP")
@@ -1026,12 +1035,23 @@ def test_build_tree_with_no_selection_means_the_whole_blueprint(conn):
         stage("上线", deliverable="一个能访问的地址"),
     )
 
-    blueprint.build_tree(conn, payload)
+    built = blueprint.build_tree(conn, payload)
 
     assert stage_titles(conn, plan_id) == ["学 HTTP", "上线"]
     stages = plan.get_stages(conn, plan_id)
     assert task_titles(conn, int(stages[0]["id"])) == ["读 MDN"]
     assert stages[1]["deliverable"] == "一个能访问的地址"  # 新阶段的交付物真的写进去了
+    # 每个建出来的阶段自动配一个周打卡：报告（周报 → 复盘卡）挂在它上面
+    assert [item["title"] for item in built["checkpoints"]] == ["学 HTTP·周打卡", "上线·周打卡"]
+    for stage_row in stages:
+        checkpoint_titles = [
+            row["title"]
+            for row in conn.execute(
+                "SELECT title FROM plan_node WHERE parent_id = ? AND level = 'checkpoint'",
+                (int(stage_row["id"]),),
+            )
+        ]
+        assert checkpoint_titles == [f"{stage_row['title']}·周打卡"]
 
 
 def test_build_tree_a_ticked_stage_keeps_all_of_its_tasks(conn):

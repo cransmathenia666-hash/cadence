@@ -602,6 +602,20 @@ def apply(conn: sqlite3.Connection, change: ChangePlan) -> dict[str, Any]:
                 "parent_id": parent_id,
             }
         )
+        if node.level == "stage":
+            # 新阶段同款配一个周打卡（报告 → 复盘卡挂它）；不进回执 nodes——回执说的
+            # 是「这条建议建了什么」，打卡是建树的配套节奏节点。打卡排在建议任务之后；
+            # 阶段名在本计划唯一，打卡名不会撞防重名闸。
+            stage_task_count = sum(1 for other in change.nodes if other.level == "task")
+            plan.add_node(
+                conn,
+                change.plan_id,
+                "checkpoint",
+                f"{node.title}·周打卡",
+                parent_id=node_id,
+                sort_order=stage_task_count + 1,
+                actor="user",
+            )
     return {"nodes": created}
 
 # ---------- 契约修改建议（成果闭环 OC-09，方案 §4.3 / §5.1 / §6.6） ----------

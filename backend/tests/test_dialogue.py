@@ -849,7 +849,7 @@ def test_a_stage_can_be_added_together_with_its_tasks(conn):
         "开发日志上线",
     ]  # 新阶段仍排在最后
     children = conn.execute(
-        "SELECT * FROM plan_node WHERE parent_id = ? ORDER BY sort_order, id",
+        "SELECT * FROM plan_node WHERE parent_id = ? AND level = 'task' ORDER BY sort_order, id",
         (int(nodes[0]["id"]),),
     ).fetchall()
     assert [row["title"] for row in children] == [
@@ -857,6 +857,12 @@ def test_a_stage_can_be_added_together_with_its_tasks(conn):
         "录一条两账号数据互不可见的屏",
     ]
     assert children[1]["due_date"] == "2026-10-02"
+    # 新阶段自动配一个周打卡（报告 → 复盘卡挂它），不占建议回执的 nodes
+    checkpoint = conn.execute(
+        "SELECT title FROM plan_node WHERE parent_id = ? AND level = 'checkpoint'",
+        (int(nodes[0]["id"]),),
+    ).fetchone()
+    assert checkpoint is not None and checkpoint["title"] == "开发日志上线·周打卡"
 
 
 def test_too_many_tasks_in_one_suggestion_is_refused(conn):

@@ -186,9 +186,16 @@ def test_atomic_approval_new_plan_creates_plan_contract_tree_and_closes_session(
     assert json.loads(stage_row["contract_criterion_ids"]) == ["oc-1"]
     assert int(stage_row["contract_id"]) == int(active["id"])
     tasks = conn.execute(
-        "SELECT title FROM plan_node WHERE parent_id = ? ORDER BY sort_order", (stage_row["id"],)
+        "SELECT title FROM plan_node WHERE parent_id = ? AND level = 'task' ORDER BY sort_order",
+        (stage_row["id"],),
     ).fetchall()
     assert [str(row["title"]) for row in tasks] == ["读 MDN", "写一个接口"]
+    # ③' 蓝图批准建的每个阶段自动配一个周打卡（报告 → 复盘卡挂它）
+    checkpoint = conn.execute(
+        "SELECT title FROM plan_node WHERE parent_id = ? AND level = 'checkpoint'",
+        (stage_row["id"],),
+    ).fetchone()
+    assert checkpoint is not None and checkpoint["title"] == "学 HTTP·周打卡"
     # ④ 会话 converted（终态）
     session = advisor.get_planning_session(conn, ctx["session_id"])
     assert session["status"] == "converted" and session["closed_at"] is not None
@@ -272,9 +279,10 @@ def test_approval_reusing_a_same_title_stage_succeeds_and_writes_v2_fields(conn,
     assert json.loads(reused["acceptance_criteria"])[0]["text"] == "交出该阶段可验收的结果"
     assert json.loads(reused["contract_criterion_ids"]) == ["oc-1"]
     assert int(reused["contract_id"]) == int(result["contract_id"])  # 绑到本次激活的契约
-    # 任务照建（两件）
+    # 任务照建（两件）；复用阶段此前没有打卡时也会补上
     tasks = conn.execute(
-        "SELECT title FROM plan_node WHERE parent_id = ? ORDER BY sort_order", (existing_stage,)
+        "SELECT title FROM plan_node WHERE parent_id = ? AND level = 'task' ORDER BY sort_order",
+        (existing_stage,),
     ).fetchall()
     assert [str(row["title"]) for row in tasks] == ["读 MDN", "写一个接口"]
     # 复用字段更新走了台账流水

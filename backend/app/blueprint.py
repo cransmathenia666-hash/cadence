@@ -2401,6 +2401,7 @@ def apply_build(
     """
     created_stages: list[dict[str, Any]] = []
     created_tasks: list[dict[str, Any]] = []
+    created_checkpoints: list[dict[str, Any]] = []
     notes: list[str] = []
     # 契约承接 id 只有成果流程的计划才绑（旧流程的阶段没有契约可引用）——
     # 批准事务里契约已先激活（outcome），build_tree 直测的 legacy 计划则跳过
@@ -2468,7 +2469,35 @@ def apply_build(
                 actor="user",
             )
             created_tasks.append({"id": node_id, "title": title, "stage_id": stage_id})
-    return {"plan_id": plan_id, "stages": created_stages, "tasks": created_tasks, "notes": notes}
+        # 每个建出来的阶段配一个周打卡：报告（周报 → 复盘卡）必须挂在它上面，
+        # 蓝图批准建的树此前只有阶段和任务，报告页对这类计划永远「0 个检查点」。
+        # 复用的阶段已有打卡就跳过——重复批准同一阶段不能撞防重名闸。
+        has_checkpoint = conn.execute(
+            "SELECT 1 FROM plan_node WHERE parent_id = ? AND level = 'checkpoint'"
+            " AND superseded_by IS NULL LIMIT 1",
+            (stage_id,),
+        ).fetchone()
+        if has_checkpoint is None:
+            checkpoint_title = f"{build.title}·周打卡"
+            checkpoint_id = plan.add_node(
+                conn,
+                plan_id,
+                "checkpoint",
+                checkpoint_title,
+                parent_id=stage_id,
+                sort_order=len(build.tasks) + 1,
+                actor="user",
+            )
+            created_checkpoints.append(
+                {"id": checkpoint_id, "title": checkpoint_title, "stage_id": stage_id}
+            )
+    return {
+        "plan_id": plan_id,
+        "stages": created_stages,
+        "tasks": created_tasks,
+        "checkpoints": created_checkpoints,
+        "notes": notes,
+    }
 
 
 def _reuse_field_updates(
