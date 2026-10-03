@@ -58,6 +58,7 @@ export function ChatInput({
         >
           <textarea
             ref={textareaRef}
+            data-rec="work-chat-input"
             value={value}
             onChange={(e) => {
               onChange(e.target.value);

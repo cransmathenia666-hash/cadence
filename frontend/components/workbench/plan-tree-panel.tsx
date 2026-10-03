@@ -449,7 +449,7 @@ function StageChapter({
             <h3 className="text-[10px] font-medium tracking-[0.2em] text-white/45">01 / 证据</h3>
             <p className="mt-1 text-[11px] text-white/40">提交证据不会自动完成阶段。</p>
           </div>
-          <button type="button" onClick={() => { setFormOpen(!formOpen); setDoneNote(null); setError(null); }} aria-expanded={formOpen} className="inline-flex items-center gap-1.5 text-[11px] text-primary/80 underline decoration-white/25 underline-offset-4 transition-colors hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">
+          <button type="button" data-rec="evidence-toggle" onClick={() => { setFormOpen(!formOpen); setDoneNote(null); setError(null); }} aria-expanded={formOpen} className="inline-flex items-center gap-1.5 text-[11px] text-primary/80 underline decoration-white/25 underline-offset-4 transition-colors hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">
             <Upload className="size-3" />{formOpen ? "返回证据" : "提交证据"}
           </button>
         </div>
@@ -459,7 +459,7 @@ function StageChapter({
           <label className="text-[11px] text-white/55">证据说明（必填）<input value={note} onChange={(e) => setNote(e.target.value)} placeholder="它证明了什么、应该看哪里" className={cn(FIELD_INPUT, "mt-1.5 rounded-sm")} /></label>
           {error && <p role="alert" className="text-[11px] text-red-300">{error}</p>}
           <div className="flex items-center gap-2">
-            <button type="button" onClick={submit} disabled={!canSubmit} className="inline-flex items-center gap-1 rounded-sm bg-white px-3 py-1.5 text-[11px] font-medium text-black disabled:opacity-40">
+            <button type="button" data-rec="evidence-submit" onClick={submit} disabled={!canSubmit} className="inline-flex items-center gap-1 rounded-sm bg-white px-3 py-1.5 text-[11px] font-medium text-black disabled:opacity-40">
               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
               提交证据
             </button>

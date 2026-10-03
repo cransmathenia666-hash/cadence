@@ -817,6 +817,7 @@ export function ChatBox({
       <div className="absolute bottom-4 left-4 right-4 bg-surface2/90 backdrop-blur-md rounded-2xl border border-white/[0.04] p-1.5 flex items-end shadow-lg group-focus-within/chatbox:border-white/[0.15] transition-colors z-10">
         <textarea
           ref={textareaRef}
+          data-rec="plan-chat-input"
           aria-label={isClarifyMode ? "回答追问" : view ? "补充规划要求" : "继续这段探索"}
           value={isClarifyMode ? clarifyText : text}
           onChange={(event) => {
@@ -879,6 +880,7 @@ export function ChatBox({
                       aria-checked={active}
                       title={MODE_HINTS[mode]}
                       disabled={busy}
+                      data-rec={`mode-${mode}`}
                       onClick={() => setBlueprintMode(mode)}
                       className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 ${
                         active
@@ -904,6 +906,7 @@ export function ChatBox({
                   });
                 }}
                 disabled={busy || composerLocked}
+                data-rec="generate-blueprint"
                 className="px-4 py-2.5 bg-green/10 text-green hover:bg-green/20 rounded-xl transition-colors text-[13px] font-medium disabled:opacity-50 disabled:bg-transparent"
                 title="意向达成，生成蓝图"
               >

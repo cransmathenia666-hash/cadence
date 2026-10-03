@@ -67,6 +67,7 @@ export function StageReviewSection({
         </div>
         <button
           type="button"
+          data-rec="review-open"
           onClick={onOpen}
           disabled={stage.status === "skipped"}
           className="shrink-0 border-b border-white/25 py-1 text-[11px] text-primary/80 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"

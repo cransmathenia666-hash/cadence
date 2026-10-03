@@ -157,6 +157,7 @@ function SuggestionCard({
           <button
             onClick={() => handleDecide(true)}
             disabled={loading}
+            data-rec="suggestion-confirm"
             className="inline-flex flex-1 items-center justify-center gap-2 rounded-full bg-white px-5 py-2.5 text-[15px] font-medium text-black transition-colors hover:bg-white/85 disabled:opacity-50"
           >
             <Check className="w-3.5 h-3.5" />

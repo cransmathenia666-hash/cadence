@@ -337,6 +337,7 @@ export function CandidateCard({
                     <button
                       onClick={handleAdoptClick}
                       disabled={verdicting}
+                      data-rec="adopt"
                       className={`bg-white px-5 py-2 text-[13px] font-medium text-black transition-colors hover:bg-gray-200 disabled:opacity-50 ${isDossier ? "rounded-sm" : "rounded-full"}`}
                     >
                       <ActionSwapRollText value={adoptSwapValue}>{adoptLabel}</ActionSwapRollText>

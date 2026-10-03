@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   extractProfileProposals,
   getPlanDialogue,
@@ -52,11 +53,12 @@ export function WorkbenchChat() {
   const [treeVersion, setTreeVersion] = useState(0);
   // P3 复盘回流：从 /report 的复盘卡跳过来时 URL 带 report_id——下一句对话带上它
   // （报告原文＋复盘卡进本轮上下文），发过一次就消费掉，不反复粘。
-  const [pendingReportId, setPendingReportId] = useState<number | null>(() => {
-    if (typeof window === "undefined") return null;
-    const raw = new URLSearchParams(window.location.search).get("report_id");
-    return raw !== null && /^[1-9]\d*$/.test(raw) ? Number(raw) : null;
-  });
+  // 用 useSearchParams 反应式读取：直接进页与 SPA 点链接两种导航都能拿到。
+  const reportParam = useSearchParams().get("report_id");
+  const [pendingReportId, setPendingReportId] = useState<number | null>(null);
+  useEffect(() => {
+    setPendingReportId(reportParam !== null && /^[1-9]\d*$/.test(reportParam) ? Number(reportParam) : null);
+  }, [reportParam]);
 
   // 操作回执走右下角 toast；错误例外——不许被动画带走，仍留在输入框上方
   const [toasts, setToasts] = useState<ToastData[]>([]);
