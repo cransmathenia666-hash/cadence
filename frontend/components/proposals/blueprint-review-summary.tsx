@@ -156,6 +156,12 @@ export function BlueprintReviewPanel({ review }: { review: BlueprintReview }) {
   const objecting = reviewers.filter((reviewer) => reviewer.stance === "disagree").length;
   const hasAudit = review.revision_resolution.length > 0 || review.initial != null;
   const singleCard = reviewers.length === 1;
+  // 待确认条数：缺的是只有用户知道的个人事实——它是「该去补信息」的信号，不只是个标签。
+  const pendingCount = reviewers.reduce(
+    (total, reviewer) =>
+      total + reviewer.points.filter((point) => point.stance === "disagree" && point.severity === "confirm").length,
+    0,
+  );
   const gridClass =
     reviewers.length === 2
       ? "grid gap-3 md:grid-cols-2"
@@ -182,6 +188,21 @@ export function BlueprintReviewPanel({ review }: { review: BlueprintReview }) {
               : `${reviewers.length} 位审查员独立复核，均无异议`}
         </p>
       </div>
+
+      {pendingCount > 0 && (
+        <div
+          role="note"
+          className="rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3"
+        >
+          <p className="text-[13px] font-medium text-amber-200/90">
+            有 {pendingCount} 条待确认：缺的是只有你知道的个人事实，模型不会替你编答案。
+          </p>
+          <p className="mt-1.5 text-[12px] leading-5 text-white/70">
+            最稳的做法是点本页下方的「补充信息，回规划对话」——这几条事实在原来的对话里补上后重新生成蓝图；
+            如果你确认这些点按现状成立，也可以直接批准，后果由你心里有数地接受。
+          </p>
+        </div>
+      )}
 
       {singleCard ? (
         /* 单审查员（旧版稿兜底）：不套卡片——身份与总评占一行，意见铺成横向网格。
