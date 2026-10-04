@@ -823,12 +823,12 @@ export function ChatBox({
             </ThinkingShimmer>
           </div>
           {!view && (
-            <p className="mt-1.5 text-[11px] leading-snug text-muted/70">
+            <p className="mt-1.5 text-[11px] leading-snug text-muted/75">
               这次寻找会参考你的长期档案；想补充就先去「档案」页加几条，下一次寻找就会带上
             </p>
           )}
           {view && pendingMode === "enhanced" && (
-            <p className="mt-1.5 text-[11px] leading-snug text-muted/70">
+            <p className="mt-1.5 text-[11px] leading-snug text-muted/75">
               增强整段比标准慢一些，通常要几分钟到十几分钟。
             </p>
           )}
