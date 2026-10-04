@@ -516,7 +516,7 @@ def test_parse_reply_prefers_tool_call_arguments():
 # ---------- 拉远端模型列表（添加接入时的自动补全） ----------
 
 def test_fetch_models_lists_ids_sorted(monkeypatch):
-    """从 OpenAI 兼容的 GET /models 里取 id 列表，排序返回。"""
+    """哑列表（只有 id）也照常工作：排序返回，不带任何编造的参数。"""
     import app.llm as llm_module
 
     def fake_get(url, headers, timeout=20.0):
@@ -525,7 +525,32 @@ def test_fetch_models_lists_ids_sorted(monkeypatch):
         return {"data": [{"id": "zeta"}, {"id": "alpha"}, {"nope": 1}, "junk"]}
 
     monkeypatch.setattr(llm_module, "_get_json", fake_get)
-    assert llm.fetch_models("http://127.0.0.1:9999/v1/", FAKE_KEY) == ["alpha", "zeta"]
+    assert llm.fetch_models("http://127.0.0.1:9999/v1/", FAKE_KEY) == [
+        {"id": "alpha"}, {"id": "zeta"},
+    ]
+
+
+def test_fetch_models_extracts_upstream_metadata(monkeypatch):
+    """上游带了参数就原样提取：窗口 / 输出上限 / 图片模态 / 推理支持。"""
+    import app.llm as llm_module
+
+    def fake_get(url, headers, timeout=20.0):
+        return {"data": [{
+            "id": "grand/model",
+            "context_length": 204800,
+            "max_completion_tokens": 8192,
+            "architecture": {"input_modalities": ["text", "image"]},
+            "supported_parameters": ["temperature", "reasoning_effort"],
+        }]}
+
+    monkeypatch.setattr(llm_module, "_get_json", fake_get)
+    assert llm.fetch_models("http://127.0.0.1:9999/v1") == [{
+        "id": "grand/model",
+        "context_window": 204800,
+        "max_output_tokens": 8192,
+        "supports_images": True,
+        "supports_reasoning": True,
+    }]
 
 
 def test_fetch_models_without_key_sends_no_auth_header(monkeypatch):

@@ -650,14 +650,23 @@ export async function updateProvider(providerId: number, patch: ProviderPatch): 
   });
 }
 
+/** 一条模型条目：id 之外，上游带多少参数就给多少（没有的字段不出现）。 */
+export type ModelInfo = {
+  id: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_images?: boolean;
+  supports_reasoning?: boolean;
+};
+
 /** 拉一家的可选模型列表（OpenAI 兼容 `GET /models`，走后端代理——浏览器直连会被 CORS 挡）。
  * 编辑已有接入时不用回填密钥：传 `providerId`，后端用库里那把钥匙。 */
 export async function fetchProviderModels(input: {
   baseUrl: string;
   apiKey?: string;
   providerId?: number;
-}): Promise<string[]> {
-  const data = await request<{ models: string[] }>("/api/providers/models", {
+}): Promise<ModelInfo[]> {
+  const data = await request<{ models: ModelInfo[] }>("/api/providers/models", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

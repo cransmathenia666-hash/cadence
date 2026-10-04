@@ -171,11 +171,14 @@ def _get_json(url: str, headers: dict[str, str], timeout: float = CONNECTIVITY_T
         raise LlmError(f"上游返回 {error.code}：{body[:200]}") from error
 
 
-def fetch_models(base_url: str, api_key: str | None = None) -> list[str]:
+def fetch_models(base_url: str, api_key: str | None = None) -> list[dict[str, Any]]:
     """拉一家的可选模型列表（OpenAI 兼容的 `GET /models`）。
 
-    给「添加接入」的自动补全用：填好地址和密钥就能把模型标识列出来挑一个，
-    不用去翻文档。返回排序后的模型 id；地址为空或返回看不懂都报人话错误。
+    给「添加接入」的自动补全用：填好地址和密钥就能把模型列出来挑一个，不用翻文档。
+    除了 id，**上游带多少参数就原样提取多少**（OpenRouter 这类聚合器会给出窗口长度、
+    图片模态、是否支持推理参数）：`context_length` → 窗口，`max_completion_tokens` →
+    输出上限，`architecture.input_modalities` 含 image → 图片，`supported_parameters`
+    含 reasoning → 支持思考。只认 id 的哑列表也照常工作，只是没有这些附加信息。
     """
     base = str(base_url or "").strip().rstrip("/")
     if not base:
@@ -184,8 +187,31 @@ def fetch_models(base_url: str, api_key: str | None = None) -> list[str]:
     body = _get_json(f"{base}/models", headers)
     if not isinstance(body, dict) or not isinstance(body.get("data"), list):
         raise LlmError(f"上游返回里没有模型列表（data 字段）：{str(body)[:200]}")
-    ids = [item.get("id") for item in body["data"] if isinstance(item, dict) and item.get("id")]
-    return sorted(ids)
+
+    def _positive_int(value: Any) -> int | None:
+        return value if isinstance(value, int) and value > 0 else None
+
+    models: list[dict[str, Any]] = []
+    for item in body["data"]:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        entry: dict[str, Any] = {"id": str(item["id"])}
+        window = _positive_int(item.get("context_length") or item.get("context_window"))
+        if window:
+            entry["context_window"] = window
+        max_out = _positive_int(item.get("max_completion_tokens") or item.get("max_output_tokens"))
+        if max_out:
+            entry["max_output_tokens"] = max_out
+        modalities = ((item.get("architecture") or {}).get("input_modalities")) or []
+        if isinstance(modalities, list) and "image" in modalities:
+            entry["supports_images"] = True
+        parameters = item.get("supported_parameters") or []
+        if isinstance(parameters, list) and any(
+            p in ("reasoning_effort", "reasoning") for p in parameters if isinstance(p, str)
+        ):
+            entry["supports_reasoning"] = True
+        models.append(entry)
+    return sorted(models, key=lambda entry: entry["id"])
 
 
 def public_provider(row: sqlite3.Row) -> dict[str, Any]:
