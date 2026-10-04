@@ -77,6 +77,84 @@ def mask_key(api_key: str | None) -> str | None:
     return f"****{api_key[-4:]}"
 
 
+# ---------- 模型设置（每家接入一份，作用于它的默认模型） ----------
+
+# 思考程度的合法取值。取 OpenAI 兼容层 `reasoning_effort` 的写法；各家私有开关
+# （比如 GLM 的 thinking）不在标准形状里，走 `extra_body` 那个口子。
+REASONING_EFFORTS = ("off", "minimal", "low", "medium", "high")
+
+
+def _validate_settings(
+    *,
+    reasoning_effort: Any = None,
+    temperature: Any = None,
+    max_output_tokens: Any = None,
+    context_window: Any = None,
+    extra_body: Any = None,
+) -> dict[str, Any]:
+    """校验一组模型设置，返回可直接写库的值（键 = 列名）。
+
+    非法值要在这里报人话错误，不能等调用那天上游回一个莫名的 400。
+    """
+    settings: dict[str, Any] = {}
+    if reasoning_effort is not None:
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise LlmError(
+                f"思考程度只能是 {'/'.join(REASONING_EFFORTS)}，收到的是「{reasoning_effort}」"
+            )
+        settings["reasoning_effort"] = reasoning_effort
+    if temperature is not None:
+        value = float(temperature)
+        if not 0 <= value <= 2:
+            raise LlmError("温度要在 0 到 2 之间（留空表示不指定，用上游默认）")
+        settings["temperature"] = value
+    if max_output_tokens is not None:
+        value = int(max_output_tokens)
+        if value <= 0:
+            raise LlmError("输出上限要是一个正整数（留空表示不设限）")
+        settings["max_output_tokens"] = value
+    if context_window is not None:
+        value = int(context_window)
+        if value <= 0:
+            raise LlmError("上下文窗口要是一个正整数（留空表示未记录）")
+        settings["context_window"] = value
+    if extra_body is not None:
+        settings["extra_body"] = _parse_extra_body(extra_body)
+    return settings
+
+
+def _parse_extra_body(extra_body: Any) -> str:
+    """附加请求体必须是「一个 JSON 对象」——原样入库，调用那天再并入载荷。"""
+    try:
+        parsed = json.loads(extra_body) if isinstance(extra_body, str) else extra_body
+    except (TypeError, ValueError) as cause:
+        raise LlmError(f"附加请求体不是合法 JSON：{cause}") from cause
+    if not isinstance(parsed, dict):
+        raise LlmError('附加请求体要是一个 JSON 对象，比如 {"thinking": {"type": "enabled"}}')
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _call_settings(provider: sqlite3.Row) -> dict[str, Any]:
+    """把一行的设置并进请求载荷。没设置的（NULL）一律不带，保持上游默认。
+
+    `extra_body` 最后并入：它是给「这家有私有开关」留的口子，允许覆盖上面的
+    标准字段——写错了是配置者的责任，但至少要能写得出来。
+    """
+    payload: dict[str, Any] = {}
+    if provider["temperature"] is not None:
+        payload["temperature"] = provider["temperature"]
+    if provider["max_output_tokens"] is not None:
+        payload["max_tokens"] = provider["max_output_tokens"]
+    if provider["reasoning_effort"]:
+        payload["reasoning_effort"] = provider["reasoning_effort"]
+    if provider["extra_body"]:
+        try:
+            payload.update(json.loads(provider["extra_body"]))
+        except ValueError as cause:  # 入库时都过了校验，这里只为不炸出裸异常
+            raise LlmError(f"附加请求体不是合法 JSON：{cause}") from cause
+    return payload
+
+
 def public_provider(row: sqlite3.Row) -> dict[str, Any]:
     """把一行 provider 变成可以给前端的形状——**这里绝不包含明文密钥**。"""
     return {
@@ -88,6 +166,13 @@ def public_provider(row: sqlite3.Row) -> dict[str, Any]:
         "enabled": bool(row["enabled"]),
         "has_api_key": bool(row["api_key"]),
         "api_key_masked": mask_key(row["api_key"]),
+        "reasoning_effort": row["reasoning_effort"],
+        "temperature": row["temperature"],
+        "max_output_tokens": row["max_output_tokens"],
+        "context_window": row["context_window"],
+        "supports_web_search": bool(row["supports_web_search"]),
+        "supports_images": bool(row["supports_images"]),
+        "extra_body": row["extra_body"],
         "created_at": row["created_at"],
     }
 
@@ -112,16 +197,30 @@ def create_provider(
     base_url: str | None = None,
     api_key: str | None = None,
     default_model: str | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> int:
-    """新增一家 provider。名称唯一，重名要让调用方看到明确错误而不是 500。"""
+    """新增一家 provider。名称唯一，重名要让调用方看到明确错误而不是 500。
+
+    `settings` 是过完 `_validate_settings` 的模型设置（建家时一次性给齐）。
+    """
     if not str(name or "").strip():
         raise LlmError("provider 名称不能为空")
+    merged = {**(settings or {})}
     try:
         cursor = conn.execute(
             "INSERT INTO llm_provider"
-            " (name, base_url, api_key, default_model, is_default, enabled, created_at)"
-            " VALUES (?, ?, ?, ?, 0, 1, ?)",
-            (str(name).strip(), base_url, api_key, default_model, now_iso()),
+            " (name, base_url, api_key, default_model, is_default, enabled, created_at,"
+            "  reasoning_effort, temperature, max_output_tokens, context_window,"
+            "  supports_web_search, supports_images, extra_body)"
+            " VALUES (?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(name).strip(), base_url, api_key, default_model, now_iso(),
+                merged.get("reasoning_effort"), merged.get("temperature"),
+                merged.get("max_output_tokens"), merged.get("context_window"),
+                int(merged.get("supports_web_search", 0)),
+                int(merged.get("supports_images", 0)),
+                merged.get("extra_body"),
+            ),
         )
     except sqlite3.IntegrityError as error:
         raise DuplicateProvider(f"已经有一家叫「{name}」的 provider 了") from error
@@ -139,11 +238,16 @@ def update_provider(
     default_model: str | None = None,
     enabled: bool | None = None,
     set_as_default: bool = False,
+    settings: dict[str, Any] | None = None,
 ) -> None:
     """改一家 provider。
 
     `api_key` **只有显式传了非空值才动**：界面回填不了密钥（我们只给它掩码），
     如果"没传就当成清空"，你改个名字就会顺手把钥匙擦掉。
+
+    `settings` 是过完 `_validate_settings` 的模型设置（键 = 列名）。**传了就把整块
+    按给的值写**（None 表示清掉这个设置），没传（None 哨兵之外的判断在路由层做好）
+    就不动——模型设置不是密钥，清空是正当操作。
     """
     if get_provider(conn, provider_id) is None:
         raise LlmError(f"provider id={provider_id} 不存在")
@@ -161,6 +265,8 @@ def update_provider(
         updates["api_key"] = api_key
     if enabled is not None:
         updates["enabled"] = 1 if enabled else 0
+    if settings is not None:
+        updates.update(settings)
 
     if updates:
         assignments = ", ".join(f"{column} = ?" for column in updates)
@@ -336,9 +442,25 @@ def post_json(
         return error.code, {"__raw__": body}
 
 
-def _chat_payload(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
-    """OpenAI 兼容的请求体。多家 provider 都提供这个形状的接口，所以只写一种。"""
-    return {"model": model, "messages": messages}
+def _chat_payload(
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """OpenAI 兼容的请求体。多家 provider 都提供这个形状的接口，所以只写一种。
+
+    `tools` / `tool_choice`（2026-10-04 结构化输出）：给了就让模型「调用指定工具」，
+    由接口层约束参数必须符合规格——结构错误在生成阶段就不该出现（成熟 agent 的
+    第一层防线）。不传就是原来的纯文本调用，行为一点不变。
+    """
+    payload: dict[str, Any] = {"model": model, "messages": messages}
+    if tools:
+        payload["tools"] = tools
+    if tool_choice:
+        payload["tool_choice"] = tool_choice
+    return payload
 
 
 def _endpoint(provider: sqlite3.Row) -> str:
@@ -349,7 +471,11 @@ def _endpoint(provider: sqlite3.Row) -> str:
 
 
 def _parse_reply(status: int, body: Any) -> tuple[str, int | None, int | None]:
-    """从 OpenAI 兼容的回复里取出正文与 token 用量。"""
+    """从 OpenAI 兼容的回复里取出正文与 token 用量。
+
+    带工具的调用（结构化输出）取回的是「模型调那个工具时填的参数」——那串 JSON
+    就是我们要的结构化结果；没有工具调用就照旧取正文。
+    """
     if status != 200:
         raise LlmError(f"上游返回 {status}：{str(body)[:200]}")
     if not isinstance(body, dict):
@@ -357,7 +483,18 @@ def _parse_reply(status: int, body: Any) -> tuple[str, int | None, int | None]:
     choices = body.get("choices") or []
     if not choices:
         raise LlmError(f"上游返回里没有 choices：{str(body)[:200]}")
-    text = ((choices[0].get("message") or {}).get("content")) or ""
+    message = choices[0].get("message") or {}
+    text = ""
+    for call in message.get("tool_calls") or []:
+        arguments = (call.get("function") or {}).get("arguments")
+        if isinstance(arguments, dict):
+            text = json.dumps(arguments, ensure_ascii=False)
+        elif isinstance(arguments, str) and arguments.strip():
+            text = arguments
+        if text.strip():
+            break
+    if not text:
+        text = message.get("content") or ""
     usage = body.get("usage") or {}
     return text, usage.get("prompt_tokens"), usage.get("completion_tokens")
 
@@ -394,8 +531,15 @@ class Operation:
         *,
         provider_id: int | None = None,
         model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> str:
-        """调一次模型，返回正文。超限、上游出错、没配 provider 都抛 `LlmError`。"""
+        """调一次模型，返回正文。超限、上游出错、没配 provider 都抛 `LlmError`。
+
+        `tools` / `tool_choice`：结构化输出（见 `_chat_payload`）。provider 不认这些
+        参数时多半会直接把参数忽略或把工具调用塞回正文——两种情况都能被
+        `_parse_reply` 与调用方的 JSON 解析兜住，不需要在这里分辨。
+        """
         if self._used >= self._limit:
             raise LlmError(
                 f"这次操作已经调了 {self._used} 次模型，超过上限 {self._limit}；"
@@ -417,7 +561,10 @@ class Operation:
             status, body = self._transport(
                 _endpoint(provider),
                 {"Authorization": f"Bearer {provider['api_key'] or ''}"},
-                _chat_payload(chosen_model, messages),
+                {
+                    **_chat_payload(chosen_model, messages, tools=tools, tool_choice=tool_choice),
+                    **_call_settings(provider),
+                },
             )
             text, input_tokens, output_tokens = _parse_reply(status, body)
         except Exception as cause:  # 上游怎么错都要记账，不能"失败了就不记"

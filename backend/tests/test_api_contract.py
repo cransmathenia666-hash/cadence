@@ -284,9 +284,13 @@ def test_create_response_is_masked_and_can_be_default(conn):
     assert FAKE_KEY not in json.dumps(created, ensure_ascii=False)
     assert created["is_default"] is True
     assert created["has_api_key"] is True
+    # 2026-10-04 起带上模型设置七项（思考程度/温度/输出上限/上下文窗口/
+    # 联网与图片能力标记/附加请求体）；没设置时全是 None/False
     assert set(created) == {
         "id", "name", "base_url", "default_model", "is_default", "enabled",
         "has_api_key", "api_key_masked", "created_at",
+        "reasoning_effort", "temperature", "max_output_tokens", "context_window",
+        "supports_web_search", "supports_images", "extra_body",
     }
 
 

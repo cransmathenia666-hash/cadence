@@ -361,3 +361,153 @@ def test_timeout_message_explains_itself_and_is_recorded(conn):
     assert len(calls) == 1
     assert calls[0]["ok"] is False
     assert "TimeoutError" in calls[0]["error"]
+
+
+# ---------- 模型设置（2026-10-04）：思考程度 / 温度 / 输出上限 / 能力标记 ----------
+
+def test_settings_round_trip_through_public_provider(conn):
+    """建家时给的设置要在公开关里原样可读（能力标记转成布尔）。"""
+    provider_id = make_provider(
+        conn,
+        settings={
+            "reasoning_effort": "high",
+            "temperature": 0.3,
+            "max_output_tokens": 4096,
+            "context_window": 128000,
+            "supports_web_search": 1,
+            "supports_images": 1,
+            "extra_body": '{"thinking": {"type": "enabled"}}',
+        },
+    )
+    row = llm.get_provider(conn, provider_id)
+    assert row["reasoning_effort"] == "high"
+    assert row["max_output_tokens"] == 4096
+    public = llm.public_provider(row)
+    assert public["temperature"] == 0.3
+    assert public["context_window"] == 128000
+    assert public["supports_web_search"] is True
+    assert public["supports_images"] is True
+    assert json.loads(public["extra_body"]) == {"thinking": {"type": "enabled"}}
+
+
+def test_new_provider_without_settings_has_all_none(conn):
+    """不设置就是「没设置」：老行为一寸不变。"""
+    row = llm.get_provider(conn, make_provider(conn))
+    for column in ("reasoning_effort", "temperature", "max_output_tokens",
+                   "context_window", "extra_body"):
+        assert row[column] is None, column
+    assert row["supports_web_search"] == 0
+    assert row["supports_images"] == 0
+
+
+def test_settings_replace_whole_block_on_update(conn):
+    """更新时传了 settings 就是整块替换：没填的落 None（清空是正当操作）。
+
+    路由层发的是 `ProviderSettings.to_columns()` 出来的**全 7 键**字典，
+    所以这里也按真实调用路径构造，而不是手写半个字典。
+    """
+    from app.main import ProviderSettings
+
+    provider_id = make_provider(
+        conn, settings={"temperature": 0.7, "max_output_tokens": 2048}
+    )
+    llm.update_provider(
+        conn, provider_id, settings=ProviderSettings(temperature=0.2).to_columns()
+    )
+    row = llm.get_provider(conn, provider_id)
+    assert row["temperature"] == 0.2
+    assert row["max_output_tokens"] is None  # 被整块替换清掉了
+
+
+def test_update_without_settings_touches_nothing(conn):
+    """set_as_default 这类局部更新不带 settings：设置必须原样保留。"""
+    provider_id = make_provider(conn, settings={"temperature": 0.5})
+    llm.update_provider(conn, provider_id, set_as_default=True)
+    assert llm.get_provider(conn, provider_id)["temperature"] == 0.5
+
+
+def test_invalid_settings_are_rejected_in_plain_language(conn):
+    """非法值在入库前就报人话错误，不能等调用那天上游回莫名的 400。"""
+    with pytest.raises(llm.LlmError, match="思考程度"):
+        llm._validate_settings(reasoning_effort="很猛")
+    with pytest.raises(llm.LlmError, match="温度"):
+        llm._validate_settings(temperature=5)
+    with pytest.raises(llm.LlmError, match="输出上限"):
+        llm._validate_settings(max_output_tokens=0)
+    with pytest.raises(llm.LlmError, match="上下文窗口"):
+        llm._validate_settings(context_window=-1)
+    with pytest.raises(llm.LlmError, match="附加请求体"):
+        llm._validate_settings(extra_body="{oops")
+
+
+def test_extra_body_must_be_an_object(conn):
+    with pytest.raises(llm.LlmError, match="JSON 对象"):
+        llm._validate_settings(extra_body='[1, 2, 3]')
+
+
+def test_call_payload_carries_the_settings(conn):
+    """调用载荷要带上设置：温度/输出上限/思考程度/附加体，没设置的字段不出现。"""
+    provider_id = make_default_provider(
+        conn,
+        settings={
+            "reasoning_effort": "low",
+            "temperature": 0.1,
+            "max_output_tokens": 1024,
+            "extra_body": '{"top_p": 0.9}',
+        },
+    )
+    transport = FakeTransport()
+    llm.Operation(conn, "judge", transport=transport).chat(
+        [{"role": "user", "content": "在吗"}]
+    )
+    payload = transport.seen[0]["payload"]
+    assert payload["temperature"] == 0.1
+    assert payload["max_tokens"] == 1024
+    assert payload["reasoning_effort"] == "low"
+    assert payload["top_p"] == 0.9  # 附加请求体逐字并入
+    assert "context_window" not in payload  # 信息性字段不该漏进请求
+
+
+def test_call_payload_without_settings_stays_minimal(conn):
+    """什么都不设置：请求体只有 model + messages，与加这组设置之前一模一样。"""
+    make_default_provider(conn)
+    transport = FakeTransport()
+    llm.Operation(conn, "judge", transport=transport).chat(
+        [{"role": "user", "content": "在吗"}]
+    )
+    assert transport.seen[0]["payload"] == {
+        "model": "fake-model",
+        "messages": [{"role": "user", "content": "在吗"}],
+    }
+
+
+def test_broken_extra_body_in_db_fails_the_call_clearly(conn):
+    """库里躺着一个坏 JSON（比如手工改库改坏）：调用要报明确错误而不是裸异常。"""
+    provider_id = make_default_provider(conn)
+    conn.execute("UPDATE llm_provider SET extra_body = '{bad' WHERE id = ?", (provider_id,))
+    conn.commit()
+    with pytest.raises(llm.LlmError, match="附加请求体"):
+        llm.Operation(conn, "judge", transport=FakeTransport()).chat(
+            [{"role": "user", "content": "在吗"}]
+        )
+
+
+def test_parse_reply_prefers_tool_call_arguments():
+    """结构化输出（工具调用）取回的是工具参数那串 JSON；没有工具调用照旧取正文。"""
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [{"function": {"arguments": '{"summary": "ok", "points": []}'}}],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+    }
+    text, prompt_tokens, completion_tokens = llm._parse_reply(200, body)
+    assert text == '{"summary": "ok", "points": []}'
+    assert (prompt_tokens, completion_tokens) == (1, 2)
+
+    plain = {"choices": [{"message": {"content": "你好"}}], "usage": {}}
+    assert llm._parse_reply(200, plain)[0] == "你好"

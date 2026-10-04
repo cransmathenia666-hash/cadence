@@ -178,6 +178,15 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 上下文，但它不是一轮对话（没触发模型调用），出方案门槛看的是它前面那句助手回话。
     # 可空——加列之前的行与普通聊天都是 NULL。取值见 blueprint.SUPPLEMENT_KIND。
     ("plan_chat", "kind", "TEXT"),
+    # 2026-10-04（模型设置）：接入上的模型级设置。全部可空/带默认——老接入一行就是
+    # 「没设置」，调用时请求里不带对应字段，行为与加列之前完全一致。
+    ("llm_provider", "reasoning_effort", "TEXT"),
+    ("llm_provider", "temperature", "REAL"),
+    ("llm_provider", "max_output_tokens", "INTEGER"),
+    ("llm_provider", "context_window", "INTEGER"),
+    ("llm_provider", "supports_web_search", "INTEGER NOT NULL DEFAULT 0"),
+    ("llm_provider", "supports_images", "INTEGER NOT NULL DEFAULT 0"),
+    ("llm_provider", "extra_body", "TEXT"),
 )
 
 # 老表新列上的索引。**必须在 _add_missing_columns 之后建**（列不存在时 CREATE INDEX

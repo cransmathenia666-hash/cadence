@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -892,11 +892,54 @@ def post_plan_upgrade(
 # 出去的任何响应里只有掩码。所以下面所有返回值都走 `llm.public_provider`，
 # 不要把 `llm.get_provider` 拿到的原始行直接返回。
 
+class ProviderSettings(BaseModel):
+    """模型设置（作用于本家的默认模型）。所有字段都可空 = 不设置，用上游默认。
+
+    - 思考程度走 OpenAI 兼容的 `reasoning_effort`；各家私有开关（如 GLM 的
+      thinking）填 `extra_body`，它是逐字并入请求体的 JSON 对象。
+    - 联网搜索 / 图片是**能力标记**：记录这家模型支持什么，当前调用不因此改变
+      行为（应用现在只发文字）；要真正开某家的联网搜索，把它的开关 JSON 填进
+      `extra_body`。
+    - 上下文窗口是信息性记录，供展示与后续裁剪参考。
+    """
+
+    reasoning_effort: Literal["off", "minimal", "low", "medium", "high"] | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    context_window: int | None = Field(default=None, ge=1)
+    supports_web_search: bool = False
+    supports_images: bool = False
+    extra_body: str | None = Field(
+        default=None, description="附加请求体，JSON 对象的字符串形式，逐字并入调用载荷"
+    )
+
+    def to_columns(self) -> dict[str, Any]:
+        """转成可直接写库的列值字典——**七个键全给**：settings 是整块替换，
+        没填的字段落 None（把温度清回"不指定"是正当操作，不能被当成"不动"）。"""
+        validated = llm._validate_settings(
+            reasoning_effort=self.reasoning_effort,
+            temperature=self.temperature,
+            max_output_tokens=self.max_output_tokens,
+            context_window=self.context_window,
+            extra_body=self.extra_body,
+        )
+        return {
+            "reasoning_effort": validated.get("reasoning_effort"),
+            "temperature": validated.get("temperature"),
+            "max_output_tokens": validated.get("max_output_tokens"),
+            "context_window": validated.get("context_window"),
+            "supports_web_search": 1 if self.supports_web_search else 0,
+            "supports_images": 1 if self.supports_images else 0,
+            "extra_body": validated.get("extra_body"),
+        }
+
+
 class ProviderIn(BaseModel):
     name: str = Field(min_length=1, description="给这家起的名字，全库唯一")
     base_url: str | None = Field(default=None, description="形如 https://api.example.com/v1")
     api_key: str | None = Field(default=None, description="只写不读：接口永不回传明文")
     default_model: str | None = None
+    settings: ProviderSettings = Field(default_factory=ProviderSettings)
     set_as_default: bool = False
 
 
@@ -905,6 +948,9 @@ class ProviderPatch(BaseModel):
 
     `api_key` 不传（或传空串）表示**不改密钥**——界面只拿得到掩码，回填不了明文，
     若把"没传"当成"清空"，改个名字就会顺手把钥匙擦掉。
+
+    模型设置相反：它不是密钥，**传 null 就是要清掉**（把温度撤回"不指定"是正当
+    操作）。所以路由层用 `model_fields_set` 区分"没传"与"传了 null"。
     """
 
     name: str | None = None
@@ -912,6 +958,7 @@ class ProviderPatch(BaseModel):
     api_key: str | None = None
     default_model: str | None = None
     enabled: bool | None = None
+    settings: ProviderSettings | None = None
     set_as_default: bool = False
 
 
@@ -937,6 +984,7 @@ def post_provider(payload: ProviderIn, conn: sqlite3.Connection = Depends(get_co
             base_url=payload.base_url,
             api_key=payload.api_key,
             default_model=payload.default_model,
+            settings=payload.settings.to_columns(),
         )
         if payload.set_as_default:
             llm.update_provider(conn, provider_id, set_as_default=True)
@@ -962,6 +1010,10 @@ def put_provider(
             api_key=payload.api_key,
             default_model=payload.default_model,
             enabled=payload.enabled,
+            # 传了 settings 就是整块替换（含清空）；没传就一个设置都不动
+            settings=(
+                payload.settings.to_columns() if payload.settings is not None else None
+            ),
             set_as_default=payload.set_as_default,
         )
     except llm.DuplicateProvider as error:

@@ -188,6 +188,14 @@ CREATE TABLE IF NOT EXISTS llm_provider (
   default_model TEXT,
   is_default    INTEGER NOT NULL DEFAULT 0,
   enabled       INTEGER NOT NULL DEFAULT 1,
+  -- ---- 模型设置（作用于本家的默认模型；NULL = 不指定，用上游默认） ----
+  reasoning_effort    TEXT,               -- 思考程度：off/minimal/low/medium/high
+  temperature         REAL,               -- 采样温度；NULL = 请求里不带这个字段
+  max_output_tokens   INTEGER,            -- 输出上限；NULL = 请求里不带（不设限）
+  context_window      INTEGER,            -- 上下文窗口；信息性记录，供展示与后续裁剪参考
+  supports_web_search INTEGER NOT NULL DEFAULT 0,  -- 能力标记：这家模型支持原生联网搜索
+  supports_images     INTEGER NOT NULL DEFAULT 0,  -- 能力标记：支持图片输入
+  extra_body          TEXT,               -- 附加请求体（JSON 对象），逐字并入调用载荷
   created_at    TEXT    NOT NULL
 );
 

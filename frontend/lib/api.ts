@@ -543,6 +543,17 @@ export type Provider = {
   enabled: boolean;
   has_api_key: boolean;
   api_key_masked: string | null;
+  /** 模型设置（2026-10-04）：全部可空 = 没设置，调用时用上游默认。 */
+  reasoning_effort: "off" | "minimal" | "low" | "medium" | "high" | null;
+  temperature: number | null;
+  max_output_tokens: number | null;
+  /** 上下文窗口是信息性记录：供展示与后续裁剪参考，不进请求体。 */
+  context_window: number | null;
+  /** 能力标记：这家模型支持原生联网搜索 / 图片输入。当前调用不因此改变行为。 */
+  supports_web_search: boolean;
+  supports_images: boolean;
+  /** 附加请求体：JSON 对象的字符串形式，逐字并入调用载荷（各家私有开关的口子）。 */
+  extra_body: string | null;
   created_at: string;
 };
 
@@ -552,12 +563,34 @@ export async function listProviders(): Promise<Provider[]> {
   return data.providers;
 }
 
+/** 模型设置的提交形状：给 null 就是清掉这个设置（settings 是整块替换）。 */
+export type ProviderSettingsInput = {
+  reasoningEffort?: string | null;
+  temperature?: number | null;
+  maxOutputTokens?: number | null;
+  contextWindow?: number | null;
+  supportsWebSearch?: boolean;
+  supportsImages?: boolean;
+  extraBody?: string | null;
+};
+
+const settingsBody = (settings: ProviderSettingsInput) => ({
+  reasoning_effort: settings.reasoningEffort || null,
+  temperature: settings.temperature ?? null,
+  max_output_tokens: settings.maxOutputTokens ?? null,
+  context_window: settings.contextWindow ?? null,
+  supports_web_search: settings.supportsWebSearch ?? false,
+  supports_images: settings.supportsImages ?? false,
+  extra_body: settings.extraBody?.trim() ? settings.extraBody.trim() : null,
+});
+
 /** 新增一家的入参。`name` 全库唯一，重名后端回 409。 */
 export type ProviderInput = {
   name: string;
   baseUrl?: string;
   apiKey?: string;
   defaultModel?: string;
+  settings?: ProviderSettingsInput;
   setAsDefault?: boolean;
 };
 
@@ -571,6 +604,7 @@ export async function createProvider(input: ProviderInput): Promise<Provider> {
       base_url: input.baseUrl ?? null,
       api_key: input.apiKey ?? null,
       default_model: input.defaultModel ?? null,
+      settings: settingsBody(input.settings ?? {}),
       set_as_default: input.setAsDefault ?? false,
     }),
   });
@@ -583,6 +617,11 @@ export type ProviderPatch = {
   apiKey?: string;
   defaultModel?: string;
   enabled?: boolean;
+  /**
+   * 模型设置。**传了就是整块替换**（没填的项落 null = 清掉），不传一个设置都不动
+   * ——所以「设为默认」「停用启用」这类局部操作不要带它。
+   */
+  settings?: ProviderSettingsInput;
   setAsDefault?: boolean;
 };
 
@@ -601,6 +640,7 @@ export async function updateProvider(providerId: number, patch: ProviderPatch): 
   if (patch.defaultModel) body.default_model = patch.defaultModel;
   // 布尔值只看"传没传"，所以要用 `!== undefined` 判断——`false` 也是有效意图
   if (patch.enabled !== undefined) body.enabled = patch.enabled;
+  if (patch.settings !== undefined) body.settings = settingsBody(patch.settings);
   if (patch.setAsDefault !== undefined) body.set_as_default = patch.setAsDefault;
 
   return request<Provider>(`/api/providers/${providerId}`, {
