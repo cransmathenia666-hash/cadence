@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { useReducedMotion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowUp, Check, CircleHelp, CornerDownRight, Loader2 } from "lucide-react";
 import { PlanChatView, ChatMessage, FindResult, type BlueprintMode } from "@/lib/api";
+import { SPRING_SWAP } from "@/lib/ease";
 import { HoverSelect } from "@/components/ui/hover-select";
 import { MessageScroller } from "@/components/agents/message-scroller";
 import { MessageBubble, MessageBubbleContent } from "@/components/agents/message-bubble";
@@ -290,6 +291,15 @@ export function ChatBox({
    *  （2026-10-04 走查 D2/D3：锁定态与正常追问轮都误显示这句，和同屏提示自相矛盾）。 */
   const lastTurnUnanswered =
     messages.length > 0 && messages[messages.length - 1]?.role === "user";
+  /** 输入框上沿的一句小声提示（2026-10-04 观感打磨）：只在「能发言、但还出不了蓝图」时出现，
+   *  说清当下该做什么。锁定/等待/没有对话时各有各的提示，这里一个字都不显示。 */
+  const composerNote =
+    !isClarifyMode && view && !composerLocked && !busy && !view.can_generate && messages.length > 0
+      ? lastTurnUnanswered
+        ? "上一轮没收到回话——再发一句接着聊，聊透就能生成蓝图。"
+        : "还差一点信息——接着聊，聊透就能生成蓝图。"
+      : null;
+  const reduce = useReducedMotion();
 
   // 乐观回答气泡只在等待期间展示；落定后由会话历史（或错误态）接管。
   // 渲染期重置（React 官方模式）：busy 翻回 false 就地清掉，不进 effect。
@@ -813,141 +823,148 @@ export function ChatBox({
             </ThinkingShimmer>
           </div>
           {!view && (
-            <p className="mt-1.5 text-[11px] leading-snug text-muted/50">
+            <p className="mt-1.5 text-[11px] leading-snug text-muted/70">
               这次寻找会参考你的长期档案；想补充就先去「档案」页加几条，下一次寻找就会带上
             </p>
           )}
           {view && pendingMode === "enhanced" && (
-            <p className="mt-1.5 text-[11px] leading-snug text-muted/50">
-              增强是多轮串行（初稿 → 两位审查员 → 必要时修订），整段常要十分钟上下——不是卡住了
+            <p className="mt-1.5 text-[11px] leading-snug text-muted/70">
+              增强整段比标准慢一些，通常要几分钟到十几分钟。
             </p>
           )}
         </div>
       )}
 
-      <div className="absolute bottom-4 left-4 right-4 bg-surface2/90 backdrop-blur-md rounded-2xl border border-white/[0.04] p-1.5 flex items-end shadow-lg group-focus-within/chatbox:border-white/[0.15] transition-colors z-10">
-        <textarea
-          ref={textareaRef}
-          data-rec="plan-chat-input"
-          aria-label={isClarifyMode ? "回答追问" : view ? "补充规划要求" : "继续这段探索"}
-          value={isClarifyMode ? clarifyText : text}
-          onChange={(event) => {
-            const value = event.target.value;
-            if (isClarifyMode) setClarifyText(value);
-            else setText(value);
-            event.target.style.height = "auto";
-            event.target.style.height = `${event.target.scrollHeight}px`;
-          }}
-          onKeyDown={handleKeyDown}
-          disabled={busy || composerLocked}
-          className="w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none text-[14px] text-primary placeholder-white/30 py-2.5 px-3 max-h-[160px] min-h-[44px] overflow-hidden leading-relaxed disabled:opacity-50"
-          rows={1}
-          placeholder={
-            isClarifyMode
-              ? busy
-                ? "cadence 正在找候选…"
-                : "一句话回答，回车发送…"
-              : view
-                ? busy
-                  ? "cadence 正在思考..."
-                  : composerLocked
-                    ? lockedPlaceholder
-                    : "补充要求，例如：每周 5 小时..."
-                : busy
-                  ? "cadence 正在思考…"
-                  : "接着说，继续这段探索…"
-          }
-        />
-
-        <div className="flex items-center gap-2 pl-2 shrink-0">
-          {/* 决策 44 / III-01：出方案按钮只认 can_generate（按聊成的有效轮数算）；
-              聊过但没聊成的那轮不算数——给一句人话提示，别让用户对着消失的按钮发呆。
-              文案按状态分层（走查 D2/D3）：锁定态另有锁定提示、这里一个字都不显示；
-              「上一轮没被回话」说没聊成；正常追问轮（最后一轮它答了）说还差信息。 */}
-          {!isClarifyMode && view && !composerLocked && !view.can_generate && lastTurnUnanswered && (
-            <span className="hidden md:block max-w-[240px] text-right text-[11px] leading-snug text-white/45">
-              上一轮没聊成，还不算有效对话——再说一句，聊成了就能出方案。
-            </span>
-          )}
-          {!isClarifyMode && view && !composerLocked && !view.can_generate && !lastTurnUnanswered && messages.length > 0 && (
-            <span className="hidden md:block max-w-[240px] text-right text-[11px] leading-snug text-white/45">
-              信息还不够——接着聊，聊成了就能出方案。
-            </span>
-          )}
-          {!isClarifyMode && view?.can_generate && (
-            <>
-              {blueprintMode === "enhanced" && (
-                <span className="hidden md:block max-w-[220px] text-right text-[11px] leading-snug text-amber-200/70">
-                  出稿后两位独立审查员逐条复核，有异议自动修订一次
-                </span>
-              )}
-              {/* 模式切换用分段按钮而不是下拉：两种模式摆在一起，选中项带悬浮说明，
-                  增强「多了一道审查席」这件事在点生成之前就看得见。 */}
-              <div
-                role="radiogroup"
-                aria-label="本次蓝图生成模式"
-                className="flex shrink-0 items-center rounded-full border border-white/10 bg-white/[0.03] p-0.5"
-              >
-                {(["standard", "enhanced"] as const).map((mode) => {
-                  const active = blueprintMode === mode;
-                  return (
-                    <button
-                      key={mode}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      title={MODE_HINTS[mode]}
-                      disabled={busy}
-                      data-rec={`mode-${mode}`}
-                      onClick={() => setBlueprintMode(mode)}
-                      className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                        active
-                          ? mode === "enhanced"
-                            ? "bg-amber-400/15 text-amber-200"
-                            : "bg-white/[0.14] text-white"
-                          : "text-white/45 hover:text-white/80"
-                      }`}
-                    >
-                      {mode === "standard" ? "标准" : "增强"}
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingMode(blueprintMode);
-                  setReturnNotice(null);
-                  void onGenerate(blueprintMode)
-                    .then((ok) => {
-                      // 只有生成成功才回默认模式；失败保留用户选的模式——不然重试时
-                      // 已静默降回标准，用户以为自己选错了（2026-10-04 走查 D4）。
-                      if (ok) setBlueprintMode("standard");
-                    })
-                    .finally(() => setPendingMode(null));
-                }}
-                disabled={busy || composerLocked}
-                data-rec="generate-blueprint"
-                className="px-4 py-2.5 bg-green/10 text-green hover:bg-green/20 rounded-xl transition-colors text-[13px] font-medium disabled:opacity-50 disabled:bg-transparent"
-                title="意向达成，生成蓝图"
-              >
-                生成蓝图
-              </button>
-            </>
-          )}
-          <button
-            type="button"
-            onClick={() => (isClarifyMode ? sendClarify() : view ? void handleSend() : sendFollowUp())}
-            disabled={
+      <div className="absolute bottom-4 left-4 right-4 bg-surface2/90 backdrop-blur-md rounded-2xl border border-white/[0.04] p-1.5 shadow-lg group-focus-within/chatbox:border-white/[0.15] transition-colors z-10">
+        {composerNote && (
+          <p className="px-3 pb-0.5 pt-1.5 text-[11px] leading-snug text-white/50">
+            {composerNote}
+          </p>
+        )}
+        <div className="flex items-end">
+          <textarea
+            ref={textareaRef}
+            data-rec="plan-chat-input"
+            aria-label={isClarifyMode ? "回答追问" : view ? "补充规划要求" : "继续这段探索"}
+            value={isClarifyMode ? clarifyText : text}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (isClarifyMode) setClarifyText(value);
+              else setText(value);
+              event.target.style.height = "auto";
+              event.target.style.height = `${event.target.scrollHeight}px`;
+            }}
+            onKeyDown={handleKeyDown}
+            disabled={busy || composerLocked}
+            className="w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none text-[14px] text-primary placeholder-white/30 py-2.5 px-3 max-h-[160px] min-h-[44px] overflow-hidden leading-relaxed disabled:opacity-50"
+            rows={1}
+            placeholder={
               isClarifyMode
-                ? !clarifyText.trim() || busy
-                : !text.trim() || busy || composerLocked
+                ? busy
+                  ? "cadence 正在找候选…"
+                  : "一句话回答，回车发送…"
+                : view
+                  ? busy
+                    ? "cadence 正在思考..."
+                    : composerLocked
+                      ? lockedPlaceholder
+                      : "补充要求，例如：每周 5 小时..."
+                  : busy
+                    ? "cadence 正在思考…"
+                    : "接着说，继续这段探索…"
             }
-            className="w-10 h-10 bg-white text-black rounded-xl hover:bg-gray-200 transition-colors flex items-center justify-center disabled:opacity-50 disabled:bg-white/10 disabled:text-white/50"
-            aria-label={isClarifyMode ? "发送回答" : view ? "发送规划要求" : "发送续问"}
-          >
-            {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowUp className="w-5 h-5" />}
-          </button>
+          />
+
+          <div className="flex items-center gap-2 pl-2 shrink-0">
+            {/* 决策 44 / III-01：出方案按钮只认 can_generate（按聊成的有效轮数算）。
+                「为什么还出不了蓝图」的说明统一在输入框上沿那一句（composerNote）；
+                锁定态另有锁定提示，这里两个都不占。 */}
+            {!isClarifyMode && view?.can_generate && (
+              <>
+                {blueprintMode === "enhanced" && (
+                  <span className="hidden md:block max-w-[220px] text-right text-[11px] leading-snug text-amber-200/70">
+                    出稿后两位独立审查员逐条复核，有异议自动修订一次
+                  </span>
+                )}
+                {/* 模式切换用分段按钮而不是下拉：两种模式摆在一起，选中项带悬浮说明，
+                    增强「多了一道审查席」这件事在点生成之前就看得见。 */}
+                <div
+                  role="radiogroup"
+                  aria-label="本次蓝图生成模式"
+                  className="flex shrink-0 items-center rounded-full border border-white/10 bg-white/[0.03] p-0.5"
+                >
+                  {(["standard", "enhanced"] as const).map((mode) => {
+                    const active = blueprintMode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        title={MODE_HINTS[mode]}
+                        disabled={busy}
+                        data-rec={`mode-${mode}`}
+                        onClick={() => setBlueprintMode(mode)}
+                        className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                          active
+                            ? mode === "enhanced"
+                              ? "bg-amber-400/15 text-amber-200"
+                              : "bg-white/[0.14] text-white"
+                            : "text-white/45 hover:text-white/80"
+                        }`}
+                      >
+                        {mode === "standard" ? "标准" : "增强"}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingMode(blueprintMode);
+                    setReturnNotice(null);
+                    void onGenerate(blueprintMode)
+                      .then((ok) => {
+                        // 只有生成成功才回默认模式；失败保留用户选的模式——不然重试时
+                        // 已静默降回标准，用户以为自己选错了（2026-10-04 走查 D4）。
+                        if (ok) setBlueprintMode("standard");
+                      })
+                      .finally(() => setPendingMode(null));
+                  }}
+                  disabled={busy || composerLocked}
+                  data-rec="generate-blueprint"
+                  className="uf-pressable rounded-full px-4 py-2.5 bg-green/10 text-green border border-green/20 hover:border-green/35 hover:bg-green/15 transition-colors text-[13px] font-medium disabled:opacity-50 disabled:bg-transparent disabled:border-transparent"
+                  title="意向达成，生成蓝图"
+                >
+                  生成蓝图
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => (isClarifyMode ? sendClarify() : view ? void handleSend() : sendFollowUp())}
+              disabled={
+                isClarifyMode
+                  ? !clarifyText.trim() || busy
+                  : !text.trim() || busy || composerLocked
+              }
+              className="uf-pressable grid size-10 shrink-0 place-items-center rounded-full bg-white text-black transition-colors hover:bg-white/85 disabled:bg-white/15 disabled:text-white/45 disabled:opacity-100"
+              aria-label={isClarifyMode ? "发送回答" : view ? "发送规划要求" : "发送续问"}
+            >
+              <AnimatePresence initial={false} mode="popLayout">
+                <motion.span
+                  key={busy ? "busy" : "send"}
+                  initial={reduce ? { opacity: 1 } : { opacity: 0, y: 3, scale: 0.8 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={reduce ? { opacity: 0 } : { opacity: 0, y: -3, scale: 0.8 }}
+                  transition={reduce ? { duration: 0 } : SPRING_SWAP}
+                  className="grid place-items-center"
+                >
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+                </motion.span>
+              </AnimatePresence>
+            </button>
+            </div>
         </div>
       </div>
     </div>
