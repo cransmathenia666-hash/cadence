@@ -203,13 +203,14 @@ def fetch_models(base_url: str, api_key: str | None = None) -> list[dict[str, An
         if max_out:
             entry["max_output_tokens"] = max_out
         modalities = ((item.get("architecture") or {}).get("input_modalities")) or []
-        if isinstance(modalities, list) and "image" in modalities:
-            entry["supports_images"] = True
+        if isinstance(modalities, list) and modalities:
+            # 上游明确给了模态就如实回 true/false：换模型时界面才能把勾补上、也能摘下来
+            entry["supports_images"] = "image" in modalities
         parameters = item.get("supported_parameters") or []
-        if isinstance(parameters, list) and any(
-            p in ("reasoning_effort", "reasoning") for p in parameters if isinstance(p, str)
-        ):
-            entry["supports_reasoning"] = True
+        if isinstance(parameters, list) and parameters:
+            entry["supports_reasoning"] = any(
+                p in ("reasoning_effort", "reasoning") for p in parameters if isinstance(p, str)
+            )
         models.append(entry)
     return sorted(models, key=lambda entry: entry["id"])
 

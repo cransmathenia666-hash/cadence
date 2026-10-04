@@ -80,7 +80,7 @@ export default function ProvidersPage() {
   const [ledgerOpen, setLedgerOpen] = useState(false);
   const [modelOptions, setModelOptions] = useState<ModelInfo[] | null>(null);
   const [modelsPending, setModelsPending] = useState(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [modelsNote, setModelsNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [autoNote, setAutoNote] = useState<{ id: string; known: boolean } | null>(null);
 
   useEffect(() => {
@@ -120,8 +120,8 @@ export default function ProvidersPage() {
     finally { setPending(false); }
   }
   async function onFetchModels() {
-    if (!draft.baseUrl.trim()) { setModelsError("先填接口地址，才能拉模型列表"); return; }
-    setModelsPending(true); setModelsError(null);
+    if (!draft.baseUrl.trim()) { setModelsNote({ ok: false, text: "先填接口地址，才能测试连接。" }); return; }
+    setModelsPending(true); setModelsNote(null);
     try {
       const models = await fetchProviderModels({
         baseUrl: draft.baseUrl,
@@ -130,14 +130,32 @@ export default function ProvidersPage() {
         providerId: mode === "edit" && selectedId !== null ? selectedId : undefined,
       });
       setModelOptions(models);
-      if (models.length > 0 && !draft.defaultModel.trim()) {
+      if (models.length === 0) { setModelsNote({ ok: true, text: "接口通了，但上游没返回任何模型。" }); return; }
+      const target = draft.defaultModel.trim();
+      if (!target) {
         setDraft((previous) => ({ ...previous, defaultModel: models[0].id }));
         applyModelSelection(models[0].id, models[0]);
+        setModelsNote({ ok: true, text: "连通。已默认选上第一个模型并补全它的配置。" });
+        return;
       }
-      if (models.length === 0) setModelsError("接口通了，但没返回任何模型。");
+      const found = findModelEntry(models, target);
+      if (found) applyModelSelection(found.id, found);
+      setModelsNote({ ok: true, text: found
+        ? `连通。已按上游回填「${found.id}」的配置。`
+        : `连通。上游没查到「${target}」的参数，模型列表已更新，可下拉重选。` });
     }
-    catch (cause) { setModelOptions(null); setModelsError(messageOf(cause, "拉模型列表失败")); }
+    catch (cause) { setModelOptions(null); setModelsNote({ ok: false, text: messageOf(cause, "测试连接失败") }); }
     finally { setModelsPending(false); }
+  }
+  /** 上游模型列表里找当前填的模型：全等 → 去掉「cn:」这类前缀比对 → 互相包含，逐级放宽。 */
+  function findModelEntry(models: ModelInfo[], target: string): ModelInfo | undefined {
+    const wanted = target.trim().toLowerCase();
+    if (!wanted) return undefined;
+    const bare = (value: string) => value.toLowerCase().replace(/^[\w-]+:/, "");
+    return models.find((entry) => entry.id.toLowerCase() === wanted)
+      ?? models.find((entry) => bare(entry.id) === bare(wanted))
+      ?? models.find((entry) => entry.id.toLowerCase().endsWith(wanted) || wanted.endsWith(entry.id.toLowerCase()))
+      ?? models.find((entry) => entry.id.toLowerCase().includes(wanted) || wanted.includes(entry.id.toLowerCase()));
   }
   async function changeProvider(provider: Provider, action: "default" | "toggle" | "delete") {
     setPending(true); setFeedback(null);
@@ -166,28 +184,30 @@ export default function ProvidersPage() {
   })();
   const selected = providers?.find((item) => item.id === selectedId) ?? providers?.find((item) => item.is_default) ?? providers?.[0];
   const activeId = selected?.id ?? null;
-  /** 点选模型后补空格：先查内置的已知模型族，再用上游 /models 带回来的参数；
-   * 两边都没有就明说「没有公开参数信息」。只填没填的，绝不覆盖你写的。 */
+  /** 点选/测试连接后回填：内置知识表优先，上游参数补齐。点按钮和点模型都是显式
+   * 动作，所以窗口与输出上限**按查到的值覆盖**，查不到就清空——换模型不能残留
+   * 上一个模型的数字；能力标记只在上游给了明确答案时才动勾，不知道就不乱碰。 */
   function applyModelSelection(modelId: string, info?: ModelInfo) {
     const hints = MODEL_HINTS.find((entry) => entry.match.test(modelId));
     const contextWindow = hints?.contextWindow ?? (info?.context_window ? String(info.context_window) : "");
     const maxOutput = info?.max_output_tokens ? String(info.max_output_tokens) : "";
     const reasoning = hints?.reasoning ?? (info?.supports_reasoning ? "medium" : "");
-    const images = Boolean(hints?.images) || Boolean(info?.supports_images);
+    const imagesKnown = hints?.images !== undefined || info?.supports_images !== undefined;
+    const images = Boolean(hints?.images) || info?.supports_images === true;
     const webSearch = Boolean(hints?.webSearch);
-    const known = Boolean(contextWindow || maxOutput || reasoning || images || webSearch);
+    const known = Boolean(contextWindow || maxOutput || reasoning || imagesKnown || webSearch);
     setDraft((prev) => ({
       ...prev,
-      contextWindow: prev.contextWindow.trim() || contextWindow || prev.contextWindow,
-      maxOutputTokens: prev.maxOutputTokens.trim() || maxOutput || prev.maxOutputTokens,
-      reasoningEffort: prev.reasoningEffort || reasoning || prev.reasoningEffort,
-      supportsImages: prev.supportsImages || images,
-      supportsWebSearch: prev.supportsWebSearch || webSearch,
+      contextWindow: contextWindow || "",
+      maxOutputTokens: maxOutput || "",
+      reasoningEffort: prev.reasoningEffort || reasoning,
+      supportsImages: imagesKnown ? images : prev.supportsImages,
+      supportsWebSearch: webSearch || prev.supportsWebSearch,
     }));
     setAutoNote({ id: modelId, known });
   }
   function startEdit(provider: Provider) {
-    setSelectedId(provider.id); setMode("edit"); setConfirmingId(null); setModelOptions(null); setModelsError(null);
+    setSelectedId(provider.id); setMode("edit"); setConfirmingId(null); setModelOptions(null); setModelsNote(null);
     setDraft({
       name: provider.name, baseUrl: provider.base_url ?? "", apiKey: "", defaultModel: provider.default_model ?? "", enabled: provider.enabled,
       reasoningEffort: provider.reasoning_effort ?? "", temperature: provider.temperature?.toString() ?? "",
@@ -204,15 +224,15 @@ export default function ProvidersPage() {
       {feedback && <p role={feedback.ok ? "status" : "alert"} className={`mb-6 border-t pt-3 text-[13px] ${feedback.ok ? "border-emerald-400/30 text-emerald-300" : "border-red-400/30 text-red-300"}`}>{feedback.text}</p>}
 
       <div className="grid gap-9 lg:grid-cols-[15rem_minmax(0,1fr)] lg:gap-12">
-        <nav aria-label="服务商列表" className="border-b border-white/[0.1] pb-5 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-7"><div className="mb-4 flex items-center justify-between"><h2 className="text-[13px] font-medium text-white/60">已接入</h2><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setConfirmingId(null); setModelOptions(null); setModelsError(null); }} aria-label="添加服务商" className="text-white/45 hover:text-white"><Plus className="size-5" /></button></div>{providers === null && !loadError && <p className="text-[12px] text-white/35">正在读取配置…</p>}{providers?.length === 0 && <p className="py-6 text-[12px] leading-6 text-white/40">尚无服务商。点击上方加号建立第一个连接。</p>}<div className="flex gap-2 overflow-x-auto lg:block lg:overflow-visible">{providers?.map((provider) => <button key={provider.id} type="button" onClick={() => { setSelectedId(provider.id); setMode("detail"); setConfirmingId(null); }} aria-current={mode !== "create" && activeId === provider.id ? "page" : undefined} className={`flex min-w-36 shrink-0 items-center justify-between gap-3 border-b px-1 py-4 text-left lg:w-full ${mode !== "create" && activeId === provider.id ? "border-white text-white" : "border-white/[0.08] text-white/45 hover:text-white/80"}`}><span className="min-w-0"><span className="block truncate text-[13px]">{provider.name}</span><span className="mt-1 block text-[11px] opacity-55">{provider.is_default ? "默认" : provider.enabled ? "可用" : "已停用"}</span></span><span className="font-mono text-[11px] opacity-50">#{provider.id}</span></button>)}</div><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setModelOptions(null); setModelsError(null); }} className="mt-6 hidden items-center gap-2 text-[12px] text-white/50 hover:text-white lg:inline-flex"><Plus className="size-4" />接入新模型</button></nav>
+        <nav aria-label="服务商列表" className="border-b border-white/[0.1] pb-5 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-7"><div className="mb-4 flex items-center justify-between"><h2 className="text-[13px] font-medium text-white/60">已接入</h2><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setConfirmingId(null); setModelOptions(null); setModelsNote(null); }} aria-label="添加服务商" className="text-white/45 hover:text-white"><Plus className="size-5" /></button></div>{providers === null && !loadError && <p className="text-[12px] text-white/35">正在读取配置…</p>}{providers?.length === 0 && <p className="py-6 text-[12px] leading-6 text-white/40">尚无服务商。点击上方加号建立第一个连接。</p>}<div className="flex gap-2 overflow-x-auto lg:block lg:overflow-visible">{providers?.map((provider) => <button key={provider.id} type="button" onClick={() => { setSelectedId(provider.id); setMode("detail"); setConfirmingId(null); }} aria-current={mode !== "create" && activeId === provider.id ? "page" : undefined} className={`flex min-w-36 shrink-0 items-center justify-between gap-3 border-b px-1 py-4 text-left lg:w-full ${mode !== "create" && activeId === provider.id ? "border-white text-white" : "border-white/[0.08] text-white/45 hover:text-white/80"}`}><span className="min-w-0"><span className="block truncate text-[13px]">{provider.name}</span><span className="mt-1 block text-[11px] opacity-55">{provider.is_default ? "默认" : provider.enabled ? "可用" : "已停用"}</span></span><span className="font-mono text-[11px] opacity-50">#{provider.id}</span></button>)}</div><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setModelOptions(null); setModelsNote(null); }} className="mt-6 hidden items-center gap-2 text-[12px] text-white/50 hover:text-white lg:inline-flex"><Plus className="size-4" />接入新模型</button></nav>
 
         <main className="min-w-0">
           {mode === "create" || mode === "edit" ? <section className="max-w-[690px]"><div className="mb-8 flex items-start justify-between border-b border-white/[0.1] pb-5"><div><h2 className="text-[24px] font-medium">{mode === "create" ? "建立一个连接" : `调整「${selected?.name ?? "服务商"}」`}</h2><p className="mt-2 text-[12px] leading-6 text-white/45">{mode === "create" ? "配置写入本地；接口和模型可在之后修改。" : "密钥留空表示保持原值，接口地址和模型留空也不会清除旧值。"}</p></div><button type="button" onClick={() => setMode("detail")} aria-label="关闭配置表单" className="p-1 text-white/45 hover:text-white"><X className="size-5" /></button></div><form onSubmit={onSave} className="space-y-6">{mode === "create" && <div><p className="mb-2 text-[12px] text-white/55">常用接入 · 点一下自动填好地址和模型</p><div className="flex flex-wrap gap-2">{PRESETS.map((preset) => <button key={preset.label} type="button" onClick={() => { setDraft((prev) => ({ ...prev, name: preset.name, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel, contextWindow: preset.contextWindow || prev.contextWindow })); if (preset.defaultModel) applyModelSelection(preset.defaultModel); }} className="border border-white/20 px-3 py-1.5 text-[12px] text-white/70 hover:border-white/60 hover:text-white">{preset.label}</button>)}</div></div>}<div className="grid gap-6 sm:grid-cols-2"><Field label="服务商名称" id="provider-name"><input id="provider-name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如 DeepSeek" required className="provider-input" /></Field><Field label="默认模型标识" id="provider-model">
         <div className="flex gap-3">
           <input id="provider-model" value={draft.defaultModel} onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })} placeholder="例如 deepseek-chat" className="provider-input" />
-          <button type="button" onClick={onFetchModels} disabled={modelsPending} className="inline-flex min-h-10 shrink-0 items-center gap-2 border border-white/25 px-4 text-[12px] text-white/80 hover:border-white/60 disabled:opacity-40"><RefreshCw className={`size-3.5 ${modelsPending ? "animate-spin" : ""}`} />{modelsPending ? "拉取中…" : "拉取模型列表"}</button>
+          <button type="button" onClick={onFetchModels} disabled={modelsPending} className="inline-flex min-h-10 shrink-0 items-center gap-2 border border-white/25 px-4 text-[12px] text-white/80 hover:border-white/60 disabled:opacity-40"><RefreshCw className={`size-3.5 ${modelsPending ? "animate-spin" : ""}`} />{modelsPending ? "测试中…" : "测试连接"}</button>
         </div>
-        {modelsError && <p role="alert" className="mt-2 text-[12px] text-red-300">{modelsError}</p>}
+        {modelsNote && <p role={modelsNote.ok ? "status" : "alert"} className={`mt-2 text-[12px] ${modelsNote.ok ? "text-emerald-300" : "text-red-300"}`}>{modelsNote.text}</p>}
         {modelOptions !== null && modelOptions.length > 0 && <p className="mt-2 text-[11px] text-white/40">拿到 {modelOptions.length} 个模型，点一个直接填上。{autoNote && autoNote.known && <>已按「{autoNote.id}」补全窗口与能力标记。</>}{autoNote && !autoNote.known && <>「{autoNote.id}」没有公开的参数信息，窗口与能力要自己填。</>}</p>}
         {modelOptions !== null && modelOptions.length > 0 && <div className="mt-2 max-h-52 overflow-auto border border-white/[0.12]">{modelOptions.map((entry) => <button key={entry.id} type="button" onClick={() => { setDraft({ ...draft, defaultModel: entry.id }); applyModelSelection(entry.id, entry); }} className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left font-mono text-[12px] hover:bg-white/10 ${draft.defaultModel === entry.id ? "bg-white/10 text-white" : "text-white/65"}`}><span className="truncate">{entry.id}</span>{draft.defaultModel === entry.id && <Check className="size-3.5 shrink-0" />}</button>)}</div>}
       </Field></div><Field label="接口地址" id="provider-url"><input id="provider-url" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" className="provider-input" /></Field><Field label={mode === "edit" ? "换新密钥 · 留空不改" : "API 密钥"} id="provider-key"><input id="provider-key" type="password" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} autoComplete="new-password" placeholder="只写入，不回显" className="provider-input" /></Field>

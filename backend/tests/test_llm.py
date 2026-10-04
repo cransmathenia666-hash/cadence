@@ -589,3 +589,19 @@ def test_fetch_models_rejects_unrecognized_shape(monkeypatch):
 def test_fetch_models_needs_a_base_url():
     with pytest.raises(llm.LlmError, match="接口地址"):
         llm.fetch_models("  ")
+
+
+def test_fetch_models_reports_text_only_models_explicitly(monkeypatch):
+    """上游明确给了模态列表却没有 image：如实回 False，界面才能把图片勾摘下来。"""
+    import app.llm as llm_module
+
+    monkeypatch.setattr(
+        llm_module, "_get_json",
+        lambda url, headers, timeout=20.0: {"data": [{
+            "id": "text/only",
+            "architecture": {"input_modalities": ["text"]},
+        }]},
+    )
+    assert llm.fetch_models("http://127.0.0.1:9999/v1") == [
+        {"id": "text/only", "supports_images": False},
+    ]
