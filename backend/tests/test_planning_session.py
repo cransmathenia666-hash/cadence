@@ -304,7 +304,13 @@ def test_session_lifecycle_active_to_pending_back_to_active_and_converted(conn, 
     assert view["planning_session"]["status"] == "active"
     assert view["planning_status"] == "needs_blueprint"
     assert view["pending_blueprint_proposal_id"] is None
-    assert len(view["messages"]) == 2  # 上一轮的对话还在
+    # 上一轮的对话还在，退回时填的补充信息也进了对话（用户回来看得见、下一轮也用得上）
+    assert len(view["messages"]) == 3
+    assert view["messages"][-1]["role"] == "user"
+    assert view["messages"][-1]["content"] == "先别裁，成果标准还想再改改"
+    # 补充不是一轮对话：不吃轮数，也不挡「直接重新出方案」（门槛看它前面那句助手回话）
+    assert view["turns_used"] == 1
+    assert view["can_generate"] is True
 
     # 驳回同样退回 active（既有语义保留）
     main.post_plan_chat(

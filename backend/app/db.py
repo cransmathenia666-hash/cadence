@@ -174,6 +174,10 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 与加列之前的旧行都是 NULL；落这一列只为「报告上下文可追溯」（方案 §6.4：刷新后
     # 仍能追溯这轮对话是带着哪份报告进的），上下文本体不落库、每轮现拼。
     ("plan_dialogue", "report_id", "INTEGER"),
+    # 2026-10-04（退回蓝图的补充信息）：退回时填的补充说明要出现在对话历史、也进模型
+    # 上下文，但它不是一轮对话（没触发模型调用），出方案门槛看的是它前面那句助手回话。
+    # 可空——加列之前的行与普通聊天都是 NULL。取值见 blueprint.SUPPLEMENT_KIND。
+    ("plan_chat", "kind", "TEXT"),
 )
 
 # 老表新列上的索引。**必须在 _add_missing_columns 之后建**（列不存在时 CREATE INDEX

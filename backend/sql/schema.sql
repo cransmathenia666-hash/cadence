@@ -224,13 +224,18 @@ CREATE TABLE IF NOT EXISTS task_model_map (
 -- （见下面的 planning_session 表），服务端从会话解析候选与落点，不信任客户端另传的 plan_id。
 -- 老行该列为 NULL，仍按 (candidate_id, plan_id) 只读兼容读取；plan_id 为 0 的行表示
 -- 「会话还没有落点计划」（新方向）——真实计划 id 从 1 起，旧查询不会把它们圈进去。
+-- kind（2026-10-04 退回补充修复加，列在 app/db.py 的 _ADDED_COLUMNS）：区分这句是
+-- 普通聊天还是「退回蓝图时填的补充信息」。退回补充会出现在对话历史里、也进模型上下文，
+-- 但它不算一轮对话（没触发模型调用），出方案的门槛看的是它前面那句助手回话——
+-- 所以得能认出来。NULL = 普通聊天；'return_supplement' = 退回时的补充说明。
 CREATE TABLE IF NOT EXISTS plan_chat (
   id           INTEGER PRIMARY KEY,
   plan_id      INTEGER NOT NULL,
   candidate_id INTEGER NOT NULL,
   role         TEXT    NOT NULL,   -- user / assistant
   content      TEXT    NOT NULL,   -- 用户原话；助手那侧存它输出的 JSON 原文
-  created_at   TEXT    NOT NULL
+  created_at   TEXT    NOT NULL,
+  kind         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_plan_chat_thread ON plan_chat (candidate_id, plan_id, id);
 

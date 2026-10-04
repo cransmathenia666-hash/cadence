@@ -59,6 +59,12 @@ MAX_TURNS = 6
 CHAT_CHAR_LIMIT = 4000
 MAX_QUESTIONS = 3
 
+# 退回蓝图时填的补充说明，以这个标记落进 `plan_chat.kind`。它不是一轮对话：出现在
+# 历史里、也进模型上下文，但不触发模型调用，所以不占轮数；出方案的门槛看的是它前面
+# 那句助手回话（`session_last_chat_row`）——否则回到会话后用户既看不到自己的补充，
+# 也会被「上一轮还没聊成」挡在生成之外（2026-10-04 走查）。
+SUPPLEMENT_KIND = "return_supplement"
+
 
 class ChatReply(BaseModel):
     """模型这一轮的回话：最多 3 个问题，外加「我这边够了」的信号。
@@ -213,13 +219,32 @@ def session_thread(conn: sqlite3.Connection, session_id: int) -> list[sqlite3.Ro
 
 
 def session_turns_used(conn: sqlite3.Connection, session_id: int) -> int:
-    """这段会话已经聊了几轮 = 你发过几句话。"""
+    """这段会话已经聊了几轮 = 你发过几句话。
+
+    退回蓝图时填的补充说明（`kind = SUPPLEMENT_KIND`）不算：它没触发模型调用，
+    计入轮数只会平白吃掉 6 轮预算。
+    """
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM plan_chat"
-        " WHERE planning_session_id = ? AND role = 'user'",
-        (session_id,),
+        " WHERE planning_session_id = ? AND role = 'user'"
+        " AND (kind IS NULL OR kind != ?)",
+        (session_id, SUPPLEMENT_KIND),
     ).fetchone()
     return int(row["n"])
+
+
+def session_last_chat_row(conn: sqlite3.Connection, session_id: int) -> sqlite3.Row | None:
+    """这段会话最后一条**聊天**消息（跳过退回补充这类旁注）——出方案门槛看它。
+
+    III-01 的门槛是「最后一轮必须是它答的那句」：退回补充写在它后面，不该让这句话
+    变成「你的话还没被答」，否则用户补完信息回来反而出不了方案。
+    """
+    return conn.execute(
+        "SELECT role, content, created_at FROM plan_chat"
+        " WHERE planning_session_id = ? AND (kind IS NULL OR kind != ?)"
+        " ORDER BY id DESC LIMIT 1",
+        (session_id, SUPPLEMENT_KIND),
+    ).fetchone()
 
 
 def session_valid_turns_used(conn: sqlite3.Connection, session_id: int) -> int:
@@ -363,6 +388,7 @@ def _record(
     content: str,
     *,
     planning_session_id: int | None = None,
+    kind: str | None = None,
 ) -> None:
     """追加一句。这张表是追加式日志、不经台账（同 learning_request 的先例）。
 
@@ -371,11 +397,22 @@ def _record(
     计划 id 从 1 起——legacy 按 (候选, 计划) 圈线程的查询永远不会把会话消息圈进去；
     会话消息一律按 planning_session_id 圈（见 `session_thread`）。老行该列为 NULL，
     只读兼容不变。
+
+    `kind` 区分这句的来路：普通聊天留空，退回蓝图时填的补充说明写 `SUPPLEMENT_KIND`
+    （它进历史与模型上下文，但不占轮数、也不挡出方案）。
     """
     conn.execute(
-        "INSERT INTO plan_chat (plan_id, candidate_id, role, content, planning_session_id, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (plan_id if plan_id is not None else 0, candidate_id, role, content, planning_session_id, now_iso()),
+        "INSERT INTO plan_chat (plan_id, candidate_id, role, content, planning_session_id, created_at, kind)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            plan_id if plan_id is not None else 0,
+            candidate_id,
+            role,
+            content,
+            planning_session_id,
+            now_iso(),
+            kind,
+        ),
     )
     conn.commit()
 
@@ -636,6 +673,7 @@ def view(
         target: int | None = None if landing is None else int(landing)
         rows = session_thread(conn, planning_session_id)
         valid = session_valid_turns_used(conn, planning_session_id)
+        last_chat = session_last_chat_row(conn, planning_session_id)
         pending = pending_blueprint(conn, None, planning_session_id=planning_session_id)
         return {
             "candidate_id": int(session["candidate_id"]),
@@ -648,11 +686,13 @@ def view(
             "turns_used": session_turns_used(conn, planning_session_id),
             "valid_turns_used": valid,
             "max_turns": MAX_TURNS,
-            # 只有 active 的会话能继续聊 / 出方案；其余状态只读
+            # 只有 active 的会话能继续聊 / 出方案；其余状态只读。门槛看**最后一条聊天**
+            # （退回补充写在它后面也不影响）——补齐信息回来要能直接重新出方案。
             "can_generate": (
                 str(session["status"]) == "active"
                 and valid >= 1
-                and _ready_to_generate(rows)
+                and last_chat is not None
+                and _ready_to_generate([last_chat])
             ),
             "steps": advisor.candidate_steps(row),
             "blueprint": None if pending is None else {
@@ -1516,10 +1556,14 @@ def generate_blueprint(
         used = session_turns_used(conn, session_id)
         thread_rows = session_thread(conn, session_id)
         valid = session_valid_turns_used(conn, session_id)
+        # 门槛看最后一条**聊天**：退回蓝图填的补充说明写在它后面，不该让这句话变成
+        # 「你的话还没被答」（补齐信息回来要能直接重新出方案）。
+        last_chat = session_last_chat_row(conn, session_id)
     else:
         used = turns_used(conn, candidate_id, target)
         thread_rows = thread(conn, candidate_id, target)
         valid = valid_turns_used(conn, candidate_id, target)
+        last_chat = thread_rows[-1] if thread_rows else None
     # III-01：门槛数的是**聊成**的轮数——模型回话失败那轮只留下你的话，不算数
     if valid < 1:
         raise BlueprintConflict(
@@ -1528,9 +1572,9 @@ def generate_blueprint(
         )
     # III-01 的后半句：聊成过不等于聊到头——最后一条消息还是**你的话**（它的回话失败、
     # 或者还没回）时，方案是对着一段没聊完的话出的；先回去把上一轮聊成再出。
-    if str(thread_rows[-1]["role"]) != "assistant":
+    if last_chat is None or str(last_chat["role"]) != "assistant":
         raise BlueprintConflict("上一轮还没聊成，先接着聊（或让它把上一句答完）再出方案")
-    if not _ready_to_generate(thread_rows):
+    if not _ready_to_generate([last_chat]):
         raise BlueprintConflict("上一轮助手还没确认信息足够、且不再追问；先答完问题再出方案")
 
     messages = [
@@ -1891,6 +1935,12 @@ def return_to_planning(
     业务终态，旧稿照样只读可查，也不再占用「同计划同时只有一份待裁定蓝图」的位置。
     退回理由必填并留进台账（提案与会话各一条 status_change 流水）。
 
+    **2026-10-04（走查修复）**：退回时填的补充说明同时也写进规划对话（`plan_chat`，
+    `kind = SUPPLEMENT_KIND`）。此前它只进台账，用户回到会话时看不到自己补充的内容、
+    审查员留的待确认问句也丢了，模型更用不上——「回规划对话补充信息」等于白填。
+    这条补充进历史、也进下一轮出方案的上下文；它不是一轮对话（不触发模型调用），
+    所以不占 6 轮预算，也不挡出方案（门槛看它前面那句助手回话）。
+
     前提：提案仍是 `pending`、kind 是蓝图、且 payload 归属**这条**规划会话——别的会话
     的待批稿、已经裁定过的提案，都不能从这里退回。
     """
@@ -1913,6 +1963,9 @@ def return_to_planning(
         raise BlueprintConflict(
             f"这份蓝图不属于规划会话 #{planning_session_id}——退回要由出它的那段会话发起"
         )
+    session = get_session(conn, planning_session_id)
+    candidate_id = int(session["candidate_id"])
+    plan_id = session["landing_plan_id"]
 
     with atomic(conn):
         ledger.set_status(
@@ -1929,6 +1982,16 @@ def return_to_planning(
             "active",
             reason=f"蓝图提案 #{proposal_id} 被退回规划：{text}",
             actor="user",
+        )
+        # 用户填的补充信息写进对话：回到会话能看见、下一轮出方案也带上它。
+        _record(
+            conn,
+            int(plan_id) if plan_id is not None else None,
+            candidate_id,
+            "user",
+            text,
+            planning_session_id=planning_session_id,
+            kind=SUPPLEMENT_KIND,
         )
     return {
         "proposal_id": proposal_id,
