@@ -1980,6 +1980,10 @@ def _supersede_previous(
     落点定了的按计划圈——「同一计划同时只有一份待裁定蓝图」的计划级语义不变。
     判据与候选的 `expired` 同一路：它是**业务终态**、不是台账的生命周期操作。
     `superseded` 不进任何禁区，也不影响裁定记录——旧版还查得到、看得见。
+
+    被取代的那一版把 `superseded_by` 写成新提案 id（2026-10-04 走查 D5）：取代链只在这条
+    路径成立（有明确后继）。**退回规划**（`return_to_planning`）不是被新版取代、没有后继，
+    `superseded_by` 保持空——两处都不是台账的取代（决策 22），链的写法只在这里补。
     """
     rows = conn.execute(
         "SELECT * FROM proposal WHERE kind = ? AND status = 'pending' ORDER BY id",
@@ -2007,6 +2011,7 @@ def _supersede_previous(
             "superseded",
             actor="agent",
             reason=f"{reason_scope} 出了新版蓝图（提案 #{keep_id}），这一版不再算数",
+            extra={"superseded_by": int(keep_id)},
         )
         superseded.append(int(row["id"]))
     return superseded

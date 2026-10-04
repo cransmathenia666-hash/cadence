@@ -1011,6 +1011,8 @@ def test_a_new_version_supersedes_the_old_one_and_leaves_a_trace(conn):
     assert second["superseded_ids"] == [first["proposal_id"]]
     old = conn.execute("SELECT * FROM proposal WHERE id = ?", (first["proposal_id"],)).fetchone()
     assert old["status"] == "superseded"  # 业务终态，不是台账的取代
+    # 取代链在这里补（2026-10-04 走查 D5）：旧版指向取代它的新提案
+    assert old["superseded_by"] == second["proposal_id"]
     events = ledger.history(conn, "proposal", first["proposal_id"])
     assert [event["change_type"] for event in events] == ["create", "status_change"]
     assert events[-1]["after_value"] == "superseded"

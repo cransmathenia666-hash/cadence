@@ -211,7 +211,8 @@ export function ChatBox({
   chosenPlan: string;
   setChosenPlan: (val: string) => void;
   onSend: (msg: string) => Promise<PlanChatView | null>;
-  onGenerate: (mode: BlueprintMode) => Promise<void>;
+  /** 生成蓝图；resolve `false` = 这次没成（模式保留，重试不用重选）。 */
+  onGenerate: (mode: BlueprintMode) => Promise<boolean>;
   busy: boolean;
   /** 把待裁定蓝图退回规划对话（理由必填，进台账）；resolve false = 退回没成功。 */
   onReturnBlueprint?: (reason: string) => Promise<boolean>;
@@ -284,6 +285,11 @@ export function ChatBox({
     : sessionTerminal
       ? "这段规划会话已结束，只读"
       : "先指明落点计划";
+  /** 「上一轮没聊成」只认真正的那种态：你说了话、这一轮没被回话（模型调用失败）。
+   *  正常追问轮的最后一条是助手回话，不算没聊成；锁定态另有锁定提示，都不该出现这句
+   *  （2026-10-04 走查 D2/D3：锁定态与正常追问轮都误显示这句，和同屏提示自相矛盾）。 */
+  const lastTurnUnanswered =
+    messages.length > 0 && messages[messages.length - 1]?.role === "user";
 
   // 乐观回答气泡只在等待期间展示；落定后由会话历史（或错误态）接管。
   // 渲染期重置（React 官方模式）：busy 翻回 false 就地清掉，不进 effect。
@@ -811,6 +817,11 @@ export function ChatBox({
               这次寻找会参考你的长期档案；想补充就先去「档案」页加几条，下一次寻找就会带上
             </p>
           )}
+          {view && pendingMode === "enhanced" && (
+            <p className="mt-1.5 text-[11px] leading-snug text-muted/50">
+              增强是多轮串行（初稿 → 两位审查员 → 必要时修订），整段常要十分钟上下——不是卡住了
+            </p>
+          )}
         </div>
       )}
 
@@ -850,10 +861,17 @@ export function ChatBox({
 
         <div className="flex items-center gap-2 pl-2 shrink-0">
           {/* 决策 44 / III-01：出方案按钮只认 can_generate（按聊成的有效轮数算）；
-              聊过但没聊成的那轮不算数——给一句人话提示，别让用户对着消失的按钮发呆。 */}
-          {!isClarifyMode && view && !view.can_generate && view.turns_used > 0 && (
+              聊过但没聊成的那轮不算数——给一句人话提示，别让用户对着消失的按钮发呆。
+              文案按状态分层（走查 D2/D3）：锁定态另有锁定提示、这里一个字都不显示；
+              「上一轮没被回话」说没聊成；正常追问轮（最后一轮它答了）说还差信息。 */}
+          {!isClarifyMode && view && !composerLocked && !view.can_generate && lastTurnUnanswered && (
             <span className="hidden md:block max-w-[240px] text-right text-[11px] leading-snug text-white/45">
               上一轮没聊成，还不算有效对话——再说一句，聊成了就能出方案。
+            </span>
+          )}
+          {!isClarifyMode && view && !composerLocked && !view.can_generate && !lastTurnUnanswered && messages.length > 0 && (
+            <span className="hidden md:block max-w-[240px] text-right text-[11px] leading-snug text-white/45">
+              信息还不够——接着聊，聊成了就能出方案。
             </span>
           )}
           {!isClarifyMode && view?.can_generate && (
@@ -900,10 +918,13 @@ export function ChatBox({
                 onClick={() => {
                   setPendingMode(blueprintMode);
                   setReturnNotice(null);
-                  void onGenerate(blueprintMode).finally(() => {
-                    setPendingMode(null);
-                    setBlueprintMode("standard");
-                  });
+                  void onGenerate(blueprintMode)
+                    .then((ok) => {
+                      // 只有生成成功才回默认模式；失败保留用户选的模式——不然重试时
+                      // 已静默降回标准，用户以为自己选错了（2026-10-04 走查 D4）。
+                      if (ok) setBlueprintMode("standard");
+                    })
+                    .finally(() => setPendingMode(null));
                 }}
                 disabled={busy || composerLocked}
                 data-rec="generate-blueprint"

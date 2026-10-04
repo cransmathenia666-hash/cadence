@@ -54,11 +54,17 @@ export function WorkbenchChat() {
   // P3 复盘回流：从 /report 的复盘卡跳过来时 URL 带 report_id——下一句对话带上它
   // （报告原文＋复盘卡进本轮上下文），发过一次就消费掉，不反复粘。
   // 用 useSearchParams 反应式读取：直接进页与 SPA 点链接两种导航都能拿到。
+  // URL 参数只是「入口」，状态可被消费（发完归 null），所以用「记住上一版参数、渲染期比对」
+  // 的官方模式跟随——effect 里同步 setState 会被 lint 拦（同 chat-box 的渲染期重置口径）。
   const reportParam = useSearchParams().get("report_id");
-  const [pendingReportId, setPendingReportId] = useState<number | null>(null);
-  useEffect(() => {
-    setPendingReportId(reportParam !== null && /^[1-9]\d*$/.test(reportParam) ? Number(reportParam) : null);
-  }, [reportParam]);
+  const parsedReportId =
+    reportParam !== null && /^[1-9]\d*$/.test(reportParam) ? Number(reportParam) : null;
+  const [pendingReportId, setPendingReportId] = useState<number | null>(parsedReportId);
+  const [lastReportParam, setLastReportParam] = useState(reportParam);
+  if (lastReportParam !== reportParam) {
+    setLastReportParam(reportParam);
+    setPendingReportId(parsedReportId);
+  }
 
   // 操作回执走右下角 toast；错误例外——不许被动画带走，仍留在输入框上方
   const [toasts, setToasts] = useState<ToastData[]>([]);

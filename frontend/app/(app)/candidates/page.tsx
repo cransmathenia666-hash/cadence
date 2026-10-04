@@ -1017,7 +1017,7 @@ export default function CandidatesPage() {
     }
   }
 
-  async function handleChatGenerate(candidateId: number, mode: BlueprintMode) {
+  async function handleChatGenerate(candidateId: number, mode: BlueprintMode): Promise<boolean> {
     setChatBusy(prev => ({ ...prev, [candidateId]: true }));
     setPlanningError(null);
     const sessionId = sessionOf(candidateId);
@@ -1053,8 +1053,10 @@ export default function CandidatesPage() {
         },
         ...previous.filter((item) => !(item.kind === "blueprint" && item.candidateId === candidateId)),
       ]);
+      return true;
     } catch (err) {
       setPlanningError(messageOf(err, "生成蓝图方案失败"));
+      return false;
     } finally {
       setChatBusy(prev => ({ ...prev, [candidateId]: false }));
     }
@@ -1149,7 +1151,7 @@ export default function CandidatesPage() {
           chosenPlan={""}
           setChosenPlan={() => {}}
           onSend={async () => null}
-          onGenerate={async () => {}}
+          onGenerate={async () => false}
           busy={asking}
           clarifyData={activeClarify}
           // 答追问这轮「用户说了什么」就是那句回答本身：后端记的是本轮原话（备用展示

@@ -329,6 +329,78 @@ def _details(error: ValidationError) -> str:
     )
 
 
+# 标题/说明的长度上限与 `Question` 模型一致；选项个数先按模型层的 8 收，
+# 清洗层（`_clean_questions`）还会再截到 4。
+_QUESTION_TITLE_LIMIT = 120
+_QUESTION_DESCRIPTION_LIMIT = 200
+_QUESTION_OPTIONS_LIMIT = 8
+
+
+def _dialogue_text(value: Any) -> str:
+    """模型爱把可空栏位写成 null：null / 非字符串一律当空串，交给清洗层决定去留。"""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _normalize_question_options(value: Any) -> list[str]:
+    """选项宽容归一（2026-10-04 走查修复）：字符串照收、数字化成它的文字，其余丢掉。
+
+    对象等认不出正文的一项宁可丢掉——丢完这题可能降级成自由填写，但整封回执能活下来；
+    这是「解析能救则救」与蓝图审查同一个口径：别为表层噪声烧一次「带原因重说」。
+    """
+    if not isinstance(value, list):
+        return []
+    options: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            options.append(item)
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            options.append(str(item))
+    return options[:_QUESTION_OPTIONS_LIMIT]
+
+
+def _normalize_reply_data(data: Any) -> Any:
+    """回执的表层规范化（2026-10-04 走查修复）：校验之前先把 `questions` 里的噪声清掉。
+
+    走查实证：模型把选项写成非字符串时，`Reply.model_validate` 在 pydantic 层直接判死，
+    连试 3 次中止、什么都没落——而 `_clean_questions` 的本意恰恰是「选项脏了就地清掉、
+    别烧重说」，只是它跑在校验之后、够不着。所以「能清就清」这一步提前到这里：
+    空标题的整问丢弃、选项里的非字符串归一或丢弃、非布尔的开关回默认值、超员截断——
+    清完仍是「能用的问」就收下，一问都不剩就当它没问。人话与 intent 事关语义，
+    一概不动，坏在那儿的照旧带原因重说（宽容只豁免表层噪声，不是通行证）。
+    """
+    if not isinstance(data, dict):
+        return data
+    questions = data.get("questions")
+    if questions is None:
+        return data
+    if isinstance(questions, dict):  # 单问对象也当一问收下（模型偶尔忘套数组）
+        questions = [questions]
+    if not isinstance(questions, list):
+        return {**data, "questions": None}  # 不是数组也不是一问：当它没问，不判死整封
+
+    cleaned: list[Any] = []
+    for item in questions:
+        if not isinstance(item, dict):
+            continue  # 结构不成样的一条：丢这一条，其余照收
+        title = _dialogue_text(item.get("title"))
+        if not title:
+            continue  # 没标题的这问显示不出来，整问丢弃（与 _clean_questions 同口径）
+        question: dict[str, Any] = {
+            "title": title[:_QUESTION_TITLE_LIMIT],
+            "options": _normalize_question_options(item.get("options")),
+            # 非布尔的开关认不出意图：回默认值，让清洗层照常走
+            "multiple": item.get("multiple") is True,
+            "allow_custom": item.get("allow_custom") is not False,
+        }
+        description = _dialogue_text(item.get("description"))
+        if description:
+            question["description"] = description[:_QUESTION_DESCRIPTION_LIMIT]
+        cleaned.append(question)
+    return {**data, "questions": cleaned[:MAX_QUESTIONS] or None}
+
+
 def _clean_questions(
     questions: list[Question] | None,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
@@ -504,12 +576,15 @@ def _check_reply(
     反过来 intent=modify 而没带建议是合法的（先澄清再说，不算毛病）。建议里「点名的节点
     不存在 / 不属于这个计划 / 改前＝改后 / 名字撞车」这类**批不了**的毛病也在这里拦下：
     宁可不提，也不落一条等你点了「确认」才报错的提案（决策 39）。追问（如果有）在这里
-    清成落库形状。他这一句明确要选项拍板（见 OPTION_REQUEST_MARKS）而回话没带 questions
+    清成落库形状——回执先进一层表层归一（`_normalize_reply_data`，2026-10-04 走查修复），
+    options 里混进非字符串这类噪声就地清掉、不判不合格。他这一句明确要选项拍板
+    （见 OPTION_REQUEST_MARKS）而回话没带 questions
     时，同样判不合格重说——这是硬闸，不指望模型自觉。
     """
     data = advisor.extract_json(text)
     if data is None:
         return None, None, "输出不是合法的 JSON 对象"
+    data = _normalize_reply_data(data)
 
     try:
         reply = Reply.model_validate(data)

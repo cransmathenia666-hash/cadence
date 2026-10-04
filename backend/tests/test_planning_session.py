@@ -301,6 +301,11 @@ def test_session_lifecycle_active_to_pending_back_to_active_and_converted(conn, 
     )
     assert returned["proposal_status"] == "superseded"
     assert returned["session_status"] == "active"
+    # 退回不是「被新版取代」：没有后继版本，取代链保持空（2026-10-04 走查 D5 口径）
+    returned_row = conn.execute(
+        "SELECT superseded_by FROM proposal WHERE id = ?", (int(created["proposal_id"]),)
+    ).fetchone()
+    assert returned_row["superseded_by"] is None
     # 退回补充当场得到模型回应：用户回到会话不用再手动发一条
     assert returned["chat_error"] is None
     assert returned["chat"]["reply"]["note"] == "收到补充，按你说的先做命令行新增"

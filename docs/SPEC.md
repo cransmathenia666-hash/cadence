@@ -381,7 +381,7 @@ def supersede(conn, entity_type, entity_id, new_values: dict, reason: str, actor
 | 19 | LLM 提供商 | **用现有的 commandcode 提供方 API**，不新开账号；密钥在 P3 配置时写入本地库，不入版本库 | 本表 |
 | 20 | 邮件提醒 | **启用**；P4 前需你提供邮箱 SMTP 授权码，先按「空实现 + 邮件实现」两套并存开发 | 本表 |
 | 21 | 节点状态机与落后量口径 | 合法迁移表见 `backend/app/plan.py`（报告往前推很宽容，已完成不能悄悄降级）；落后量＝未完成且过期节点里最严重的那个，已收尾节点不计入计划级落后 | 本表 |
-| 22 | 台账语义归属（方案 B） | 台账的「作废 / 取代」只用于**没有表达否决的业务终态**的记录（`profile_item`、`plan`）。节点 / 候选 / 提案的「不再算数」由业务终态表达（`skipped` / `rejected`），台账对它们调 `void`/`supersede` **直接报错**；`plan_node` 侧的读取再把 `void`/`superseded` 当不存在兜底 | 本表（实现见 `backend/app/ledger.py`） |
+| 22 | 台账语义归属（方案 B） | 台账的「作废 / 取代」只用于**没有表达否决的业务终态**的记录（`profile_item`、`plan`）。节点 / 候选 / 提案的「不再算数」由业务终态表达（`skipped` / `rejected`），台账对它们调 `void`/`supersede` **直接报错**；`plan_node` 侧的读取再把 `void`/`superseded` 当不存在兜底。提案标 `superseded` 时 `superseded_by` **只在有后继时写**（新版取代 → 取代它的提案 id；退回规划 → 没有后继、保持空）——它不是台账取代，只是取代链的留痕（2026-10-04 走查 D5） | 本表（实现见 `backend/app/ledger.py`） |
 | 23 | 建节点入参校验 | `due_date` 收成真日期类型，只认零填充 ISO；非法日期在边界返回 `422`，不再静默入库 | 第 11 节 |
 | 24 | 错误响应形状 | **方案 C**：所有错误出口统一为 `{"detail": "中文一句话", "errors": [...]}`——`detail` 永远是字符串、`errors` 永远是数组（422 时含 `loc` 等字段级明细）。中文说明由字段标签表 + 错误类型表拼出，未登记者回退英文原文 | 第 11 节 |
 | 25 | 跨源放行范围 | 开发期只放行本机前端来源（`http://localhost:3000` 与 `http://127.0.0.1:3000` 两种写法），端口与名单集中在 `backend/app/config.py`；方法列白名单、不开通配符；错误响应也带 CORS 头 | 第 10 节 |

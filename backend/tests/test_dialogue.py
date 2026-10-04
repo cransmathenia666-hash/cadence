@@ -1228,6 +1228,58 @@ def test_all_empty_titles_lands_no_questions(conn):
     assert done["reply"] == "没问成"
 
 
+def test_non_string_options_get_salvaged_not_retried(conn):
+    """走查实证（2026-10-04）：选项混进对象/数字时整封回执曾在校验层被判死、连试三次中止；
+    现在就地归一——字符串照收、数字化成文字、认不出的丢掉，一轮收下。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    questions = [
+        {"title": "每周能投几个小时？",
+         "options": ["两小时以内", {"text": "五小时上下"}, 5, None, "更多"]},
+    ]
+    transport = ScriptedTransport(envelope("先对一下现状", questions=questions))
+
+    done = dialogue.say(conn, plan_id, "我想把这事排进十月", transport=transport)
+
+    assert done["calls"] == 1
+    assert done["questions"][0]["options"] == ["两小时以内", "5", "更多"]
+
+
+def test_a_broken_question_is_dropped_not_retried(conn):
+    """一问结构不成样（不是对象 / 没标题）只丢这一问，其余照收——不判不合格重说。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    questions = [
+        "这个不是对象",
+        {"title": "  ", "options": ["甲", "乙"]},
+        {"title": "先补哪块？", "options": ["基础", "项目"]},
+    ]
+    transport = ScriptedTransport(envelope("先回我", questions=questions))
+
+    done = dialogue.say(conn, plan_id, "怎么走", transport=transport)
+
+    assert done["calls"] == 1
+    assert [item["title"] for item in done["questions"]] == ["先补哪块？"]
+
+
+def test_extra_questions_are_truncated_not_retried(conn):
+    """模型多问超上限：截到前三问收下，不让整封回执在校验处炸掉。"""
+    make_provider(conn)
+    add_profile(conn)
+    plan_id = make_plan(conn)
+    questions = [{"title": f"第 {index} 个问题？"} for index in range(1, 5)]
+    transport = ScriptedTransport(envelope("先回我", questions=questions))
+
+    done = dialogue.say(conn, plan_id, "怎么走", transport=transport)
+
+    assert done["calls"] == 1
+    assert [item["title"] for item in done["questions"]] == [
+        "第 1 个问题？", "第 2 个问题？", "第 3 个问题？",
+    ]
+
+
 def test_a_reply_without_questions_stays_question_free(conn):
     """不问就不带：questions 是 None，老形状的输出一个字段都没多。"""
     make_provider(conn)
