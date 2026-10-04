@@ -962,6 +962,15 @@ class ProviderPatch(BaseModel):
     set_as_default: bool = False
 
 
+class ProviderModelsIn(BaseModel):
+    """拉模型列表的入参。密钥给新填的；编辑已有接入时可不填、改传 `provider_id`
+    用库里那把钥匙（界面上只有掩码，回填不了明文）。"""
+
+    base_url: str = Field(min_length=1, description="形如 https://api.example.com/v1")
+    api_key: str | None = None
+    provider_id: int | None = None
+
+
 def _require_provider(conn: sqlite3.Connection, provider_id: int) -> None:
     if llm.get_provider(conn, provider_id) is None:
         raise HTTPException(status_code=404, detail=f"provider id={provider_id} 不存在")
@@ -1029,6 +1038,25 @@ def delete_provider(provider_id: int, conn: sqlite3.Connection = Depends(get_con
     _require_provider(conn, provider_id)
     llm.delete_provider(conn, provider_id)
     return {"id": provider_id, "deleted": True}
+
+
+@app.post("/api/providers/models")
+def post_provider_models(payload: ProviderModelsIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """拉一家的可选模型列表（OpenAI 兼容 `GET /models`）。
+
+    为什么走后端代理：前端是浏览器直连，模型服务商基本不给跨域放行，浏览器
+    直接拉必被 CORS 挡。密钥在这里用完即弃，不落库不记日志。
+    """
+    api_key = payload.api_key
+    if not api_key and payload.provider_id is not None:
+        row = llm.get_provider(conn, payload.provider_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"provider id={payload.provider_id} 不存在")
+        api_key = row["api_key"]
+    try:
+        return {"models": llm.fetch_models(payload.base_url, api_key)}
+    except llm.LlmError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.post("/api/providers/{provider_id}/test")

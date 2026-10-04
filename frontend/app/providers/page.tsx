@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRight, Check, ChevronDown, Plus, RefreshCw, X } from "lucide-react";
-import { ApiError, createProvider, deleteProvider, getLlmCalls, listProviders, testProvider, updateProvider, type LlmCalls, type Provider } from "@/lib/api";
+import { ApiError, createProvider, deleteProvider, fetchProviderModels, getLlmCalls, listProviders, testProvider, updateProvider, type LlmCalls, type Provider } from "@/lib/api";
 import { WeeklyReminder } from "@/components/settings/weekly-reminder";
 
 const messageOf = (cause: unknown, fallback: string) => cause instanceof ApiError ? cause.message : fallback;
@@ -20,6 +20,16 @@ const REASONING_OPTIONS: [string, string][] = [
   ["", "不指定（用模型默认）"], ["off", "关闭"], ["minimal", "最低"], ["low", "低"], ["medium", "中"], ["high", "高"],
 ];
 const REASONING_LABEL: Record<string, string> = { off: "关闭", minimal: "最低", low: "低", medium: "中", high: "高" };
+/** 常用接入的预填模板：点一下把地址和模型填上，密钥仍要自己给；窗口数是常见配置，可改。 */
+const PRESETS: { label: string; name: string; baseUrl: string; defaultModel: string; contextWindow: string }[] = [
+  { label: "DeepSeek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", defaultModel: "deepseek-chat", contextWindow: "131072" },
+  { label: "智谱 GLM", name: "智谱", baseUrl: "https://open.bigmodel.cn/api/paas/v4", defaultModel: "glm-4.6", contextWindow: "204800" },
+  { label: "Kimi", name: "Moonshot", baseUrl: "https://api.moonshot.cn/v1", defaultModel: "kimi-k2-turbo-preview", contextWindow: "262144" },
+  { label: "通义千问", name: "通义千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen-plus", contextWindow: "131072" },
+  { label: "硅基流动", name: "硅基流动", baseUrl: "https://api.siliconflow.cn/v1", defaultModel: "deepseek-ai/DeepSeek-V3", contextWindow: "" },
+  { label: "OpenRouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "", contextWindow: "" },
+  { label: "Ollama 本地", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", defaultModel: "", contextWindow: "" },
+];
 /** 空串 = 清掉这个设置；填了但不是数字 NaN 传出去，由保存前的校验拦下。 */
 const numberOrNull = (value: string) => {
   const text = value.trim();
@@ -52,6 +62,9 @@ export default function ProvidersPage() {
   const [callsPending, setCallsPending] = useState(false);
   const [callsError, setCallsError] = useState<string | null>(null);
   const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[] | null>(null);
+  const [modelsPending, setModelsPending] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
 
   useEffect(() => {
     listProviders().then((data) => { setProviders(data); setLoadError(null); })
@@ -89,6 +102,23 @@ export default function ProvidersPage() {
     catch (cause) { setTests((previous) => ({ ...previous, [provider.id]: { ok: false, detail: messageOf(cause, "体检请求失败") } })); }
     finally { setPending(false); }
   }
+  async function onFetchModels() {
+    if (!draft.baseUrl.trim()) { setModelsError("先填接口地址，才能拉模型列表"); return; }
+    setModelsPending(true); setModelsError(null);
+    try {
+      const models = await fetchProviderModels({
+        baseUrl: draft.baseUrl,
+        apiKey: draft.apiKey || undefined,
+        // 编辑已有接入时界面上没有明文密钥，让后端用库里那把
+        providerId: mode === "edit" && selectedId !== null ? selectedId : undefined,
+      });
+      setModelOptions(models);
+      if (models.length > 0 && !draft.defaultModel.trim()) setDraft((previous) => ({ ...previous, defaultModel: models[0] }));
+      if (models.length === 0) setModelsError("接口通了，但没返回任何模型。");
+    }
+    catch (cause) { setModelOptions(null); setModelsError(messageOf(cause, "拉模型列表失败")); }
+    finally { setModelsPending(false); }
+  }
   async function changeProvider(provider: Provider, action: "default" | "toggle" | "delete") {
     setPending(true); setFeedback(null);
     try {
@@ -113,7 +143,7 @@ export default function ProvidersPage() {
   const selected = providers?.find((item) => item.id === selectedId) ?? providers?.find((item) => item.is_default) ?? providers?.[0];
   const activeId = selected?.id ?? null;
   function startEdit(provider: Provider) {
-    setSelectedId(provider.id); setMode("edit"); setConfirmingId(null);
+    setSelectedId(provider.id); setMode("edit"); setConfirmingId(null); setModelOptions(null); setModelsError(null);
     setDraft({
       name: provider.name, baseUrl: provider.base_url ?? "", apiKey: "", defaultModel: provider.default_model ?? "", enabled: provider.enabled,
       reasoningEffort: provider.reasoning_effort ?? "", temperature: provider.temperature?.toString() ?? "",
@@ -130,10 +160,18 @@ export default function ProvidersPage() {
       {feedback && <p role={feedback.ok ? "status" : "alert"} className={`mb-6 border-t pt-3 text-[13px] ${feedback.ok ? "border-emerald-400/30 text-emerald-300" : "border-red-400/30 text-red-300"}`}>{feedback.text}</p>}
 
       <div className="grid gap-9 lg:grid-cols-[15rem_minmax(0,1fr)] lg:gap-12">
-        <nav aria-label="服务商列表" className="border-b border-white/[0.1] pb-5 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-7"><div className="mb-4 flex items-center justify-between"><h2 className="text-[13px] font-medium text-white/60">已接入</h2><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setConfirmingId(null); }} aria-label="添加服务商" className="text-white/45 hover:text-white"><Plus className="size-5" /></button></div>{providers === null && !loadError && <p className="text-[12px] text-white/35">正在读取配置…</p>}{providers?.length === 0 && <p className="py-6 text-[12px] leading-6 text-white/40">尚无服务商。点击上方加号建立第一个连接。</p>}<div className="flex gap-2 overflow-x-auto lg:block lg:overflow-visible">{providers?.map((provider) => <button key={provider.id} type="button" onClick={() => { setSelectedId(provider.id); setMode("detail"); setConfirmingId(null); }} aria-current={mode !== "create" && activeId === provider.id ? "page" : undefined} className={`flex min-w-36 shrink-0 items-center justify-between gap-3 border-b px-1 py-4 text-left lg:w-full ${mode !== "create" && activeId === provider.id ? "border-white text-white" : "border-white/[0.08] text-white/45 hover:text-white/80"}`}><span className="min-w-0"><span className="block truncate text-[13px]">{provider.name}</span><span className="mt-1 block text-[11px] opacity-55">{provider.is_default ? "默认" : provider.enabled ? "可用" : "已停用"}</span></span><span className="font-mono text-[11px] opacity-50">#{provider.id}</span></button>)}</div><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); }} className="mt-6 hidden items-center gap-2 text-[12px] text-white/50 hover:text-white lg:inline-flex"><Plus className="size-4" />接入新模型</button></nav>
+        <nav aria-label="服务商列表" className="border-b border-white/[0.1] pb-5 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-7"><div className="mb-4 flex items-center justify-between"><h2 className="text-[13px] font-medium text-white/60">已接入</h2><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setConfirmingId(null); setModelOptions(null); setModelsError(null); }} aria-label="添加服务商" className="text-white/45 hover:text-white"><Plus className="size-5" /></button></div>{providers === null && !loadError && <p className="text-[12px] text-white/35">正在读取配置…</p>}{providers?.length === 0 && <p className="py-6 text-[12px] leading-6 text-white/40">尚无服务商。点击上方加号建立第一个连接。</p>}<div className="flex gap-2 overflow-x-auto lg:block lg:overflow-visible">{providers?.map((provider) => <button key={provider.id} type="button" onClick={() => { setSelectedId(provider.id); setMode("detail"); setConfirmingId(null); }} aria-current={mode !== "create" && activeId === provider.id ? "page" : undefined} className={`flex min-w-36 shrink-0 items-center justify-between gap-3 border-b px-1 py-4 text-left lg:w-full ${mode !== "create" && activeId === provider.id ? "border-white text-white" : "border-white/[0.08] text-white/45 hover:text-white/80"}`}><span className="min-w-0"><span className="block truncate text-[13px]">{provider.name}</span><span className="mt-1 block text-[11px] opacity-55">{provider.is_default ? "默认" : provider.enabled ? "可用" : "已停用"}</span></span><span className="font-mono text-[11px] opacity-50">#{provider.id}</span></button>)}</div><button type="button" onClick={() => { setMode("create"); setDraft(EMPTY_DRAFT); setModelOptions(null); setModelsError(null); }} className="mt-6 hidden items-center gap-2 text-[12px] text-white/50 hover:text-white lg:inline-flex"><Plus className="size-4" />接入新模型</button></nav>
 
         <main className="min-w-0">
-          {mode === "create" || mode === "edit" ? <section className="max-w-[690px]"><div className="mb-8 flex items-start justify-between border-b border-white/[0.1] pb-5"><div><h2 className="text-[24px] font-medium">{mode === "create" ? "建立一个连接" : `调整「${selected?.name ?? "服务商"}」`}</h2><p className="mt-2 text-[12px] leading-6 text-white/45">{mode === "create" ? "配置写入本地；接口和模型可在之后修改。" : "密钥留空表示保持原值，接口地址和模型留空也不会清除旧值。"}</p></div><button type="button" onClick={() => setMode("detail")} aria-label="关闭配置表单" className="p-1 text-white/45 hover:text-white"><X className="size-5" /></button></div><form onSubmit={onSave} className="space-y-6"><div className="grid gap-6 sm:grid-cols-2"><Field label="服务商名称" id="provider-name"><input id="provider-name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如 DeepSeek" required className="provider-input" /></Field><Field label="默认模型标识" id="provider-model"><input id="provider-model" value={draft.defaultModel} onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })} placeholder="例如 deepseek-chat" className="provider-input" /></Field></div><Field label="接口地址" id="provider-url"><input id="provider-url" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" className="provider-input" /></Field><Field label={mode === "edit" ? "换新密钥 · 留空不改" : "API 密钥"} id="provider-key"><input id="provider-key" type="password" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} autoComplete="new-password" placeholder="只写入，不回显" className="provider-input" /></Field>
+          {mode === "create" || mode === "edit" ? <section className="max-w-[690px]"><div className="mb-8 flex items-start justify-between border-b border-white/[0.1] pb-5"><div><h2 className="text-[24px] font-medium">{mode === "create" ? "建立一个连接" : `调整「${selected?.name ?? "服务商"}」`}</h2><p className="mt-2 text-[12px] leading-6 text-white/45">{mode === "create" ? "配置写入本地；接口和模型可在之后修改。" : "密钥留空表示保持原值，接口地址和模型留空也不会清除旧值。"}</p></div><button type="button" onClick={() => setMode("detail")} aria-label="关闭配置表单" className="p-1 text-white/45 hover:text-white"><X className="size-5" /></button></div><form onSubmit={onSave} className="space-y-6">{mode === "create" && <div><p className="mb-2 text-[12px] text-white/55">常用接入 · 点一下自动填好地址和模型</p><div className="flex flex-wrap gap-2">{PRESETS.map((preset) => <button key={preset.label} type="button" onClick={() => setDraft({ ...draft, name: preset.name, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel, contextWindow: preset.contextWindow || draft.contextWindow })} className="border border-white/20 px-3 py-1.5 text-[12px] text-white/70 hover:border-white/60 hover:text-white">{preset.label}</button>)}</div></div>}<div className="grid gap-6 sm:grid-cols-2"><Field label="服务商名称" id="provider-name"><input id="provider-name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如 DeepSeek" required className="provider-input" /></Field><Field label="默认模型标识" id="provider-model">
+        <div className="flex gap-3">
+          <input id="provider-model" list="model-options" value={draft.defaultModel} onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })} placeholder="例如 deepseek-chat" className="provider-input" />
+          <button type="button" onClick={onFetchModels} disabled={modelsPending} className="inline-flex min-h-10 shrink-0 items-center gap-2 border border-white/25 px-4 text-[12px] text-white/80 hover:border-white/60 disabled:opacity-40"><RefreshCw className={`size-3.5 ${modelsPending ? "animate-spin" : ""}`} />{modelsPending ? "拉取中…" : "拉取模型列表"}</button>
+        </div>
+        <datalist id="model-options">{modelOptions?.map((id) => <option key={id} value={id} />)}</datalist>
+        {modelsError && <p role="alert" className="mt-2 text-[12px] text-red-300">{modelsError}</p>}
+        {modelOptions && modelOptions.length > 0 && <p className="mt-2 text-[11px] text-white/40">拿到 {modelOptions.length} 个模型，输入框可以直接下拉选。</p>}
+      </Field></div><Field label="接口地址" id="provider-url"><input id="provider-url" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" className="provider-input" /></Field><Field label={mode === "edit" ? "换新密钥 · 留空不改" : "API 密钥"} id="provider-key"><input id="provider-key" type="password" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} autoComplete="new-password" placeholder="只写入，不回显" className="provider-input" /></Field>
 <div className="border-t border-white/[0.1] pt-6">
   <h3 className="mb-1 text-[14px] font-medium text-white/80">模型设置</h3>
   <p className="mb-5 text-[12px] leading-6 text-white/45">作用于这家接入的默认模型；留空的项不进请求，用模型自己的默认。联网搜索与图片是能力标记，要真正开某家的私有开关就填附加请求体。</p>

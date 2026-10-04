@@ -511,3 +511,56 @@ def test_parse_reply_prefers_tool_call_arguments():
 
     plain = {"choices": [{"message": {"content": "你好"}}], "usage": {}}
     assert llm._parse_reply(200, plain)[0] == "你好"
+
+
+# ---------- 拉远端模型列表（添加接入时的自动补全） ----------
+
+def test_fetch_models_lists_ids_sorted(monkeypatch):
+    """从 OpenAI 兼容的 GET /models 里取 id 列表，排序返回。"""
+    import app.llm as llm_module
+
+    def fake_get(url, headers, timeout=20.0):
+        assert url == "http://127.0.0.1:9999/v1/models"
+        assert headers["Authorization"] == f"Bearer {FAKE_KEY}"
+        return {"data": [{"id": "zeta"}, {"id": "alpha"}, {"nope": 1}, "junk"]}
+
+    monkeypatch.setattr(llm_module, "_get_json", fake_get)
+    assert llm.fetch_models("http://127.0.0.1:9999/v1/", FAKE_KEY) == ["alpha", "zeta"]
+
+
+def test_fetch_models_without_key_sends_no_auth_header(monkeypatch):
+    import app.llm as llm_module
+
+    seen = {}
+
+    def fake_get(url, headers, timeout=20.0):
+        seen.update(headers)
+        return {"data": []}
+
+    monkeypatch.setattr(llm_module, "_get_json", fake_get)
+    assert llm.fetch_models("http://127.0.0.1:9999/v1") == []
+    assert "Authorization" not in seen
+
+
+def test_fetch_models_reports_upstream_errors_in_plain_language(monkeypatch):
+    import app.llm as llm_module
+
+    def fake_get(url, headers, timeout=20.0):
+        raise llm.LlmError("上游返回 401：bad key")
+
+    monkeypatch.setattr(llm_module, "_get_json", fake_get)
+    with pytest.raises(llm.LlmError, match="401"):
+        llm.fetch_models("http://127.0.0.1:9999/v1")
+
+
+def test_fetch_models_rejects_unrecognized_shape(monkeypatch):
+    import app.llm as llm_module
+
+    monkeypatch.setattr(llm_module, "_get_json", lambda url, headers, timeout=20.0: {"oops": 1})
+    with pytest.raises(llm.LlmError, match="模型列表"):
+        llm.fetch_models("http://127.0.0.1:9999/v1")
+
+
+def test_fetch_models_needs_a_base_url():
+    with pytest.raises(llm.LlmError, match="接口地址"):
+        llm.fetch_models("  ")

@@ -650,6 +650,25 @@ export async function updateProvider(providerId: number, patch: ProviderPatch): 
   });
 }
 
+/** 拉一家的可选模型列表（OpenAI 兼容 `GET /models`，走后端代理——浏览器直连会被 CORS 挡）。
+ * 编辑已有接入时不用回填密钥：传 `providerId`，后端用库里那把钥匙。 */
+export async function fetchProviderModels(input: {
+  baseUrl: string;
+  apiKey?: string;
+  providerId?: number;
+}): Promise<string[]> {
+  const data = await request<{ models: string[] }>("/api/providers/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      base_url: input.baseUrl,
+      api_key: input.apiKey || null,
+      provider_id: input.providerId ?? null,
+    }),
+  });
+  return data.models;
+}
+
 /** 删一家。它的**调用记账不会跟着删**——账是历史，provider 没了账还得留着。 */
 export async function deleteProvider(providerId: number): Promise<{ id: number; deleted: boolean }> {
   return request<{ id: number; deleted: boolean }>(`/api/providers/${providerId}`, {

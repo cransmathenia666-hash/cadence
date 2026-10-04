@@ -155,6 +155,39 @@ def _call_settings(provider: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
+# ---------- 远端模型列表：添加接入时自动拿可选模型 ----------
+
+def _get_json(url: str, headers: dict[str, str], timeout: float = CONNECTIVITY_TIMEOUT_SECONDS) -> Any:
+    """发一个 GET、收 JSON。与 `post_json` 同一套 UA 纪律（Cloudflare 挡默认 UA）。"""
+    request = urllib.request.Request(
+        url, method="GET",
+        headers={"Accept": "application/json", "User-Agent": DEFAULT_USER_AGENT, **headers},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read() or b"null")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise LlmError(f"上游返回 {error.code}：{body[:200]}") from error
+
+
+def fetch_models(base_url: str, api_key: str | None = None) -> list[str]:
+    """拉一家的可选模型列表（OpenAI 兼容的 `GET /models`）。
+
+    给「添加接入」的自动补全用：填好地址和密钥就能把模型标识列出来挑一个，
+    不用去翻文档。返回排序后的模型 id；地址为空或返回看不懂都报人话错误。
+    """
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise LlmError("先填接口地址，才能拉模型列表")
+    headers = {"Authorization": f"Bearer {api_key or ''}"} if api_key else {}
+    body = _get_json(f"{base}/models", headers)
+    if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+        raise LlmError(f"上游返回里没有模型列表（data 字段）：{str(body)[:200]}")
+    ids = [item.get("id") for item in body["data"] if isinstance(item, dict) and item.get("id")]
+    return sorted(ids)
+
+
 def public_provider(row: sqlite3.Row) -> dict[str, Any]:
     """把一行 provider 变成可以给前端的形状——**这里绝不包含明文密钥**。"""
     return {
