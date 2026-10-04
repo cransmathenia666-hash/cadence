@@ -876,6 +876,46 @@ def say(
     }
 
 
+def reply_after_return(
+    conn: sqlite3.Connection,
+    planning_session_id: int,
+    *,
+    provider_id: int | None = None,
+    model: str | None = None,
+    transport: llm.Transport | None = None,
+) -> dict[str, Any]:
+    """给退回时写进对话的那句补充生成一条助手回话（尽力而为，失败不拖累退回）。
+
+    补充信息进了对话只是「看得见」；让模型当场接一轮，用户回到会话才不用自己
+    再手动发一条消息。它不算一轮对话（轮数按用户发言计，这里没有新发言），
+    也不动会话状态——会话在退回时已是 active。
+    """
+    session = get_session(conn, planning_session_id)
+    _ensure_session_alive(conn, session)
+    row = _session_candidate(conn, session)
+    target = session_plan(conn, session, None)
+    _require_profile(conn)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": _background(conn, row, target)},
+        *_history_messages(session_thread(conn, planning_session_id)),
+    ]
+    operation = llm.Operation(conn, TASK_CHAT, limit=1, transport=transport)
+    raw = operation.chat(messages, provider_id=provider_id, model=model)
+    reply, problem = _check_reply(raw)
+    if reply is None or problem is not None:
+        raise BlueprintError(
+            f"模型这一轮没给出合格的回话（{problem}）；你补充的话已在对话里，"
+            "随便再说一句它就会接着聊"
+        )
+    _record(
+        conn, target, int(session["candidate_id"]), "assistant", raw,
+        planning_session_id=planning_session_id,
+    )
+    advisor.touch_session(conn, planning_session_id)
+    return {"reply": reply.model_dump(), "calls": operation.used}
+
+
 # ---------- 蓝图：生成、版本取代、勾选建树 ----------
 
 # 蓝图的规模上限：阶段数与每个阶段的任务数。定成常量是为了让「模型跑飞了」有个明确的
@@ -894,9 +934,12 @@ class ReviewPoint(BaseModel):
 
     反对必须带 `adjustment`——只说「这里不行」不说怎么改，修订环节无从对账，
     用户也没法核对这条意见到底有没有被处理。
+
+    `extra="ignore"`（2026-10-04 宽容解析）：模型顺手多带的字段在这里静默丢掉，
+    不再让整份审查作废——结构门槛问的是「这份意见能不能用」。
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     stance: Literal["agree", "disagree"]
     target: str = Field(min_length=1, max_length=80)
@@ -912,10 +955,58 @@ class ReviewPoint(BaseModel):
 class ReviewerReport(BaseModel):
     """一位审查员的独立结论：一句总评 + 逐条表态。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     summary: str = Field(min_length=1, max_length=240)
     points: list[ReviewPoint] = Field(default_factory=list, max_length=MAX_REVIEW_POINTS)
+
+
+# 结构化输出（2026-10-04 第一层防线）：把审查结论做成一个「工具调用」，由接口层约束
+# 参数必须符合这份 JSON Schema——模型不再被要求凭空写一段严格 JSON。provider 不认
+# tools 参数时多半会忽略它或把结果塞回正文，`_parse_reply` 与 JSON 解析都能兜住。
+REVIEW_TOOL_NAME = "submit_review"
+REVIEW_TOOL = {
+    "type": "function",
+    "function": {
+        "name": REVIEW_TOOL_NAME,
+        "description": "提交你对这份蓝图初稿的独立审查结论（一句总评 + 逐条表态）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "一句总评，不超过 240 字"},
+                "points": {
+                    "type": "array",
+                    "description": "逐条表态；没有想说的就给空数组",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "stance": {"type": "string", "enum": ["agree", "disagree"]},
+                            "target": {"type": "string", "description": "所审位置"},
+                            "point": {"type": "string", "description": "具体点"},
+                            "reason": {"type": "string", "description": "依据"},
+                            "adjustment": {
+                                "type": "string",
+                                "description": "仅反对时：建议如何调整",
+                            },
+                            "severity": {
+                                "type": "string",
+                                "enum": ["revise", "confirm"],
+                                "description": "revise=必须修改；confirm=缺事实待确认",
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "仅 confirm：一句直接问用户的问句",
+                            },
+                        },
+                        "required": ["stance", "target", "point", "reason"],
+                    },
+                },
+            },
+            "required": ["summary", "points"],
+        },
+    },
+}
+REVIEW_TOOL_CHOICE = {"type": "function", "function": {"name": REVIEW_TOOL_NAME}}
 
 
 class ReviewResolution(BaseModel):
@@ -1218,14 +1309,25 @@ _SEVERITY_ALIASES = {
     "low": "confirm", "ask": "confirm", "confirm_only": "confirm", "需确认": "confirm",
 }
 _REVIEW_WRAP_KEYS = {"review", "report", "reviewer_report", "result"}
+# 一条意见只认这几个键；模型顺手多带的（channel/index/note…）在这里丢掉，
+# 不再让整份审查作废（2026-10-04 宽容解析）。
+_REVIEW_POINT_KEYS = ("stance", "target", "point", "reason", "adjustment", "severity", "question")
+
+
+def _review_text(value: Any) -> str:
+    """模型爱把可空栏位写成 null：null / 缺失一律当空串，交给后续语义判断。"""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
 
 
 def _normalize_review_data(data: Any) -> Any:
-    """审查输出的表层规范化：只认同义词、剥一层外壳、去首尾空白，不动意见内容。
+    """审查输出的表层规范化：只认同义词、剥一层外壳、null 当空、丢多余键，不动意见内容。
 
-    模型常把 stance/severity 写成同义词（「赞同」「必须修改」）或整体多包一层
-    （{"review": {...}}）；这些不改变「对哪一点持什么立场」的事实，先规范化能省掉
-    一次重试。真正缺字段、内容空白或结构不对的仍交给校验如实报错。
+    模型常把 stance/severity 写成同义词（「赞同」「必须修改」）、整体多包一层
+    （{"review": {...}}）、把可空栏位写成 null、或顺手多带字段——这些不改变
+    「对哪一点持什么立场」的事实，先规范化能省掉一次重试。真正内容空洞或立场
+    缺失的那一条交给 `_check_review` 丢掉，不再拖垮整份。
     """
     if isinstance(data, dict) and len(data) == 1:
         key = str(next(iter(data.keys()))).strip().lower()
@@ -1234,103 +1336,84 @@ def _normalize_review_data(data: Any) -> Any:
             data = only
     if not isinstance(data, dict):
         return data
-    if isinstance(data.get("summary"), str):
-        data = {**data, "summary": data["summary"].strip()}
+    cleaned_data = {**data, "summary": _review_text(data.get("summary"))}
     points = data.get("points")
     if not isinstance(points, list):
-        return data
+        # points 不是数组（字符串/对象/null）就当「没有意见」——总评还在就保得住整份
+        return {**cleaned_data, "points": []}
     cleaned: list[Any] = []
     for item in points:
         if not isinstance(item, dict):
-            cleaned.append(item)
             continue
-        item = dict(item)
-        stance = _STANCE_ALIASES.get(str(item.get("stance", "")).strip().lower())
+        item = {key: item.get(key) for key in _REVIEW_POINT_KEYS if key in item}
+        stance = _STANCE_ALIASES.get(_review_text(item.get("stance")).lower())
         if stance is not None:
             item["stance"] = stance
-        severity = _SEVERITY_ALIASES.get(str(item.get("severity", "")).strip().lower())
+        severity_text = _review_text(item.get("severity")).lower()
+        severity = _SEVERITY_ALIASES.get(severity_text)
         if severity is not None:
             item["severity"] = severity
+        else:
+            # 没写 / 写成 null / 写成没约定的值：拿掉这个键，让默认值与后续推导接管
+            item.pop("severity", None)
         for field in ("target", "point", "reason", "adjustment", "question"):
-            if isinstance(item.get(field), str):
-                item[field] = str(item[field]).strip()
+            item[field] = _review_text(item.get(field))
         cleaned.append(item)
-    return {**data, "points": cleaned}
+    return {**cleaned_data, "points": cleaned}
 
 
 def _check_review(text: str) -> tuple[ReviewerReport | None, str | None]:
-    """只接受结构完整、逐条有立场的审查报告；无效审查绝不静默改成标准模式。"""
+    """收下审查报告：能救则救（坏一条丢一条），整份没有可用结论才算不合格。
+
+    门槛是「这份意见能不能用」，不是「每个字段摆得整整齐齐」（2026-10-04 宽容解析）：
+    空白/立场缺失的那条丢掉并计数，反对没写建议调整的降为待确认，赞同多带的
+    adjustment 清掉——只有 summary 与意见**全空**才判不合格，绝不静默编造内容。
+    """
     data = advisor.extract_json(text)
     if data is None:
         return None, "审查输出不是合法的 JSON 对象"
     data = _normalize_review_data(data)
-    try:
-        report = ReviewerReport.model_validate(data)
-    except ValidationError as error:
-        return None, f"审查字段不合格（{_details(error)}）"
+    if not isinstance(data, dict):
+        return None, "审查输出不是 JSON 对象"
 
-    if not report.summary.strip():
-        return None, "审查摘要是空白"
+    summary = str(data.get("summary") or "").strip()
+    kept: list[ReviewPoint] = []
+    dropped = 0
     seen: set[tuple[str, str, str]] = set()
-    for index, point in enumerate(report.points, start=1):
+    for item in data.get("points") or []:
+        try:
+            point = ReviewPoint.model_validate(item)
+        except ValidationError:
+            dropped += 1  # 立场缺失/结构不成样：丢这一条，其余照用
+            continue
         values = (point.target.strip(), point.point.strip(), point.reason.strip())
         if any(not value for value in values):
-            return None, f"第 {index} 条意见有空白字段"
-        if point.stance == "disagree" and not point.adjustment.strip() and point.severity == "revise":
-            return None, (
-                f"第 {index} 条是要求修改的反对意见但没有写建议调整（adjustment）——"
-                "反对要说清怎么改，修订环节和用户都要按它对账"
-            )
+            dropped += 1  # 内容空洞的意见没有对账价值，丢掉
+            continue
+        if point.stance == "disagree" and not point.adjustment.strip():
+            # 反对没说怎么改：不再整份作废，按「缺事实待确认」处理（意见与依据
+            # 原样保留、不触发修订）；question 不替模型编造，留空让前端回退显示正文。
+            point = point.model_copy(update={"severity": "confirm"})
         if point.stance == "agree" and point.adjustment:
             # 赞同没有「怎么改」可言；模型顺手多带的字段在这里清掉，payload 保持干净
             point = point.model_copy(update={"adjustment": ""})
-            report.points[index - 1] = point
         key = (point.stance, point.target.strip(), point.point.strip())
         if key in seen:
-            return None, f"第 {index} 条意见重复了同一点"
+            dropped += 1  # 重复表态只留第一条
+            continue
+        if len(kept) >= MAX_REVIEW_POINTS:
+            dropped += 1  # 超出上限的表态只丢弃，不让整份报告在校验处炸掉
+            continue
         seen.add(key)
-    return report, None
+        kept.append(point)
 
-
-def _relax_missing_adjustment(text: str) -> dict[str, Any] | None:
-    """重试后仍只缺「反对的建议调整」时，把该条降为待确认反对（severity=confirm）。
-
-    意见本身（反对哪点、依据）原样保留，只是不再触发自动修订——审查席上显示为
-    「待确认」，与缺个人事实的反对同一待遇；绝不替模型编一条调整建议。
-    还带任何其他结构问题（空白字段、非法立场、重复意见、摘要空白）就返回 None，
-    照旧 fail-closed 整稿不落。
-    """
-    data = advisor.extract_json(text)
-    if data is None:
-        return None
-    data = _normalize_review_data(data)
-    if not isinstance(data, dict):
-        return None
-    summary = data.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        return None
-    points = data.get("points")
-    if not isinstance(points, list) or not points:
-        return None
-    relaxed = False
-    seen: set[tuple[str, str, str]] = set()
-    for item in points:
-        if not isinstance(item, dict):
-            return None
-        stance = str(item.get("stance", "")).strip()
-        target = str(item.get("target", "")).strip()
-        point_text = str(item.get("point", "")).strip()
-        reason = str(item.get("reason", "")).strip()
-        if stance not in ("agree", "disagree") or not target or not point_text or not reason:
-            return None
-        key = (stance, target, point_text)
-        if key in seen:
-            return None
-        seen.add(key)
-        if stance == "disagree" and not str(item.get("adjustment") or "").strip():
-            item["severity"] = "confirm"
-            relaxed = True
-    return data if relaxed else None
+    if not summary and not kept:
+        return None, "审查没有产出可用结论（总评与意见全空）"
+    if not summary:
+        summary = "（该审查员未给总评，意见逐条如下）"
+    if dropped:
+        summary = f"{summary}（另有 {dropped} 条意见因结构不完整未纳入）"
+    return ReviewerReport(summary=summary[:240], points=kept), None
 
 
 def _check_revision(
@@ -1617,8 +1700,9 @@ def generate_blueprint(
             raise BlueprintError("内部状态异常：验收通过却没有解析出蓝图")
     else:
         # 增强模式：初稿 → 审查席逐个独立表态 → 有「必须改」的反对才修订一次。
-        # 初稿与修订各一次调用，每位审查员最多两次（结构不合格带原因重试一次）；
-        # 不把结构错误伪装成通过；失败不落提案、不静默降级。
+        # 初稿与修订各一次调用，每位审查员最多两次（结构不合格带原因重试一次）。
+        # 结构防线有三层（2026-10-04）：调用层用工具约束参数形状、解析层能救则救、
+        # 审查员彻底没产出就降级弃权——**不再因审查席的结构问题中止整个生成**。
         operation = llm.Operation(conn, TASK_BLUEPRINT, limit=6, transport=transport)
         enhanced_messages = [
             *messages,
@@ -1644,14 +1728,20 @@ def generate_blueprint(
         required: list[tuple[str, int, ReviewPoint]] = []
         for lens in REVIEW_LENS:
             review_messages = _review_messages(enhanced_messages, initial, lens=lens)
-            review_raw = operation.chat(
-                review_messages,
-                provider_id=provider_id,
-                model=model,
-            )
-            report, problem = _check_review(review_raw)
-            if problem is not None or report is None:
-                # 与初稿同款的「带原因重试一次」：模型被告知哪里不合格后通常能自纠。
+            report: ReviewerReport | None = None
+            problem: str | None = None
+            for attempt in range(2):  # 第一次 + 带原因重试一次（调用预算不变）
+                review_raw = operation.chat(
+                    review_messages,
+                    provider_id=provider_id,
+                    model=model,
+                    tools=[REVIEW_TOOL],
+                    tool_choice=REVIEW_TOOL_CHOICE,
+                )
+                report, problem = _check_review(review_raw)
+                if report is not None:
+                    break
+                # 带原因重试：模型被告知哪里不合格后通常能自纠。
                 review_messages = [
                     *review_messages,
                     {"role": "assistant", "content": review_raw},
@@ -1663,24 +1753,24 @@ def generate_blueprint(
                         ),
                     },
                 ]
-                review_raw = operation.chat(
-                    review_messages,
-                    provider_id=provider_id,
-                    model=model,
+            if report is None:
+                # 第三层防线：这一席连重试都没产出可用结论——降级弃权（意见席空着、
+                # 摘要说清原因），初稿照常进入提案；结构问题不再拖垮整个生成。
+                reviewers_payload.append(
+                    {
+                        "key": lens["key"],
+                        "name": lens["name"],
+                        "lens": lens["lens"],
+                        "stance": "agree",
+                        "summary": (
+                            "本次审查连重试都没产出可用结论（结构反复不合格），"
+                            "这一席按弃权处理——初稿未经它复核，请自行斟酌。"
+                        ),
+                        "points": [],
+                        "degraded": True,
+                    }
                 )
-                report, problem = _check_review(review_raw)
-            if problem is not None or report is None:
-                # 第三层防线：只差「反对的建议调整」时降为待确认反对，保住整稿；
-                # 其余结构问题照旧 fail-closed。
-                relaxed = _relax_missing_adjustment(review_raw)
-                if relaxed is not None:
-                    report, problem = _check_review(json.dumps(relaxed, ensure_ascii=False))
-            if problem is not None or report is None:
-                raise BlueprintError(
-                    f"增强模式「{lens['name']}」的审查连着两次没通过结构检查"
-                    f"（{problem or '没有解析出审查结果'}）；"
-                    "没有创建提案，可以重试或改选标准模式"
-                )
+                continue
             reviewers_payload.append(
                 {
                     "key": lens["key"],
@@ -1925,7 +2015,14 @@ def _supersede_previous(
 # ---------- 从待裁定蓝图退回规划（OC-06，方案 §6.2 的 return 入口） ----------
 
 def return_to_planning(
-    conn: sqlite3.Connection, proposal_id: int, *, planning_session_id: int, reason: str
+    conn: sqlite3.Connection,
+    proposal_id: int,
+    *,
+    planning_session_id: int,
+    reason: str,
+    provider_id: int | None = None,
+    model: str | None = None,
+    transport: llm.Transport | None = None,
 ) -> dict[str, Any]:
     """把一份待裁定蓝图退回规划对话：提案终态化为 `superseded`，会话回到 `active`。
 
@@ -1993,12 +2090,26 @@ def return_to_planning(
             planning_session_id=planning_session_id,
             kind=SUPPLEMENT_KIND,
         )
+
+    # 让模型当场接住这句补充（2026-10-04）：只把话写进对话用户还得再手动发一条才有
+    # 回应。这一步在退回事务**之后**、尽力而为——任何失败都不改变退回已生效的事实，
+    # 只如实带回 chat_error。
+    chat: dict[str, Any] | None = None
+    chat_error: str | None = None
+    try:
+        chat = reply_after_return(
+            conn, planning_session_id, provider_id=provider_id, model=model, transport=transport
+        )
+    except Exception as error:  # noqa: BLE001——回话是尽力而为，失败原因原样带回
+        chat_error = f"{type(error).__name__}: {error}"
     return {
         "proposal_id": proposal_id,
         "proposal_status": "superseded",
         "planning_session_id": planning_session_id,
         "session_status": "active",
         "reason": text,
+        "chat": chat,
+        "chat_error": chat_error,
     }
 
 

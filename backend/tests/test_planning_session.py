@@ -259,6 +259,7 @@ def test_session_lifecycle_active_to_pending_back_to_active_and_converted(conn, 
     fake_llm(
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP", tasks=[task("读 MDN")])),
+        chat_reply([], ready=True, note="收到补充，按你说的先做命令行新增"),  # 退回补充触发的回应
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP", tasks=[task("写一个客户端")])),
         chat_reply([], ready=True),
@@ -300,15 +301,19 @@ def test_session_lifecycle_active_to_pending_back_to_active_and_converted(conn, 
     )
     assert returned["proposal_status"] == "superseded"
     assert returned["session_status"] == "active"
+    # 退回补充当场得到模型回应：用户回到会话不用再手动发一条
+    assert returned["chat_error"] is None
+    assert returned["chat"]["reply"]["note"] == "收到补充，按你说的先做命令行新增"
     view = main.get_plan_chat(planning_session_id=session_id, conn=conn)
     assert view["planning_session"]["status"] == "active"
     assert view["planning_status"] == "needs_blueprint"
     assert view["pending_blueprint_proposal_id"] is None
-    # 上一轮的对话还在，退回时填的补充信息也进了对话（用户回来看得见、下一轮也用得上）
-    assert len(view["messages"]) == 3
-    assert view["messages"][-1]["role"] == "user"
-    assert view["messages"][-1]["content"] == "先别裁，成果标准还想再改改"
-    # 补充不是一轮对话：不吃轮数，也不挡「直接重新出方案」（门槛看它前面那句助手回话）
+    # 上一轮的对话还在，退回时填的补充信息进了对话，模型也当场接了一轮
+    assert len(view["messages"]) == 4
+    assert view["messages"][-2]["role"] == "user"
+    assert view["messages"][-2]["content"] == "先别裁，成果标准还想再改改"
+    assert view["messages"][-1]["role"] == "assistant"
+    # 补充不是一轮对话：不吃轮数，也不挡「直接重新出方案」（门槛看最后一条聊天）
     assert view["turns_used"] == 1
     assert view["can_generate"] is True
 

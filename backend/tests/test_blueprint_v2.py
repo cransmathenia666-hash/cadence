@@ -403,24 +403,31 @@ def test_duplicate_stage_criterion_ids_are_rejected(conn):
 
 # ---------- ⑤ 增强模式：审查员行为保留，审查失败不落提案 ----------
 
-def test_enhanced_review_failure_lands_no_proposal(conn):
-    """审查员输出不合格 → 不落提案、不静默降级；会话保持 active。"""
+def test_enhanced_review_failure_degrades_and_still_lands(conn):
+    """审查员连重试都没产出可用结论：该席降级弃权、初稿照常落提案（不再整稿不落）。"""
     transport = ScriptedTransport(
         blueprint_json(stage("学 HTTP")),
         "这不是 JSON",  # 水平核对员输出不合格
-        "仍然不是 JSON",  # 带原因重试仍不合格：fail-closed，不落提案
+        "仍然不是 JSON",  # 带原因重试仍不合格 → 弃权，不再 fail-closed
+        review_json(summary="阶段衔接没有问题"),  # 结构审查员照常审
     )
     candidate_id, _, session_id, _ = ready_thread(conn)
 
-    with pytest.raises(blueprint.BlueprintError):
-        blueprint.generate_blueprint(
-            conn, candidate_id, planning_session_id=session_id, mode="enhanced", transport=transport
-        )
+    created = blueprint.generate_blueprint(
+        conn, candidate_id, planning_session_id=session_id, mode="enhanced", transport=transport
+    )
 
-    assert pending_count(conn) == 0
+    assert pending_count(conn) == 1
+    payload = json.loads(
+        conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()["payload"]
+    )
+    level = payload["review"]["reviewers"][0]
+    assert level["degraded"] is True and level["points"] == []
+    # 初稿未经这一席复核，也未经修订：review.initial 保持 None，会话进入 blueprint_pending
+    assert payload["review"]["initial"] is None
     assert conn.execute(
         "SELECT status FROM planning_session WHERE id = ?", (session_id,)
-    ).fetchone()["status"] == "active"
+    ).fetchone()["status"] == "blueprint_pending"
 
 
 def test_enhanced_revision_reruns_v2_validation_and_keeps_the_contract(conn):

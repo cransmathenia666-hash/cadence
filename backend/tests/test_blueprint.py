@@ -717,24 +717,95 @@ def test_enhanced_blueprint_keeps_uncertain_level_as_a_confirmation_note(conn):
     assert payload["review"]["revision_resolution"] == []
 
 
-@pytest.mark.parametrize(
-    "responses",
-    [
-        ("not-json", review_json(), review_json()),  # 增强模式草稿无效时不把额度耗在重试上
-        (blueprint_json(stage("学 HTTP")), "not-json", "not-json"),  # 第一位审查员重试后仍失效不静默降级
-        (blueprint_json(stage("学 HTTP")), review_json(), "not-json", "not-json"),  # 第二位审查员同样不降级
-    ],
-)
-def test_enhanced_blueprint_fails_closed_on_invalid_draft_or_review(conn, responses):
+def test_enhanced_blueprint_fails_closed_on_invalid_draft(conn):
+    """初稿本身无效时仍 fail-closed：不落提案（审查席的降级只救审查，不救草稿）。"""
     make_provider(conn)
     add_profile(conn)
-    transport = ScriptedTransport(chat_reply([], ready=True), *responses)
+    transport = ScriptedTransport(chat_reply([], ready=True), "not-json", review_json(), review_json())
     candidate_id, _ = ready_thread(conn, transport=transport)
 
     with pytest.raises(blueprint.BlueprintError):
         blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
 
     assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
+
+
+def test_enhanced_reviewer_total_failure_degrades_instead_of_aborting(conn):
+    """审查员连重试都没产出可用结论：该席降级弃权，初稿照常落提案（2026-10-04 起
+    结构问题不再中止整个生成）。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("学 HTTP")),
+        "not-json",
+        "not-json",  # 第一位审查员连重试都不合格 → 弃权
+        review_json(summary="阶段衔接没有问题"),  # 第二位照常审
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    created = blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    row = conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()
+    review = json.loads(row["payload"])["review"]
+    assert [bool(entry.get("degraded")) for entry in review["reviewers"]] == [True, False]
+    assert review["reviewers"][0]["points"] == []
+    assert "弃权" in review["reviewers"][0]["summary"]
+    assert review["reviewers"][1]["summary"] == "阶段衔接没有问题"
+    assert created["calls"] == 4
+
+
+def test_review_check_tolerates_null_fields_and_extra_keys():
+    """模型把可空栏位写成 null / 顺手多带字段 / 立场缺失：能救则救，不再整份作废
+    （2026-10-04 宽容解析——换模型解决不了的那种「结构连看两次都不合格」就在这断根）。"""
+    raw = json.dumps(
+        {
+            "summary": "整体可用",
+            "points": [
+                {
+                    "stance": "disagree",
+                    "target": "第 1 阶段",
+                    "point": "拆得太粗",
+                    "reason": "没有可验收的交付物",
+                    "adjustment": None,
+                    "severity": None,
+                    "question": None,
+                    "channel": "顺手多带的字段",
+                },
+                {"stance": None, "target": "x", "point": "y", "reason": "z"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    report, problem = blueprint._check_review(raw)
+    assert problem is None and report is not None
+    assert len(report.points) == 1
+    # 反对没给建议调整 → 当场降为待确认；question 不替模型编造
+    assert report.points[0].severity == "confirm"
+    assert report.points[0].adjustment == ""
+    assert report.points[0].question == ""
+    assert "1 条意见因结构不完整未纳入" in report.summary
+
+
+def test_enhanced_review_call_uses_structured_tool(conn):
+    """审查调用改走结构化输出（tools + tool_choice）：由接口层约束参数形状。"""
+    make_provider(conn)
+    add_profile(conn)
+    transport = ScriptedTransport(
+        chat_reply([], ready=True),
+        blueprint_json(stage("复习 HTTP")),
+        review_json(summary="没有问题"),
+        review_json(summary="阶段衔接没有问题"),
+    )
+    candidate_id, _ = ready_thread(conn, transport=transport)
+
+    blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+
+    reviewer_payload = transport.seen[2]["payload"]
+    assert reviewer_payload["tools"][0]["function"]["name"] == blueprint.REVIEW_TOOL_NAME
+    assert reviewer_payload["tool_choice"]["function"]["name"] == blueprint.REVIEW_TOOL_NAME
+    # 初稿与修订两笔调用不带工具：结构化输出只用在审查席
+    assert "tools" not in transport.seen[1]["payload"]
 
 
 def test_enhanced_review_accepts_stance_and_severity_aliases(conn):
@@ -804,7 +875,7 @@ def test_enhanced_review_retries_once_when_first_output_is_broken(conn):
 
 
 def test_enhanced_disagreement_without_adjustment_downgrades_to_confirm(conn):
-    """重试后仍只缺建议调整：降为待确认反对——意见保留、整稿保留、不触发修订。"""
+    """反对没写建议调整：当场降为待确认反对——意见保留、不触发修订、不浪费重试。"""
     make_provider(conn)
     add_profile(conn)
     bare = {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": "没有可验收的交付物"}
@@ -812,7 +883,6 @@ def test_enhanced_disagreement_without_adjustment_downgrades_to_confirm(conn):
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP")),
         review_json(bare),
-        review_json(bare),  # 重试仍缺 adjustment：触发降级而非整稿作废
         review_json(summary="没有问题"),
     )
     candidate_id, _ = ready_thread(conn, transport=transport)
@@ -825,27 +895,40 @@ def test_enhanced_disagreement_without_adjustment_downgrades_to_confirm(conn):
     assert level["points"][0]["stance"] == "disagree"
     assert level["points"][0]["severity"] == "confirm"
     assert payload["review"]["initial"] is None  # 待确认反对不触发修订
-    assert created["calls"] == 4
+    assert created["calls"] == 3  # 解析层直接接住，重试额度没动用
 
 
-def test_enhanced_review_with_blank_reason_still_fails_closed(conn):
-    """缺调整建议之外的结构问题（空白依据）不降级：重试仍不合格就整稿不落。"""
+def test_enhanced_review_with_blank_reason_drops_that_point_only(conn):
+    """内容空洞的意见（空白依据）丢那一条、其余照用；总评还在整份就算可用。"""
     make_provider(conn)
     add_profile(conn)
     blank = {"stance": "disagree", "target": "第 1 阶段", "point": "拆得太粗", "reason": " ", "adjustment": "拆成两阶段"}
+    good = {
+        "stance": "disagree", "target": "第 2 阶段", "point": "缺证据要求",
+        "reason": "交付物没法验收", "adjustment": "补一条证据要求", "severity": "revise",
+    }
     transport = ScriptedTransport(
         chat_reply([], ready=True),
         blueprint_json(stage("学 HTTP")),
-        review_json(blank),
-        review_json(blank),
+        review_json(blank, good),
         review_json(summary="没有问题"),
+        revision_json(
+            stage("学 HTTP"),
+            resolutions=[{"reviewer_key": "level", "point_index": 0, "resolution": "补一条证据要求"}],
+        ),
     )
     candidate_id, _ = ready_thread(conn, transport=transport)
 
-    with pytest.raises(blueprint.BlueprintError):
-        blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
+    created = blueprint.generate_blueprint(conn, candidate_id, mode="enhanced", transport=transport)
 
-    assert conn.execute("SELECT COUNT(*) AS n FROM proposal WHERE kind = ?", (BLUEPRINT_KIND,)).fetchone()["n"] == 0
+    row = conn.execute("SELECT payload FROM proposal WHERE id = ?", (created["proposal_id"],)).fetchone()
+    review = json.loads(row["payload"])["review"]
+    level = review["reviewers"][0]
+    assert [point["target"] for point in level["points"]] == ["第 2 阶段"]
+    assert "1 条意见因结构不完整未纳入" in level["summary"]
+    # 剩下的是要改的反对 → 正常触发修订（calls=初稿＋两位审查员＋修订，聊天那轮不计）
+    assert review["initial"] is not None
+    assert created["calls"] == 4
 
 
 def test_enhanced_confirm_points_carry_user_question(conn):
