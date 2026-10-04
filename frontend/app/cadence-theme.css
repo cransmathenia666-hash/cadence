@@ -290,3 +290,38 @@ textarea:focus-visible {
 }
 .provider-input::placeholder { color: var(--text-tertiary); }
 .provider-input:focus { border-color: var(--text-primary); }
+
+/* 数字输入的原生步进箭头与下划线输入的气质不符，去掉（键入与上下键仍可用）。 */
+.provider-input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+.provider-input[type="number"]::-webkit-outer-spin-button,
+.provider-input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+/* 下拉同用下划线输入，箭头自绘；展开项给深色底，免得白块突兀。 */
+select.provider-input {
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.45)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  padding-right: 28px;
+  cursor: pointer;
+}
+select.provider-input option { background: #17171b; color: #fff; }
+
+textarea.provider-input { line-height: 1.7; min-height: 88px; resize: vertical; }
+.provider-input--invalid { border-color: rgba(252, 165, 165, 0.65) !important; }
+
+/* 自绘复选框：白色勾选块，与保存按钮同一语言。 */
+.provider-check { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+.provider-check input { position: absolute; opacity: 0; pointer-events: none; }
+.provider-check .provider-check-box { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid rgba(255, 255, 255, 0.3); transition: border-color 140ms ease, background-color 140ms ease; }
+.provider-check .provider-check-box svg { width: 11px; height: 11px; opacity: 0; transform: scale(0.6); transition: opacity 140ms ease, transform 140ms ease; color: #000; }
+.provider-check:hover .provider-check-box { border-color: rgba(255, 255, 255, 0.6); }
+.provider-check input:checked + .provider-check-box { background: #fff; border-color: #fff; }
+.provider-check input:checked + .provider-check-box svg { opacity: 1; transform: scale(1); }
+.provider-check input:focus-visible + .provider-check-box { outline: 2px solid rgba(255, 255, 255, 0.45); outline-offset: 2px; }
+
+/* 思考程度的分段选择：选中项走「白描边＋微亮底」，与左侧栏选中项同语言。 */
+.provider-segment { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-segment button { border: 1px solid rgba(255, 255, 255, 0.14); padding: 6px 14px; font-size: 12px; color: rgba(255, 255, 255, 0.45); transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease; }
+.provider-segment button:hover { border-color: rgba(255, 255, 255, 0.5); color: rgba(255, 255, 255, 0.85); }
+.provider-segment button[aria-pressed="true"] { border-color: rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.1); color: #fff; }
