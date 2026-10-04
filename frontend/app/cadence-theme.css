@@ -158,6 +158,15 @@ body {
   scrollbar-width: none;
 }
 
+/* 全应用隐藏滚动条：滚动能力保留，位置感由用户自行把握 */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+}
+
 .shimmer {
   position: relative;
   overflow: hidden;
