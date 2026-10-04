@@ -363,6 +363,20 @@ def decide(
                 actor="user",
             )
 
+    # 确认落地后往对话历史追加一条「已完成」事实行（2026-10-04 走查修复）：
+    # 模型下一轮读历史时看得见「这条建议已经批准落地」，不再重复追问、重复发确认卡。
+    # plan_dialogue 是追加式日志不经台账（同 dialogue._record 的口径）；只给计划对话类
+    # 提案补记，回执里那句 summary 就是「到底改了什么」的人话。
+    if approved and kind in (plan_change.KIND, plan_change.CONTRACT_CHANGE_KIND):
+        note = str(payload.get("summary") or "").strip()
+        target_plan_id = payload.get("plan_id")
+        if note and target_plan_id is not None:
+            conn.execute(
+                "INSERT INTO plan_dialogue (plan_id, role, content, questions, report_id, created_at)"
+                " VALUES (?, 'assistant', ?, NULL, NULL, ?)",
+                (int(target_plan_id), f"（已按你的确认完成：{note}）", now_iso()),
+            )
+
     return {
         "id": proposal_id,
         "kind": kind,

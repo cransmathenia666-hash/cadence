@@ -580,8 +580,12 @@ def test_the_view_hands_back_each_message_suggestion(conn):
     assert carried["summary"] == "改「读 MDN」的截止日：2026-10-01 → 2026-10-08"
 
     proposals.decide(conn, done["proposal_id"], approved=True)
-    # 已裁定的也带回来（界面就不给按钮了）——那一条「已确认」还看得见
-    assert dialogue.view(conn, plan_id)["messages"][-1]["suggestion"]["status"] == "accepted"
+    after = dialogue.view(conn, plan_id)["messages"]
+    # 批准落地后历史末尾多了一条系统补记的「已完成」事实行（2026-10-04 走查修复）
+    assert after[-1]["role"] == "assistant" and after[-1]["content"].startswith("（已按你的确认完成：")
+    assert after[-1]["suggestion"] is None
+    # 已裁定的建议也带回来（界面就不给按钮了）——那一条「已确认」还看得见
+    assert after[-2]["suggestion"]["status"] == "accepted"
 
 
 def test_at_most_one_suggestion_by_shape(conn):
@@ -767,6 +771,20 @@ def test_confirming_an_add_task_puts_it_under_the_named_stage(conn):
     added = plan.get_node(conn, int(first["id"]))
     assert added["title"] == "把错误处理补上"
     assert added["parent_id"] == stage_id and added["due_date"] == "2026-10-15"
+    # 2026-10-04 走查修复：批准落地后对话历史必须补一条「已完成」事实行，
+    # 否则模型下一轮看不见改动已生效，会重复追问、重复发确认卡。
+    notes = conn.execute(
+        "SELECT content FROM plan_dialogue WHERE plan_id = ? AND role = 'assistant'"
+        " AND content LIKE '（已按你的确认完成：%'",
+        (plan_id,),
+    ).fetchall()
+    assert len(notes) == 1
+    assert "把错误处理补上" in notes[0]["content"]
+    # 下一轮的模型输入里要能看见这条补记（历史拼装带上它）
+    follow = ScriptedTransport(envelope("好的，已经看到了。", None))
+    dialogue.say(conn, plan_id, "再加一件", transport=follow)
+    sent = follow.seen[0]["payload"]["messages"]
+    assert any("已按你的确认完成" in (m.get("content") or "") for m in sent)
 
 
 def test_one_suggestion_can_carry_several_tasks(conn):
