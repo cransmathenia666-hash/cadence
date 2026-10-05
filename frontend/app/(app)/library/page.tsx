@@ -115,6 +115,37 @@ export default function LibraryPage() {
 
   // 异步切换根目录的竞态闸：只有最后一次请求有权落视图（页面重做模板的老规矩）。
   const filesSeq = useRef(0);
+  // 盯在途扫描的循环闸：换根或离开页面就停，慢回来的旧轮次一律作废。
+  const followSeq = useRef(0);
+
+  /**
+   * 接回在途扫描：扫描跑在服务端，你切走页面时它不会停——但页面一回来状态就丢了，
+   * 看上去像「什么都没在跑」。所以重新进页面时若发现这个根有正在跑的扫描，就每几秒
+   * 跟一次，跑完自己停（最多跟 40 分钟，比任何一次扫描都长）。
+   */
+  async function followRunningScan(rootId: number) {
+    const seq = ++followSeq.current;
+    setScanPending(true);
+    try {
+      for (let round = 0; round < 600; round += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+        if (followSeq.current !== seq) return;
+        const history = await getKnowledgeScans(rootId, 12);
+        if (followSeq.current !== seq) return;
+        setScans(history.scans);
+        if (!history.scans.some((scan) => scan.status === "running")) {
+          const filesNow = await getKnowledgeFiles(rootId);
+          if (followSeq.current !== seq) return;
+          setListing(filesNow);
+          return;
+        }
+      }
+    } catch {
+      // 后端不可用或读取失败：停下，别把界面永远钉在「扫描中」
+    } finally {
+      if (followSeq.current === seq) setScanPending(false);
+    }
+  }
 
   /** 配置动过之后重取根目录：优先选中刚动过的那个，否则退回第一个可用的。 */
   async function reloadAfterConfig(preferId: number | null) {
@@ -183,18 +214,25 @@ export default function LibraryPage() {
   // 取数写在 .then 回调里：effect 里同步 setState 会被 react-hooks/set-state-in-effect 拦。
   useEffect(() => {
     if (selectedRootId === null) return;
+    const rootId = selectedRootId;
     const seq = ++filesSeq.current;
-    fetchRootData(selectedRootId)
+    fetchRootData(rootId)
       .then((data) => {
         if (filesSeq.current !== seq) return;
         setListing(data.files);
         setScans(data.scans);
         setLoadError(null);
+        // 上一次进来点的扫描可能还在服务端跑：接回来接着看，否则只剩「没有扫描中」的假象。
+        if (data.scans.some((scan) => scan.status === "running")) void followRunningScan(rootId);
       })
       .catch((cause: unknown) => {
         if (filesSeq.current !== seq) return;
         setLoadError(messageOf(cause, LOAD_FILES_FAILED));
       });
+    return () => {
+      followSeq.current += 1; // 换根 / 离开这一页：停掉观察循环
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRootId]);
 
   async function onScan() {
@@ -331,8 +369,9 @@ export default function LibraryPage() {
                   />
                 </div>
                 <p className="mt-2.5 text-[11px] leading-5 text-white/45">
-                  逐篇读原文并提炼，整库一次扫完可能要等十几分钟——
-                  <span className="text-white/70">别关页面</span>，完成后下方会给出这次的账与缺口。
+                  {scanPending
+                    ? "扫描在跑，这个页面每几秒跟一次，跑完会自己停——离开这一页也没关系，回来会接上。"
+                    : "逐篇读原文并提炼，整库一次扫完可能要等十几分钟；扫描在服务端跑，切走页面不会中断，回来会接上。"}
                 </p>
                 {lastReport !== null && limits !== null && (
                   <div className="mt-3 space-y-2.5 border-t border-white/[0.08] pt-3">
