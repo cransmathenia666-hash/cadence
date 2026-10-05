@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ArrowLeft, ChevronRight, X } from "lucide-react";
-import { isBlueprintV2, type BlueprintPayload, type Proposal } from "@/lib/api";
+import { isBlueprintV2, type BlueprintPayload, type ProfileChangePayload, type Proposal } from "@/lib/api";
 import { ActionSwapButton } from "@/components/motion/action-swap";
 import { KIND_CONFIG } from "./types";
 import {
@@ -27,7 +27,10 @@ export function getProposalTitle(proposal: Proposal): string {
     return text ? `研判「${text.slice(0, 36)}${text.length > 36 ? "…" : ""}」` : "资料研判";
   }
   if (proposal.kind === "profile_change") {
-    return typeof payload.content === "string" ? payload.content : "档案变更";
+    const content = typeof payload.content === "string" ? payload.content.trim() : "";
+    if (content) return content;
+    // 存疑卡可能没给可写入的句子；侧栏清单里也要能认出它。
+    return (payload as ProfileChangePayload).action === "uncertain" ? "存疑的档案候选" : "档案变更";
   }
   if (proposal.kind === "plan_change") {
     const summary = typeof payload.summary === "string" ? payload.summary : "";
@@ -118,6 +121,11 @@ export function ProposalCard({
   const nothingTicked = isBlueprint && selection.length === 0;
   const confirmMissing = blueprintV2 && !confirmContract;
   const contractDraftError = blueprintV2 ? contractDraftErrorOf(contractDraft) : null;
+  // 知识库扫描的存疑卡（KB-03）：连提炼它那一步都拿不准，不可批准（后端同样拒绝）。
+  // 两个出路都在卡片正文里写着：重新扫描产出确切的候选，或驳回并留一句理由。
+  const profileUncertain =
+    proposal.kind === "profile_change" &&
+    (proposal.payload as unknown as ProfileChangePayload).action === "uncertain";
   // 待确认清单（审查席 severity=confirm 的反对）：每条优先用模型写的问句——它回答
   // 「要补什么」；旧稿没有问句字段就显示结论句，但**绝不把结论句复制进输入框**。
   const pendingConfirmPoints = isBlueprint
@@ -143,16 +151,18 @@ export function ProposalCard({
     setReturnOpen(true);
     if (!returnReason.trim() && pendingPrefill) setReturnReason(pendingPrefill);
   }
-  const approveBlocked = nothingTicked || blueprintV1 || confirmMissing || contractDraftError !== null;
-  const approveBlockedReason = blueprintV1
-    ? "旧版蓝图（没有成果契约）不能直接批准——请在规划对话里重新生成 v2 蓝图后再来"
-    : confirmMissing
-      ? "批准前必须先勾选「确认成果契约」"
-      : contractDraftError
-        ? contractDraftError
-        : nothingTicked
-          ? "蓝图必须勾选至少一项阶段或任务才能批准"
-          : undefined;
+  const approveBlocked = nothingTicked || blueprintV1 || confirmMissing || contractDraftError !== null || profileUncertain;
+  const approveBlockedReason = profileUncertain
+    ? "存疑卡不可批准：先在「来源」里核实原文，然后重新扫描产出确切的候选，或者驳回它（理由进台账）"
+    : blueprintV1
+      ? "旧版蓝图（没有成果契约）不能直接批准——请在规划对话里重新生成 v2 蓝图后再来"
+      : confirmMissing
+        ? "批准前必须先勾选「确认成果契约」"
+        : contractDraftError
+          ? contractDraftError
+          : nothingTicked
+            ? "蓝图必须勾选至少一项阶段或任务才能批准"
+            : undefined;
   const title = getReadingTitle(proposal);
 
   async function runDecide(approved: boolean, reason?: string) {

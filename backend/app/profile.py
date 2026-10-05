@@ -14,8 +14,9 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
-from . import ledger
+from . import ledger, memory
 from .advisor import PROFILE_CATEGORIES
 
 
@@ -62,9 +63,15 @@ def find_duplicate(
     ).fetchone()
 
 
-def assert_no_duplicate(conn: sqlite3.Connection, category: str, content: str) -> None:
+def assert_no_duplicate(
+    conn: sqlite3.Connection, category: str, content: str, *, exclude_id: int | None = None
+) -> None:
+    """同类别下不许有一字不差的当前有效条目。
+
+    `exclude_id` 给「取代」用：被取代的那条自己不算挡路的重复（同记忆判重的口径）。
+    """
     duplicate = find_duplicate(conn, category, content)
-    if duplicate is not None:
+    if duplicate is not None and duplicate["id"] != exclude_id:
         raise ProfileConflict(
             f"档案里已有这条：#{duplicate['id']}（{category}，一字不差）。"
             "不用再补；想改它就用「改」，不想让它算数就「作废」"
@@ -81,12 +88,15 @@ def create_item(
     source_kind: str = "user_stated",
     fact_time: str | None = None,
     review_at: str | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> int:
     """补一条档案：先判重，再落 active。
 
     `reason` 留给「提案批准」那条路：台账里要能看出这条是谁按哪个提案写进去的。
     `source_kind` 从记忆系统（2026-09-21）起必填默认值：档案多了一列「来源性质」，
     手工敲进来的就是**用户陈述**——留空会让 `db.init` 的补齐步骤把它误标成历史条目。
+    `evidence`（2026-10-05 KB-03 写入侧，默认不传 = 行为不变）：带知识库出处批准时，
+    出处行与档案新增落在**同一个事务**里——调用方（proposals.decide）开事务，这里只写。
     """
     if category not in PROFILE_TOKENS:
         raise ProfileError(
@@ -96,7 +106,7 @@ def create_item(
     if not cleaned:
         raise ProfileError("档案内容不能为空")
     assert_no_duplicate(conn, category, cleaned)
-    return ledger.create_active(
+    item_id = ledger.create_active(
         conn,
         "profile_item",
         {
@@ -109,18 +119,38 @@ def create_item(
         actor=actor,
         reason=reason,
     )
+    if evidence:
+        memory.attach_evidence(conn, "global", item_id, evidence)
+    return item_id
 
 
 def supersede_item(
-    conn: sqlite3.Connection, item_id: int, *, content: str, reason: str, actor: str = "user"
+    conn: sqlite3.Connection,
+    item_id: int,
+    *,
+    content: str,
+    reason: str,
+    actor: str = "user",
+    evidence: list[dict[str, Any]] | None = None,
 ) -> int:
-    """改一条档案的内容：走台账「取代」，旧值不删、理由留痕。"""
+    """改一条档案的内容：走台账「取代」，旧值不删、理由留痕。
+
+    `evidence`（2026-10-05 KB-03 写入侧，默认不传 = 行为不变）挂到**取代出来的新条目**上；
+    旧条目自己的证据行留在原地——旧值既然留痕，它的出处也留痕。
+    """
     require_active(conn, item_id)
     if not str(reason or "").strip():
         raise ProfileError("取代必须写明理由，否则台账回答不了「为什么改」")
-    return ledger.supersede(
+    new_id = ledger.supersede(
         conn, "profile_item", item_id, {"content": content.strip()}, reason=reason.strip(), actor=actor
     )
+    if evidence:
+        memory.attach_evidence(conn, "global", new_id, evidence)
+    else:
+        # 调用方没给新出处（例如 /profile 页就地改一句）：把旧条目的出处原样带到新条目上。
+        # 不带的话，改一次就静默丢了来源——知识库候选批准进来的条目尤其吃亏（§5.2 来源可考）。
+        memory.copy_evidence(conn, "global", item_id, new_id)
+    return new_id
 
 
 def void_item(

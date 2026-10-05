@@ -384,27 +384,39 @@
   - Verify：报告字段兼容、复盘卡规则、无明确意图不落提案、报告上下文可追溯；接口契约变更同步测试。
   - Files：`backend/app/plan.py`、`backend/app/dialogue.py`、`backend/app/main.py`、`backend/tests/`
 
-## P5 知识库受限读取与档案候选（已授权、待实现）
+## P5 知识库受限读取与档案候选（已实现 2026-10-05）
 
-- [ ] **KB-01 根目录与文件安全层**
+2026-10-05 落地：施工与复核分两轮工作流完成（施工跑 GLM-5.3-Flash；独立复核换 deepseek-v4.1-flash，三个视角复核 + 逐条换人验证 + 独立重跑全量闸门）。后端全量 `pytest` 812 passed（另有 2 条与当天日期绑定的既有用例这次一并修好）、前端 `tsc` / `eslint` 0 error。**真实库实扫与浏览器观感归用户手工走查**。
+
+- [x] **KB-01 根目录与文件安全层**
   - Acceptance：只读本地配置的白名单根目录；模型/前端不能传绝对路径、`..`、符号链接逃逸或禁止扩展名；前端只见 alias/相对路径，不暴露绝对路径。知识库内容不直接创建计划、任务或修改档案。
   - Verify：越界、绝对路径、符号链接、禁止文件和脱敏响应单测；只用临时目录。
-  - Files：`backend/app/knowledge_base.py`（新）、`backend/sql/schema.sql`、`backend/tests/`
+  - Files：`backend/app/knowledge_base.py`（新）、`backend/sql/schema.sql`、`backend/app/db.py`、`backend/tests/test_knowledge_base.py`
 
-- [ ] **KB-02 受限读取循环与覆盖账**
+- [x] **KB-02 受限读取循环与覆盖账**
   - Acceptance：列目录/读文件在受限工具循环内完成，读取次数/单篇/总字符配额真实生效；文件变化、中断、模型失败或配额耗尽不得标记 covered；不把原文写入普通计划上下文或运行账。
   - Verify：中断、额度、文件变化、重扫和部分成功路径；扫描失败不伪装成功。
-  - Files：`backend/app/knowledge_base.py`、`backend/app/agent_runtime.py`、`backend/sql/schema.sql`、`backend/tests/`
+  - Files：`backend/app/knowledge_base.py`（受限循环按模块自持实现，未改 `agent_runtime.py`——它绑计划编号，这里要独立的扫描账）、`backend/sql/schema.sql`、`backend/tests/test_knowledge_scan.py`
 
-- [ ] **KB-03 档案候选、出处校验与用户裁定**
+- [x] **KB-03 档案候选、出处校验与用户裁定**
   - Acceptance：扫描只产 `profile_change` 档案候选；每条带相对路径、逐字摘录和范围，摘录找不到/重复/不确定时不落可批准候选；用户逐条裁定后才进入档案，不能由扫描直接写入计划或档案。现有批量批准仅适用于新增 + 用户明确陈述。
   - Verify：假模型覆盖新增/取代/存疑、出处逐字校验、近似重复提示、完全重复拦截、批准后才可作为后续找方向/规划依据。
-  - Files：`backend/app/knowledge_base.py`、`backend/app/profile.py`、`backend/app/memory.py`、`backend/app/proposals.py`、`backend/tests/`
+  - Files：`backend/app/knowledge_base.py`、`backend/app/profile.py`、`backend/app/memory.py`、`backend/app/proposals.py`、`backend/tests/test_knowledge_approval.py`
 
-- [ ] **KB-04 知识库扫描 API 与周期入口**
+- [x] **KB-04 知识库扫描 API 与周期入口**
   - Acceptance：手动扫描和周期扫描复用受限规则，运行账记录处理状态、额度、失败原因和候选数；扫描结果不是成功 HTTP 的伪装，失败不推进覆盖账。
   - Verify：临时库 API、job dry-run 与失败回归；不得读取真实知识库。
-  - Files：`backend/app/main.py`、`backend/jobs/weekly_checkpoint.py`、`backend/tests/`
+  - Files：`backend/app/main.py`、`backend/app/knowledge_base.py`、`backend/tests/test_knowledge_api.py`
+
+- [x] **KB-05 知识库页面与候选出处展示**
+  - Acceptance：`/library` 给出根目录状态、文件台账、扫描与历史、配额与缺口；候选与档案能看到来源（相对路径 + 逐字摘录 + 行号）；页面不显示绝对路径、不渲染整篇原文。
+  - Verify：lint / tsc + 用户手工走查。
+  - Files：`frontend/app/(app)/library/page.tsx`（新）、`frontend/lib/api.ts`、`frontend/components/workbench/sidebar.tsx`、`frontend/components/proposals/`
+
+- [x] **KB-06 周期扫描接入**
+  - Acceptance：每周任务对每个可用根跑一次增量扫描，可用 `--no-knowledge` 跳过；dry-run 只预告不写覆盖账；单根失败如实成一行、不连累邮件与导出。
+  - Verify：job dry-run 与临时库测试。
+  - Files：`backend/app/jobs/weekly_checkpoint.py`、`backend/tests/test_weekly.py`
 
 ## P6 真实使用与质量调参
 

@@ -2002,9 +2002,27 @@ export async function extractProfileProposals(planId: number): Promise<DialogueE
 }
 
 /**
+ * 一条知识库出处：哪个根下哪个文件的哪一段原文。
+ *
+ * 摘录是后端在扫描时逐字验过的（找不到就整张卡不落）；批准时后端还会**再验一次**
+ * 摘录仍在当前文件里——文件改了会 409，提案保持待裁定，绝不照旧假设写档案。
+ */
+export type KnowledgeEvidence = {
+  root_alias: string;
+  relative_path: string;
+  excerpt: string;
+  line_start: number;
+  line_end: number;
+};
+
+/**
  * 「档案变更」提案的 payload（T28 的计划对话产的）。
  *
  * 批准 = 真的写进长期档案（新增一条；同类别一字不差的重复会被拒）。
+ *
+ * **2026-10-05 KB-03 起**，知识库扫描也产这一类：payload 多出 `action` 与知识库出处。
+ * 老 payload 没有 `action` ＝按新增处理。`uncertain`（存疑）卡**不可批准**——
+ * 后端会拒绝，前端也不给批准按钮。
  */
 export type ProfileChangePayload = {
   /** 五个约定令牌之一：life_habit / life_log / current_state / short_term_goal / long_axis。 */
@@ -2014,6 +2032,24 @@ export type ProfileChangePayload = {
   why?: string;
   /** 这条是从哪个计划的对话里聊出来的。 */
   plan_id?: number;
+  /** 知识库卡的动作：add 新增 / supersede 取代 / uncertain 存疑（存疑不可批准）。 */
+  action?: "add" | "supersede" | "uncertain" | string;
+  /** 存疑卡的说明：连提炼它那一步都拿不准的是什么。uncertain 必带。 */
+  uncertainty_reason?: string | null;
+  /** 知识库出处（相对路径 + 逐字摘录 + 行号）。批准时后端会再验一次摘录仍在文件里。 */
+  evidence?: KnowledgeEvidence[];
+  /** 知识库扫描产的卡的标记。 */
+  knowledge?: boolean;
+  /** 产这张卡的那次扫描。 */
+  scan_id?: number;
+  /** 按哪一版需求口径提炼的。 */
+  requirements_version?: string;
+  /** 近似重复提示（只提示、不阻止裁定）。 */
+  duplicate_hint?: string | null;
+  /** supersede 的目标档案条目。 */
+  target_profile_id?: number | null;
+  /** supersede 要被换下的旧句子。 */
+  target_content?: string;
 };
 
 /**
@@ -2134,6 +2170,12 @@ export type MemoryEvidence = {
   source_id: number;
   excerpt: string;
   source_time: string | null;
+  /** 知识库来源（knowledge_file）才有的下半段：相对路径 / 行号 / 版本哈希，证据可独立可考。 */
+  knowledge_file_id?: number | null;
+  content_hash?: string | null;
+  relative_path?: string | null;
+  line_start?: number | null;
+  line_end?: number | null;
 };
 
 export type MemoryItem = {
@@ -2402,6 +2444,135 @@ export async function purgeMemory(input: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scope: input.scope, reason: input.reason }),
   });
+}
+
+// ---------- 知识库（KB-04 / KB-05，方案 §6.7） ----------
+//
+// 本机原始资料的受控入口：模型不碰硬盘，扫描经受限工具逐篇读原文、只产**带出处的
+// 档案候选**（kind=profile_change 的提案），写不写由你在提案页裁定。
+// 根目录来自本地环境变量配置（CADENCE_KNOWLEDGE_ROOTS）：对外只有编号、别名与脱敏过的
+// 不可用原因——**任何响应里都没有绝对路径**，也没有读原文的接口（原文只活在模型那轮对话里）。
+
+/** 一个已配置的知识库根目录。`error` 是后端写好的人话（目录不存在、配置格式不对等）。 */
+export type KnowledgeRoot = {
+  id: number;
+  alias: string;
+  enabled: boolean;
+  error: string | null;
+};
+
+/** 读取配额的公开上限：由后端给，界面只按它画比例，不自己抄一份数字。 */
+export type KnowledgeLimits = {
+  max_read_calls: number;
+  max_file_chars: number;
+  max_total_chars: number;
+};
+
+/** 根下的一个可读文件：只有相对路径、大小、修改时间与当前版本是否已覆盖。 */
+export type KnowledgeFile = {
+  relative_path: string;
+  size: number;
+  modified_at: string;
+  /** 按当前内容哈希对最新覆盖账算的：文件改过就不算，重扫会重新处理它。 */
+  covered: boolean;
+};
+
+export type KnowledgeFileListing = {
+  root: { id: number; alias: string };
+  files: KnowledgeFile[];
+};
+
+/** 一行扫描账（历史与回执共用的账面字段）：读了多少、出了几条候选、为什么失败。 */
+export type KnowledgeScanRecord = {
+  scan_id: number;
+  root_id: number;
+  /** 根被移出配置后历史仍可读：别名可能为 null。 */
+  root_alias: string | null;
+  trigger: string;
+  requirements_version: string;
+  /** ok 全部处理完 / partial 有缺口但有成功 / failed 有文件失败——失败是业务结果，不是接口错误。 */
+  status: string;
+  read_calls: number;
+  chars_read: number;
+  files_considered: number;
+  candidates_created: number;
+  quality_status: string | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+};
+
+/** 发起扫描拿到的完整报告：账面字段 + 每个文件的下场 + 没做成 / 没读完的缺口（人话逐条）。 */
+export type KnowledgeScanReport = {
+  scan_id: number;
+  root_id: number;
+  root_alias: string;
+  trigger: string;
+  requirements_version: string;
+  status: string;
+  quality_status: string;
+  read_calls: number;
+  chars_read: number;
+  files_considered: number;
+  candidates_created: number;
+  files: {
+    relative_path: string;
+    status: string;
+    error: string | null;
+    candidates: number;
+    /** 被确定性校验拦下的卡（写明为什么）。 */
+    dropped: { why: string }[];
+    /** 模型自报没看清的部分。 */
+    model_gaps: string[];
+  }[];
+  /** 增量模式下跳过的（当前版本已覆盖）。 */
+  skipped_already_covered: string[];
+  unread_gaps: string[];
+  error: string | null;
+};
+
+/** 已配置的根目录：编号、别名、可用状态与脱敏过的不可用原因。绝不含绝对路径。 */
+export async function getKnowledgeRoots(): Promise<{
+  roots: KnowledgeRoot[];
+  limits: KnowledgeLimits;
+}> {
+  return request<{ roots: KnowledgeRoot[]; limits: KnowledgeLimits }>("/api/knowledge/roots");
+}
+
+/** 一个根下的可读文件清单（相对路径一律正斜杠，已按路径排序）。 */
+export async function getKnowledgeFiles(rootId: number): Promise<KnowledgeFileListing> {
+  return request<KnowledgeFileListing>(`/api/knowledge/files?root_id=${rootId}`);
+}
+
+/**
+ * 发起一次扫描：列目录 → 逐文件受限提炼 → 覆盖账与候选（只产候选，不写档案）。
+ *
+ * **失败是业务结果**：模型不通、输出不合格、文件被动过都会让状态落在 partial / failed
+ * 并带人话原因与缺口，照常 200 返回——调用方要读 `status`，不能只 try/catch。
+ * `mode` 不传就是增量（跳过当前版本已覆盖的文件）；`full` 全部重扫。
+ */
+export async function startKnowledgeScan(input: {
+  rootId?: number;
+  mode?: "incremental" | "full";
+}): Promise<KnowledgeScanReport> {
+  return request<KnowledgeScanReport>("/api/knowledge/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      root_id: input.rootId ?? null,
+      mode: input.mode ?? "incremental",
+    }),
+  });
+}
+
+/** 扫描历史（新的在前）；`rootId` 给了就只看那个根的。只有账面字段，不含任何原文。 */
+export async function getKnowledgeScans(
+  rootId?: number,
+  limit = 20,
+): Promise<{ scans: KnowledgeScanRecord[] }> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (rootId !== undefined) params.set("root_id", String(rootId));
+  return request<{ scans: KnowledgeScanRecord[] }>(`/api/knowledge/scans?${params.toString()}`);
 }
 
 // ---------- 每周提醒与导出（P4 触达：T15–T17） ----------

@@ -13,6 +13,12 @@
 - `profile_change`（`dialogue.py` 产，2026-09-18 T28 起）：计划对话里聊出的「我的状态变了」。
   批准 = **真的写进长期档案**（新增一条，走 `app/profile.py` 的同一道判重闸）——这是这一类
   的第一个生产者，也是「批准」第一次真的改档案；驳回只留痕。
+  **2026-10-05 KB-03 写入侧起**，知识库扫描（`knowledge_base.py`）也产这一类：payload 带
+  `action`（add / supersede / uncertain）与知识库出处（evidence：root_alias + 相对路径 +
+  逐字摘录 + 行号）。批准按动作分流：add 走判重闸新增、supersede 取代仍有效的目标条目、
+  uncertain 拒绝批准（存疑卡不该闭眼签）；带知识库出处的批准把**档案写入、memory_evidence、
+  提案终态**放进同一个事务，且批准前再验一次摘录仍能在当前文件里逐字找到——文件改了就
+  409，绝不静默套用扫描时的旧假设（方案 §5.2 末段）。没有 action 与出处的老 payload 照旧。
 - `plan_change`（`dialogue.py` 产，2026-09-18 T31 起，SPEC 决策 39）：计划对话里附带的
   **一条可执行建议**（改一个已有节点 / 往某个阶段加任务 / 加一个阶段带它的任务）。批准 =
   按 `action` 分流：改的走 `plan.update_node_fields`（原地改、**id 不变**、台账一条流水），
@@ -37,7 +43,17 @@ import json
 import sqlite3
 from typing import Any
 
-from . import advisor, blueprint, contract, ledger, memory, plan, plan_change, profile
+from . import (
+    advisor,
+    blueprint,
+    contract,
+    knowledge_base,
+    ledger,
+    memory,
+    plan,
+    plan_change,
+    profile,
+)
 from .db import atomic, now_iso
 
 
@@ -179,11 +195,26 @@ def decide(
             reason=reason,
         )
 
-    # 档案变更：同样先把「能不能写」验完（类别合法、不撞同类别一字不差的现有条目），
-    # 写的动作留到状态改完之后——验不过就一条都不写，提案保持 pending 可重裁
+    # 档案变更：同样先把「能不能写」验完（动作合法、类别合法、目标仍有效、不撞一字不差
+    # 的现有条目、知识库摘录仍能在当前文件里找到），写的动作留到后面——验不过就一条都不写，
+    # 提案保持 pending 可重裁。带知识库出处的卡在这之后整体提前返回（状态变更与写入同一事务）。
     profile_category = ""
     profile_content = ""
+    profile_action = "add"
+    profile_target_id: int | None = None
+    knowledge_evidence: list[dict[str, Any]] = []
     if approved and kind == "profile_change":
+        # 老 payload 没有 action 字段＝按新增处理（2026-10-05 KB-03 写入侧起才分动作）
+        profile_action = str(payload.get("action") or "add").strip() or "add"
+        if profile_action == "uncertain":
+            raise ProposalError(
+                "这张卡标着存疑，先补清楚来源或改成新增再来批准——"
+                "存疑说明连提炼它的那一步都拿不准，批准它等于闭着眼签"
+            )
+        if profile_action not in ("add", "supersede"):
+            raise ProposalError(
+                f"档案变更的动作「{profile_action}」不认识，只能给：add / supersede / uncertain"
+            )
         profile_category = str(payload.get("category") or "").strip()
         profile_content = str(payload.get("content") or "").strip()
         if profile_category not in profile.PROFILE_TOKENS:
@@ -193,10 +224,69 @@ def decide(
             )
         if not profile_content:
             raise ProposalError("提案里没有要写进档案的内容，批准它等于什么都没发生")
+        if profile_action == "supersede":
+            raw_target = payload.get("target_profile_id")
+            if raw_target is None:
+                raise ProposalError("取代必须说明要替代档案里的哪一条（target_profile_id）")
+            try:
+                target_id_value = int(raw_target)
+            except (TypeError, ValueError):
+                raise ProposalError(
+                    f"取代目标编号「{raw_target}」不是数字——"
+                    "target_profile_id 要给档案条目的编号"
+                ) from None
+            try:
+                target_row = profile.require_active(conn, target_id_value)
+            except profile.ProfileNotFound as error:
+                raise ProposalNotFound(str(error)) from error
+            except profile.ProfileConflict as error:
+                raise ProposalConflict(str(error)) from error
+            if str(target_row["category"]) != profile_category:
+                raise ProposalError(
+                    f"要取代的条目 #{target_row['id']} 属于「{target_row['category']}」类，"
+                    f"跟这张卡的类别「{profile_category}」不一致"
+                )
+            if profile_content == str(target_row["content"]).strip():
+                raise ProposalError("取代的新内容和旧内容一模一样，这条改动等于没发生")
+            profile_target_id = target_id_value
         try:
-            profile.assert_no_duplicate(conn, profile_category, profile_content)
+            profile.assert_no_duplicate(
+                conn, profile_category, profile_content, exclude_id=profile_target_id
+            )
         except profile.ProfileConflict as error:
             raise ProposalConflict(str(error)) from error
+        # 带知识库出处的卡（payload 有 evidence 且条目里认得出知识库来源——扫描产的候选
+        # 都是这种写法）：出处逐条再验一遍，文件改了就地 409。验过即提前返回，走原子批准。
+        evidence_items = [item for item in (payload.get("evidence") or []) if isinstance(item, dict)]
+        if evidence_items and any(memory.is_knowledge_evidence(item) for item in evidence_items):
+            if not all(memory.is_knowledge_evidence(item) for item in evidence_items):
+                raise ProposalError(
+                    "这张卡的出处混着知识库与别的来源——一张卡只带一种出处，"
+                    "请拆开或重新提炼"
+                )
+            try:
+                knowledge_evidence = [
+                    knowledge_base.verify_evidence(item) for item in evidence_items
+                ]
+            except knowledge_base.KnowledgeError as error:
+                raise ProposalConflict(str(error)) from error
+            source_kind = str(payload.get("source_kind") or "agent_inferred").strip()
+            if source_kind not in memory.CANDIDATE_SOURCE_KINDS:
+                raise ProposalError(
+                    f"来源性质「{source_kind}」不认识，只能是 {' / '.join(memory.CANDIDATE_SOURCE_KINDS)}"
+                )
+            return _approve_knowledge_profile_change(
+                conn,
+                proposal_id,
+                payload,
+                action=profile_action,
+                category=profile_category,
+                content=profile_content,
+                target_id=profile_target_id,
+                source_kind=source_kind,
+                evidence=knowledge_evidence,
+                reason=reason,
+            )
 
     # T29：`stage_advance` 与 `plan_replan` 整类删除，不再有生产者。
     # 库里可能还留着老类型（历史或别处写进来的），这里明确拒绝而不是当通用类型放行——
@@ -252,7 +342,9 @@ def decide(
 
     if approved:
         if kind == "profile_change":
-            base = f"批准：把这条写进长期档案（{profile_category}）"
+            # 带知识库出处的批准在前面已提前返回（连状态变更一起进事务），这里只兜旧路径
+            verb = "取代一条档案" if profile_action == "supersede" else "把这条写进长期档案"
+            base = f"批准：{verb}（{profile_category}）"
         elif kind == plan_change.KIND:
             # 台账那句话说清「到底批准了哪一条」——summary 是后端拼的人话一行
             base = f"批准：{payload.get('summary') or '按聊天里的建议改动计划'}"
@@ -290,14 +382,25 @@ def decide(
     remembered: dict[str, Any] | None = None
     contract_result: dict[str, Any] | None = None
     if approved and kind == "profile_change":
+        # 走到这里的一定不带知识库出处（带了在上面已提前返回、连状态变更一起进事务）——
+        # 老路径保持原样：状态先改，写入随后，可预见的失败全在预检拦下
         try:
-            written_id = profile.create_item(
-                conn,
-                category=profile_category,
-                content=profile_content,
-                reason=f"按提案 #{proposal_id} 批准写进档案：{str(payload.get('why') or '').strip() or '计划对话里聊出的变化'}",
-                actor="user",
-            )
+            if profile_action == "supersede" and profile_target_id is not None:
+                written_id = profile.supersede_item(
+                    conn,
+                    profile_target_id,
+                    content=profile_content,
+                    reason=f"按提案 #{proposal_id} 批准取代档案条目：{str(payload.get('why') or '').strip() or '计划对话里聊出的变化'}",
+                    actor="user",
+                )
+            else:
+                written_id = profile.create_item(
+                    conn,
+                    category=profile_category,
+                    content=profile_content,
+                    reason=f"按提案 #{proposal_id} 批准写进档案：{str(payload.get('why') or '').strip() or '计划对话里聊出的变化'}",
+                    actor="user",
+                )
         except (profile.ProfileError, ledger.LedgerError) as error:
             raise ProposalError(f"档案没能写进去：{error}") from error
         written = {"id": written_id, "category": profile_category, "content": profile_content}
@@ -389,4 +492,79 @@ def decide(
         "remembered": remembered,
         # OC-09：contract_change 批准的回执带新版本号（effect=contract_activated 时非空）
         "contract": contract_result,
+    }
+
+
+def _approve_knowledge_profile_change(
+    conn: sqlite3.Connection,
+    proposal_id: int,
+    payload: dict[str, Any],
+    *,
+    action: str,
+    category: str,
+    content: str,
+    target_id: int | None,
+    source_kind: str,
+    evidence: list[dict[str, Any]],
+    reason: str | None,
+) -> dict[str, Any]:
+    """批准一张**带知识库出处**的档案变更卡（方案 §5.2 末段：三件事同一事务）。
+
+    出处已在 `decide` 里逐条验过（摘录仍能在当前文件里逐字找到）；这里在 `db.atomic`
+    里一次写完——知识库文件台账与证据落列（`knowledge_base.register_evidence`）、档案
+    新增或取代（`profile.create_item` / `supersede_item`，出处行随条目一起落）、提案终态
+    accepted。任何一步失败**整体回滚**：不留半条档案、半行证据，提案保持 pending 可重裁
+    ——与蓝图批准（`blueprint.approve_atomic`）同一口径，比旧路径的「状态先改、写入随后」
+    更严：连提案状态都进事务。
+    """
+    verb = "取代档案条目" if action == "supersede" else "把这条写进长期档案"
+    why = str(payload.get("why") or "").strip() or "知识库扫描提炼出的档案候选"
+    base = f"批准：{verb}（{category}）"
+    try:
+        with atomic(conn):
+            evidence_rows = knowledge_base.register_evidence(conn, evidence)
+            if action == "supersede" and target_id is not None:
+                written_id = profile.supersede_item(
+                    conn,
+                    target_id,
+                    content=content,
+                    reason=f"按提案 #{proposal_id} 批准{verb}：{why}",
+                    actor="user",
+                    evidence=evidence_rows,
+                )
+            else:
+                written_id = profile.create_item(
+                    conn,
+                    category=category,
+                    content=content,
+                    reason=f"按提案 #{proposal_id} 批准{verb}：{why}",
+                    actor="user",
+                    source_kind=source_kind,
+                    evidence=evidence_rows,
+                )
+            ledger.set_status(
+                conn,
+                "proposal",
+                proposal_id,
+                "accepted",
+                actor="user",
+                reason=_compose_reason(base, reason),
+                extra={"decided_at": now_iso()},
+            )
+    except (profile.ProfileError, ledger.LedgerError) as error:
+        raise ProposalError(f"档案没能写进去（已整体回滚）：{error}") from error
+    except knowledge_base.KnowledgeError as error:
+        # 出处验过之后理论不会再炸；真炸了也按整体回滚处理，绝不留半份写入
+        raise ProposalConflict(f"知识库出处没能登记（已整体回滚）：{error}") from error
+    return {
+        "id": proposal_id,
+        "kind": "profile_change",
+        "status": "accepted",
+        "effect": "profile_written",
+        "built": None,
+        "written": {"id": written_id, "category": category, "content": content},
+        "added": None,
+        "updated": None,
+        "remembered": None,
+        "contract": None,
     }

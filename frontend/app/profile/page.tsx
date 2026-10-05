@@ -2,13 +2,21 @@
 
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowRight, Plus, X } from "lucide-react";
-import { ApiError, createProfileItem, getProfile, PROFILE_CATEGORIES, updateProfileItem, voidProfileItem, type ProfileCategory, type ProfileView } from "@/lib/api";
+import { ApiError, createProfileItem, getMemory, getProfile, PROFILE_CATEGORIES, updateProfileItem, voidProfileItem, type MemoryEvidence, type ProfileCategory, type ProfileView } from "@/lib/api";
 
 const CATEGORIES = Object.keys(PROFILE_CATEGORIES) as ProfileCategory[];
 const messageOf = (cause: unknown, fallback: string) => cause instanceof ApiError ? cause.message : fallback;
 
+/** 知识库来源的证据（与后端 memory.is_knowledge_evidence 同判据）：knowledge_file 类型，或带了相对路径。 */
+function isKnowledgeEvidence(item: MemoryEvidence): boolean {
+  return item.source_type === "knowledge_file" || (item.relative_path ?? "") !== "";
+}
+
 export default function ProfilePage() {
   const [profile, setProfile] = useState<ProfileView | null>(null);
+  // 知识库出处在档案读取接口里不返回；全局记忆清单给的是同一批档案行（同一个编号），
+  // 从那里把证据按编号拼到条目上——只取知识库来源，六类经历证据归记忆页管。
+  const [knowledgeEvidence, setKnowledgeEvidence] = useState<Map<number, MemoryEvidence[]>>(new Map());
   const [loadError, setLoadError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, setPending] = useState(false);
@@ -22,6 +30,20 @@ export default function ProfilePage() {
   useEffect(() => {
     getProfile().then((data) => { setProfile(data); setLoadError(null); })
       .catch((cause: unknown) => setLoadError(messageOf(cause, "取档案时出了意外错误")));
+  }, []);
+
+  useEffect(() => {
+    // 出处拼不上不连累档案本体：拿不到就当没有，条目照常可读可改。
+    getMemory()
+      .then((memory) => {
+        const map = new Map<number, MemoryEvidence[]>();
+        for (const item of memory.global) {
+          const knowledge = item.evidence.filter(isKnowledgeEvidence);
+          if (knowledge.length > 0) map.set(item.id, knowledge);
+        }
+        setKnowledgeEvidence(map);
+      })
+      .catch(() => setKnowledgeEvidence(new Map()));
   }, []);
 
   useEffect(() => {
@@ -44,6 +66,17 @@ export default function ProfilePage() {
   async function refresh() {
     try { setProfile(await getProfile()); setLoadError(null); }
     catch (cause) { setLoadError(messageOf(cause, "取档案时出了意外错误")); }
+    // 批准知识库候选后出处会变，跟着重拼一遍；失败不提示（不影响档案本体）。
+    getMemory()
+      .then((memory) => {
+        const map = new Map<number, MemoryEvidence[]>();
+        for (const item of memory.global) {
+          const knowledge = item.evidence.filter(isKnowledgeEvidence);
+          if (knowledge.length > 0) map.set(item.id, knowledge);
+        }
+        setKnowledgeEvidence(map);
+      })
+      .catch(() => setKnowledgeEvidence(new Map()));
   }
 
   function openPanel(next: "create" | "edit" | "void", id: number | null = null, initial = "") {
@@ -94,7 +127,30 @@ export default function ProfilePage() {
           {profile === null && !loadError && <p role="status" className="py-12 text-[13px] text-white/40">正在读取档案…</p>}
           {profile && visible.length === 0 && <div className="border-y border-white/[0.1] py-14"><p className="max-w-[42ch] text-[16px] leading-7 text-white/55">还没有可供判断的结论。补入一句真实、可复用的描述，之后的四问会引用它。</p></div>}
           <div className="border-t border-white/[0.12]">
-            {visible.map((item) => <article key={item.id} className="group grid gap-3 border-b border-white/[0.09] py-6 md:grid-cols-[5rem_minmax(0,1fr)_8rem] md:gap-6"><div className="font-mono text-[11px] tabular-nums text-white/35">#{item.id}<span className="mt-1 block font-sans">{item.valid_from?.slice(0, 10)}</span></div><p className="max-w-[66ch] whitespace-pre-wrap text-[15px] leading-7 text-white/80">{item.content}</p><div className="flex gap-4 text-[12px] md:justify-end"><button type="button" onClick={() => openPanel("edit", item.id, item.content)} disabled={pending} className="text-white/45 hover:text-white disabled:opacity-40">修改</button><button type="button" onClick={() => openPanel("void", item.id)} disabled={pending} className="text-white/35 hover:text-red-300 disabled:opacity-40">作废</button></div></article>)}
+            {visible.map((item) => {
+              const evidence = knowledgeEvidence.get(item.id) ?? [];
+              return (
+                <article key={item.id} className="group grid gap-3 border-b border-white/[0.09] py-6 md:grid-cols-[5rem_minmax(0,1fr)_8rem] md:gap-6">
+                  <div className="font-mono text-[11px] tabular-nums text-white/35">#{item.id}<span className="mt-1 block font-sans">{item.valid_from?.slice(0, 10)}</span></div>
+                  <div className="min-w-0">
+                    <p className="max-w-[66ch] whitespace-pre-wrap text-[15px] leading-7 text-white/80">{item.content}</p>
+                    {evidence.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {evidence.map((ev, index) => (
+                          <p key={`${ev.knowledge_file_id ?? "k"}-${index}`} className="border-l border-green/30 pl-3 text-[12px] leading-5 text-white/50">
+                            <span className="text-green/90">{ev.source_label}</span>
+                            {ev.relative_path && <span className="ml-2 font-mono text-[11.5px] text-white/60 [overflow-wrap:anywhere]">{ev.relative_path}</span>}
+                            {typeof ev.line_start === "number" && <span className="ml-1 text-white/40">第 {ev.line_start}–{ev.line_end} 行</span>}
+                            <span className="mt-0.5 block [overflow-wrap:anywhere]">「{ev.excerpt}」</span>
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-4 text-[12px] md:justify-end"><button type="button" onClick={() => openPanel("edit", item.id, item.content)} disabled={pending} className="text-white/45 hover:text-white disabled:opacity-40">修改</button><button type="button" onClick={() => openPanel("void", item.id)} disabled={pending} className="text-white/35 hover:text-red-300 disabled:opacity-40">作废</button></div>
+                </article>
+              );
+            })}
           </div>
         </main>
       </div>

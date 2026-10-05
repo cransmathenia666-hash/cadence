@@ -93,6 +93,21 @@ EXPERIENCE_SOURCES: dict[str, str] = {
 }
 SOURCE_TYPE_ALIASES: dict[str, str] = {label: name for name, label in EXPERIENCE_SOURCES.items()}
 
+# 知识库来源（2026-10-05 KB-03 写入侧，方案 §5.2 末段）：档案变更提案批准后，出处落进
+# 同一张 `memory_evidence`，不另立证据表。它**不进** `EXPERIENCE_SOURCES`——那是六类经历
+# 的取值表，模型的记忆候选仍只许引用经历（§7.5：知识库文件不当经历混进检索）；这里只是
+# 让证据的读写与清理认得第七种来源。
+KNOWLEDGE_SOURCE_TYPE = "knowledge_file"
+
+SOURCE_LABELS: dict[str, str] = {**EXPERIENCE_SOURCES, KNOWLEDGE_SOURCE_TYPE: "知识库文件"}
+
+
+def is_knowledge_evidence(item: dict[str, Any]) -> bool:
+    """一条出处是不是知识库来源：显式标了 knowledge_file，或带着相对路径（扫描卡的写法）。"""
+    return str(item.get("source_type") or "") == KNOWLEDGE_SOURCE_TYPE or bool(
+        item.get("relative_path")
+    )
+
 
 def resolve_source_type(value: Any) -> str | None:
     """来源类型：令牌与中文名都收。认不出来给 `None`（由调用方报错）。"""
@@ -180,7 +195,11 @@ def _review_due(row: sqlite3.Row, today: str | None = None) -> bool:
 
 
 def evidence_of(conn: sqlite3.Connection, scope: str, memory_id: int) -> list[dict[str, Any]]:
-    """一条长期记忆的来源证据，按编号排（先记的先列）。"""
+    """一条长期记忆的来源证据，按编号排（先记的先列）。
+
+    知识库来源（knowledge_file）额外带路径 / 行号 / 版本哈希——六类经历没有这些列，
+    一律 `None`：界面点开出处时按相对路径显示摘录（方案 §7.6），绝不出现绝对路径。
+    """
     rows = conn.execute(
         "SELECT * FROM memory_evidence WHERE scope = ? AND memory_id = ? ORDER BY id",
         (scope, memory_id),
@@ -188,10 +207,15 @@ def evidence_of(conn: sqlite3.Connection, scope: str, memory_id: int) -> list[di
     return [
         {
             "source_type": str(row["source_type"]),
-            "source_label": EXPERIENCE_SOURCES.get(str(row["source_type"]), str(row["source_type"])),
+            "source_label": SOURCE_LABELS.get(str(row["source_type"]), str(row["source_type"])),
             "source_id": int(row["source_id"]),
             "excerpt": str(row["excerpt"]),
             "source_time": row["source_time"],
+            "knowledge_file_id": row["knowledge_file_id"],
+            "content_hash": row["content_hash"],
+            "relative_path": row["relative_path"],
+            "line_start": row["line_start"],
+            "line_end": row["line_end"],
         }
         for row in rows
     ]
@@ -551,31 +575,68 @@ def duplicate_hint(
 def _attach_evidence(
     conn: sqlite3.Connection, scope: str, memory_id: int, evidence: list[dict[str, Any]]
 ) -> None:
-    """挂来源证据。摘录必须**一字不差**能在来源里找到——由 `validate_candidate` 先验过。"""
+    """挂来源证据。摘录必须**一字不差**能在来源里找到——由 `validate_candidate` 先验过。
+
+    六类经历只填前六列；知识库来源（`is_knowledge_evidence` 认出的）把相对路径 / 行号 /
+    版本哈希 / 文件台账编号一并落库（2026-10-05 KB-03 写入侧）——文件会改名改内容，
+    证据要独立可考，不能只靠 knowledge_file 反查现值。
+    """
     for item in evidence:
+        knowledge = is_knowledge_evidence(item)
         conn.execute(
             """INSERT INTO memory_evidence
-               (scope, memory_id, source_type, source_id, excerpt, source_time, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (scope, memory_id, source_type, source_id, excerpt, source_time,
+                knowledge_file_id, content_hash, relative_path, line_start, line_end, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 scope,
                 int(memory_id),
-                str(item["source_type"]),
-                int(item["source_id"]),
+                KNOWLEDGE_SOURCE_TYPE if knowledge else str(item["source_type"]),
+                # 知识库出处的 source_id 挂文件台账编号（register_evidence 已登记好）；
+                # 真没有台账行时落 0——source_id 列非空，证据本身仍可考（路径+哈希在）。
+                int(item.get("knowledge_file_id") or item.get("source_id") or 0)
+                if knowledge
+                else int(item["source_id"]),
                 str(item["excerpt"]),
                 item.get("source_time"),
+                int(item["knowledge_file_id"])
+                if knowledge and item.get("knowledge_file_id") is not None
+                else None,
+                item.get("content_hash") if knowledge else None,
+                item.get("relative_path") if knowledge else None,
+                item.get("line_start") if knowledge else None,
+                item.get("line_end") if knowledge else None,
                 now_iso(),
             ),
         )
     conn.commit()
 
 
+def attach_evidence(
+    conn: sqlite3.Connection, scope: str, memory_id: int, evidence: list[dict[str, Any]]
+) -> None:
+    """挂证据的**公开**入口：档案批准（`profile.create_item` / `supersede_item` 的 evidence
+    参数）与记忆写入共用这一条路，知识库出处也在这一处落列。"""
+    _attach_evidence(conn, scope, memory_id, evidence)
+
+
+def copy_evidence(conn: sqlite3.Connection, scope: str, old_id: int, new_id: int) -> None:
+    """把一条记录的出处原样搬到另一条上（取代时用）——公开入口，别名与列一起搬。"""
+    _copy_evidence(conn, scope, old_id, new_id)
+
+
 def _copy_evidence(conn: sqlite3.Connection, scope: str, old_id: int, new_id: int) -> None:
+    """取代时把旧条目的出处原样搬到新条目上。
+
+    知识库出处的五个列（路径 / 哈希 / 行号 / 文件编号）要一起搬：漏掉它们，取代一次
+    来源路径与逐字摘录就静默变 NULL，档案上的出处标签就废了。
+    """
     for item in evidence_of(conn, scope, old_id):
         conn.execute(
             """INSERT INTO memory_evidence
-               (scope, memory_id, source_type, source_id, excerpt, source_time, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (scope, memory_id, source_type, source_id, excerpt, source_time,
+                knowledge_file_id, content_hash, relative_path, line_start, line_end, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 scope,
                 int(new_id),
@@ -583,6 +644,11 @@ def _copy_evidence(conn: sqlite3.Connection, scope: str, old_id: int, new_id: in
                 item["source_id"],
                 item["excerpt"],
                 item["source_time"],
+                item["knowledge_file_id"],
+                item["content_hash"],
+                item["relative_path"],
+                item["line_start"],
+                item["line_end"],
                 now_iso(),
             ),
         )
@@ -1800,6 +1866,22 @@ _TEXT_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _json_escaped(text: str) -> str:
+    """这段文字以 JSON 字符串落库时的转义形态。
+
+    多行摘录在 `ledger_event.after_value` 这类 JSON 列里是 `\\n` 两个字符，按原文做
+    子串匹配永远找不到它——「彻底删除」要连这一份副本一起核对。
+    """
+    return json.dumps(str(text), ensure_ascii=False)[1:-1]
+
+
+def _text_needles(text: str) -> list[str]:
+    """一段文字在库里可能出现的形态：原文与 JSON 转义形态（相同就只给一个）。"""
+    raw = str(text)
+    escaped = _json_escaped(raw)
+    return [raw] if escaped == raw else [raw, escaped]
+
+
 def _copies(conn: sqlite3.Connection, text: str) -> list[dict[str, Any]]:
     """全库找这段文字还留在哪（只做子串匹配，不猜、不改写）。"""
     hits: list[dict[str, Any]] = []
@@ -1813,6 +1895,79 @@ def _copies(conn: sqlite3.Connection, text: str) -> list[dict[str, Any]]:
     return hits
 
 
+def _knowledge_excerpts_of(
+    conn: sqlite3.Connection, scope: str, memory_id: int
+) -> list[str]:
+    """这条记忆的知识库摘录（要在删证据**之前**取走，清候选 payload 里的副本用）。"""
+    return [
+        str(row["excerpt"])
+        for row in conn.execute(
+            "SELECT excerpt FROM memory_evidence"
+            " WHERE scope = ? AND memory_id = ? AND source_type = ?",
+            (scope, int(memory_id), KNOWLEDGE_SOURCE_TYPE),
+        ).fetchall()
+    ]
+
+
+def _profile_candidates_holding(conn: sqlite3.Connection, needles: list[str]) -> list[dict[str, Any]]:
+    """正文或知识库摘录还留在 payload 里的**档案变更**候选（id + 解析好的 payload）。
+
+    档案变更提案没有 target_id 可按编号对——它和这条记忆的唯一联系就是文字本身，
+    按「payload 里出现过这段话」找（与台账 `_scrub_ledger` 按内容清同一个口径）。
+    """
+    hits: list[dict[str, Any]] = []
+    for item in conn.execute("SELECT id, payload FROM proposal WHERE kind = 'profile_change'"):
+        text = str(item["payload"] or "")
+        if any(needle and needle in text for needle in needles):
+            hits.append({"id": int(item["id"]), "payload": _json_of(item["payload"])})
+    return hits
+
+
+def _scrub_copies(value: Any, needles: list[str]) -> tuple[Any, bool]:
+    """递归把 value 里出现的正文 / 摘录**片段**换成「已按用户要求删除」。
+
+    返回（清理后的值, 是否动过）。按片段换而不是整条销毁：一段文字只是**包含**被删
+    正文（近似重复的候选），不等于它就是这份内容的副本。
+    """
+    if isinstance(value, str):
+        cleaned = value
+        for needle in needles:
+            if needle and needle in cleaned:
+                cleaned = cleaned.replace(needle, PURGED_TEXT)
+        return cleaned, cleaned != value
+    if isinstance(value, list):
+        items = [_scrub_copies(item, needles) for item in value]
+        return [cleaned for cleaned, _ in items], any(changed for _, changed in items)
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        changed = False
+        for key, item in value.items():
+            result[key], hit = _scrub_copies(item, needles)
+            changed = changed or hit
+        return result, changed
+    return value, False
+
+
+def _scrub_profile_candidate(
+    conn: sqlite3.Connection, proposal_id: int, payload: dict[str, Any], needles: list[str]
+) -> int:
+    """把档案变更候选 payload 里留着的正文 / 摘录片段换成「已按用户要求删除」。
+
+    与台账 `_scrub_ledger` 同一个口径：只换文字片段，提案行、状态、动作与其余字段
+    （出处骨架、近似重复提示）全部保留——它仍是一条完整的、待用户裁定的提案。
+    整条 payload 打成空壳会误伤只是「文字里包含这段话」的近似重复候选。
+    """
+    cleaned, changed = _scrub_copies(payload, needles)
+    if not changed:
+        return 0
+    cleaned["purged"] = True  # 与记忆候选同款标记：这条候选被「彻底删除」清过
+    conn.execute(
+        "UPDATE proposal SET payload = ? WHERE id = ?",
+        (json.dumps(cleaned, ensure_ascii=False), int(proposal_id)),
+    )
+    return 1
+
+
 def purge_preview(conn: sqlite3.Connection, scope: str, memory_id: int) -> dict[str, Any]:
     """彻底删除的影响预览：动的是哪些地方、删完还剩几处删不掉。**这一步不改任何数据。**"""
     row = _row_of(conn, scope, memory_id)
@@ -1821,6 +1976,13 @@ def purge_preview(conn: sqlite3.Connection, scope: str, memory_id: int) -> dict[
         int(item["id"])
         for item in conn.execute("SELECT * FROM proposal WHERE kind = ?", (KIND,)).fetchall()
         if _json_of(item["payload"]).get("target_id") == int(memory_id)
+    ]
+    # 知识库候选（档案变更提案）也一并报出：批准后它 payload 里还留着正文与摘录的副本
+    proposals += [
+        item["id"]
+        for item in _profile_candidates_holding(
+            conn, [content, *_knowledge_excerpts_of(conn, scope, memory_id)]
+        )
     ]
     return {
         "scope": scope,
@@ -1848,8 +2010,12 @@ def purge(conn: sqlite3.Connection, scope: str, memory_id: int, *, reason: str) 
     content = str(row["content"])
     owner = None if scope == SCOPE_GLOBAL else int(row["plan_id"])
     affected = 0
+    # 这条记忆的知识库摘录：删证据之前先取走——它们还要用来清候选 payload 里的副本。
+    knowledge_excerpts = _knowledge_excerpts_of(conn, scope, memory_id)
 
-    # 1) 证据摘录 + 来源里被引用的那一句
+    # 1) 证据摘录 + 来源里被引用的那一句。知识库来源（knowledge_file）的摘录行在这里
+    #    连同路径 / 哈希等文件元数据副本一起删掉，但 `_scrub_source` **绝不碰原始文件**——
+    #    原文件不属于 cadence，删它不在「彻底删除」的授权范围内（方案 §7.5）。
     for item in conn.execute(
         "SELECT * FROM memory_evidence WHERE scope = ? AND memory_id = ?",
         (scope, int(memory_id)),
@@ -1875,16 +2041,43 @@ def purge(conn: sqlite3.Connection, scope: str, memory_id: int, *, reason: str) 
         )
         affected += 1
 
-    # 3) 这条记忆自己的台账流水：`create` / `supersede` 那几行的 before/after 就是正文的副本。
-    #    行留着（「什么时候记过、什么时候删的」这条审计事实不能丢），只把正文那一段换掉。
+    # 2b) 档案变更候选（含知识库卡）：payload 里还留着这条记忆的正文、或它引过的知识库
+    #     摘录的片段——按片段换成「已删」标记（与台账同一口径），整条提案保留、仍待
+    #     用户裁定。不清这几份副本，「彻底删除」就是句好听的话：正文与摘录还能在收件
+    #     箱历史里被翻出来。原始文件不在清理范围。
+    copies = [content, *knowledge_excerpts]
+    # 库里可能出现的两种形态都要认：原文（普通文本列、解析后的 payload）与 JSON 转义形态
+    # （payload / 台账 after_value 里多行摘录的 \n）。只按原文找，多行摘录这份副本会漏。
+    detection = list(
+        dict.fromkeys(
+            needle for text in copies if text.strip() for needle in _text_needles(text)
+        )
+    )
+    for candidate in _profile_candidates_holding(conn, detection):
+        affected += _scrub_profile_candidate(conn, candidate["id"], candidate["payload"], copies)
+
+    # 3) 台账流水里的正文副本：这条记忆自己的 `create` / `supersede` 行，以及按候选落
+    #    提案的那行（`create` 的 after_value 是整个 payload JSON——正文与知识库摘录的
+    #    副本都在里面）。行都留着（「什么时候记过、什么时候删的」这条审计事实不能丢），
+    #    只把正文那一段换掉（按内容找而不是按 id，冒烟第 16 步踩过的坑）。
     entity_type = _entity_type_of(scope)
-    affected += _scrub_ledger(conn, entity_type, content)
+    for needle in detection:
+        affected += _scrub_ledger(conn, entity_type, needle)
+        affected += _scrub_ledger(conn, "proposal", needle)
 
     # 4) 记忆正文本身（物理删除——这一层没有「留痕」的位置，墓碑替它留痕）
     conn.execute(f"DELETE FROM {_table_of(scope)} WHERE id = ?", (int(memory_id),))
     affected += 1
 
-    leftover = _copies(conn, content)
+    # 残留核对也要两种形态都查——否则多行摘录留在 JSON 列里，却报「已经清干净」。
+    leftover: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for needle in detection:
+        for hit in _copies(conn, needle):
+            key = (str(hit["table"]), str(hit["column"]), int(hit["id"]))
+            if key not in seen:
+                seen.add(key)
+                leftover.append(hit)
     conn.execute(
         "INSERT INTO memory_deletion (scope, memory_id, plan_id, reason, affected, deleted_at)"
         " VALUES (?, ?, ?, ?, ?, ?)",
@@ -1944,6 +2137,9 @@ def _scrub_source(
         "field_change": ("ledger_event", ("reason", "before_value", "after_value")),
     }.get(source_type)
     if columns is None:
+        # 知识库来源（knowledge_file）：摘录的原句住在**用户的原始文件**里，不属于
+        # cadence——只保留「原文件仍在 / 已不可读」的台账信息，绝不改写更绝不删除
+        # （方案 §7.5）；其余不认识的类型同样不动（不因未知来源崩）。
         return 0
     table, names = columns
     row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (int(source_id),)).fetchone()

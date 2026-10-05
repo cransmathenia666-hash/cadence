@@ -31,6 +31,7 @@ from . import (
     db,
     dialogue,
     export,
+    knowledge_base,
     ledger,
     llm,
     memory,
@@ -181,6 +182,11 @@ _FIELD_LABELS: dict[str, str] = {
     "clarify_request_id": "追问所属轮次",
     "thread_id": "探索线程",
     "allow_shape_switch": "形态切换确认",
+    "root_id": "知识库根编号",
+    "mode": "扫描模式",
+    "scope": "扫描范围",
+    "paths": "点名文件列表",
+    "requirements_version": "需求口径版本",
 }
 
 # Pydantic 的错误类型 → 中文说明。没登记的类型回退用原始的英文 msg——
@@ -2159,6 +2165,108 @@ def post_memory_purge(
         return memory.purge(conn, payload.scope, memory_id, reason=payload.reason)
     except memory.MemoryError as error:
         raise _memory_error(error) from error
+
+
+# ---------- 知识库（KB-04，方案 §6.7） ----------
+#
+# 根目录来自本地配置（环境变量 CADENCE_KNOWLEDGE_ROOTS，§10.3），接口只读、不提供任何
+# 写配置的口子：对外只有编号、别名与脱敏过的错误，绝对路径与盘符在任何响应里都不出现。
+# 扫描失败是**业务结果**：模型不通、输出不合格、文件被动过都会让状态落在 failed / partial
+# 并带人话原因与缺口，照常 200 返回——不伪装成功，也不炸 500。
+
+class KnowledgeScanIn(BaseModel):
+    """发起一次知识库扫描。全字段有默认：空请求体 = 对编号最小的可用根做一次增量全扫。"""
+
+    root_id: int | None = Field(
+        default=None, description="扫哪个根（GET /api/knowledge/roots 里的编号）；不给就用编号最小的可用根"
+    )
+    mode: Literal["incremental", "full"] = Field(
+        default="incremental",
+        description="incremental=跳过当前版本已覆盖的文件；full=全部重扫",
+    )
+    scope: Literal["all", "paths"] = Field(
+        default="all", description="all=整个根；paths=只扫 paths 点名的文件"
+    )
+    paths: list[str] = Field(
+        default_factory=list, description="scope=paths 时点名的文件（相对路径，越界 / 绝对路径 400）"
+    )
+    requirements_version: str = Field(
+        default=knowledge_base.REQUIREMENTS_VERSION_DEFAULT, description="按哪一版需求口径提炼"
+    )
+
+
+@app.get("/api/knowledge/roots")
+def get_knowledge_roots() -> dict:
+    """已配置的知识库根目录：编号、别名、可用状态与脱敏过的不可用原因。绝不含绝对路径。
+
+    顺带给出读取配额的公开上限：界面按它画比例条，不用把数字抄一份在前端
+    （SPEC 第 14 节：组件不内联业务规则）。
+    """
+    return {"roots": knowledge_base.public_roots(), "limits": knowledge_base.quota_limits()}
+
+
+@app.get("/api/knowledge/files")
+def get_knowledge_files(
+    root_id: int, prefix: str = "", conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """一个根下的可读文件清单：相对路径、大小、修改时间、当前版本是否已覆盖。
+
+    `covered` 按当前最新覆盖账算（现算内容哈希对覆盖行）；prefix 是目录前缀，
+    给了绝对路径或「..」会被路径安全层当场拒绝。
+    """
+    try:
+        return knowledge_base.file_listing(conn, root_id, prefix=prefix)
+    except knowledge_base.KnowledgeNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except knowledge_base.KnowledgeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/knowledge/scan")
+def post_knowledge_scan(
+    payload: KnowledgeScanIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """发起一次扫描：列目录 → 逐文件受限提炼 → 覆盖账与候选（只产候选，不写档案）。
+
+    返回这一次扫描的公开摘要：扫描编号、状态、读取配额（次数与字符）、处理了几个文件、
+    产了几条候选，以及没做成 / 没读完的缺口。失败是业务结果，照常 200 如实返回。
+    """
+    root_id = payload.root_id
+    if root_id is None:
+        usable = [root for root in knowledge_base.configured_roots() if root.enabled]
+        if not usable:
+            raise HTTPException(
+                status_code=400,
+                detail="还没有配置可用的知识库根目录：先在本地配置里加上（别名=绝对路径），再来扫描",
+            )
+        root_id = usable[0].id
+    try:
+        return knowledge_base.scan(
+            conn,
+            root_id,
+            trigger="manual",
+            mode=payload.mode,
+            scope=payload.scope,
+            paths=payload.paths,
+            requirements_version=payload.requirements_version,
+        )
+    except knowledge_base.KnowledgeNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except knowledge_base.KnowledgeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/knowledge/scans")
+def get_knowledge_scans(
+    root_id: int | None = None,
+    limit: int = 20,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict:
+    """扫描历史（新的在前）：读了多少、出了几条候选、为什么失败——不含任何原文。
+
+    `root_id` 给了就只看那个根的。
+    """
+    return {"scans": knowledge_base.list_scans(conn, limit=limit, root_id=root_id)}
 
 
 # ---------- 触达：每周提醒与导出（T15–T17，SPEC 决策 15 / 16 / 20） ----------

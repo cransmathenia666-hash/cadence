@@ -141,6 +141,110 @@ def test_memory_can_be_skipped_on_purpose(conn, tmp_path):
     assert report["memory"] is None
 
 
+# ---------- 知识库的每周增量扫描（KB-06） ----------
+#
+# 与记忆那批同一套纪律：失败只如实记账、不连累已发完的信与已导出的文件；
+# 干跑只预告会扫哪些根——一个模型都不调、一行覆盖账都不写。
+
+
+def make_vault(tmp_path, monkeypatch) -> None:
+    """配一个可用的知识库根（内容随便一篇笔记；扫描成不成取决于有没有配模型）。"""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("# 笔记\n晚上十点以后不学习。\n", encoding="utf-8", newline="")
+    monkeypatch.setenv("CADENCE_KNOWLEDGE_ROOTS", f"笔记={vault}")
+
+
+def test_dry_run_only_announces_the_knowledge_step(conn, tmp_path, monkeypatch):
+    make_vault(tmp_path, monkeypatch)
+    make_plan(conn)
+    report = run(conn, MONDAY, tmp_path, dry_run=True)
+
+    assert report["knowledge"] == {"planned_roots": ["笔记"]}
+    assert conn.execute("SELECT COUNT(*) AS n FROM knowledge_scan").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM knowledge_coverage").fetchone()["n"] == 0
+
+
+def test_the_knowledge_batch_scans_every_usable_root_and_does_not_sink_the_email(
+    conn, tmp_path, monkeypatch
+):
+    make_vault(tmp_path, monkeypatch)
+    second = tmp_path / "vault2"
+    second.mkdir()
+    monkeypatch.setenv("CADENCE_KNOWLEDGE_ROOTS", f"笔记={tmp_path / 'vault'};另一个={second}")
+    make_plan(conn)
+    report = run(conn, MONDAY, tmp_path)
+
+    assert report["delivery"]["sent"] is True           # 邮件照发
+    assert len(report["export"]["files"]) == 4           # 导出照做
+    knowledge = report["knowledge"]
+    assert knowledge["roots"] == 2 and knowledge["scans"] == 2   # 每个可用根各一次
+    assert knowledge["failed"] == 1                      # 有笔记的根没配模型：如实记失败，不伪装
+    assert len(knowledge["failed_reasons"]) == 1
+    rows = conn.execute("SELECT trigger, status FROM knowledge_scan ORDER BY id").fetchall()
+    assert [dict(row) for row in rows] == [
+        {"trigger": "weekly", "status": "failed"},       # 笔记：有文件要提炼，模型不通就 failed
+        {"trigger": "weekly", "status": "ok"},           # 另一个：空目录，没东西可扫也是一次如实扫描
+    ]
+
+
+def test_knowledge_can_be_skipped_on_purpose(conn, tmp_path, monkeypatch):
+    make_vault(tmp_path, monkeypatch)
+    make_plan(conn)
+    report = run(conn, MONDAY, tmp_path, with_knowledge=False)
+    assert report["knowledge"] is None
+    assert conn.execute("SELECT COUNT(*) AS n FROM knowledge_scan").fetchone()["n"] == 0
+
+
+def test_the_cli_knowledge_step_runs_without_the_flag(tmp_path, monkeypatch):
+    make_vault(tmp_path, monkeypatch)
+    path = tmp_path / "cli.db"
+    db.init(path)
+    with db.connect(path) as setup:
+        make_plan(setup)
+    real_connect = db.connect
+    monkeypatch.setattr(job.db, "connect", lambda *args, **kwargs: real_connect(path))
+    code = job.main(["--today", "2026-10-05", "--export-dir", str(tmp_path / "exports")])
+
+    assert code == 0  # 扫描失败不是整条命令失败：邮件已发、导出已做
+    with db.connect(path) as check:
+        rows = check.execute("SELECT trigger, status FROM knowledge_scan").fetchall()
+        assert len(rows) == 1 and rows[0]["trigger"] == "weekly" and rows[0]["status"] == "failed"
+
+
+def test_the_cli_can_skip_the_knowledge_step(tmp_path, monkeypatch):
+    make_vault(tmp_path, monkeypatch)
+    path = tmp_path / "cli.db"
+    db.init(path)
+    with db.connect(path) as setup:
+        make_plan(setup)
+    real_connect = db.connect
+    monkeypatch.setattr(job.db, "connect", lambda *args, **kwargs: real_connect(path))
+    code = job.main(
+        ["--today", "2026-10-05", "--export-dir", str(tmp_path / "exports"), "--no-knowledge"]
+    )
+
+    assert code == 0
+    with db.connect(path) as check:
+        assert check.execute("SELECT COUNT(*) AS n FROM knowledge_scan").fetchone()["n"] == 0
+
+
+def test_the_cli_dry_run_announces_the_knowledge_plan(tmp_path, monkeypatch, capsys):
+    make_vault(tmp_path, monkeypatch)
+    path = tmp_path / "cli.db"
+    db.init(path)
+    with db.connect(path) as setup:
+        make_plan(setup)
+    real_connect = db.connect
+    monkeypatch.setattr(job.db, "connect", lambda *args, **kwargs: real_connect(path))
+    code = job.main(["--dry-run", "--today", "2026-10-05"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "知识库扫描：将对 笔记 各跑一次增量扫描" in output
+    assert "没有写任何记录" in output
+
+
 def test_nothing_is_sent_while_the_reminder_is_off(conn, tmp_path):
     make_plan(conn, enabled=False)
     report = run(conn, MONDAY, tmp_path)
@@ -182,3 +286,30 @@ def test_the_week_key_matches_the_export_file_name(conn, tmp_path):
     names = [item["name"] for item in report["export"]["files"]]
     assert f"周检查点-{plan.week_key(MONDAY)}.md" in names
     assert report["week"] == plan.week_key(MONDAY) == "2026-W41"
+
+
+def test_partial_knowledge_scans_are_reported_not_waved_off(conn, tmp_path, monkeypatch):
+    """配额触顶的 partial 不能被抹平成「失败 0 个根」——它是「没看完」（契约 §10.4）。"""
+    from app import knowledge_base as kb
+
+    root = tmp_path / "kb"
+    root.mkdir()
+    monkeypatch.setenv("CADENCE_KNOWLEDGE_ROOTS", f"笔记={root}")
+
+    def fake_scan(_conn, root_id, *, trigger="manual"):
+        return {
+            "scan_id": 1,
+            "root_id": root_id,
+            "root_alias": "笔记",
+            "status": "partial",
+            "candidates_created": 2,
+            "unread_gaps": ["a.md：读取配额已用完，这次没有处理"],
+        }
+
+    monkeypatch.setattr(kb, "scan", fake_scan)
+
+    report = job._run_knowledge_scans(conn)
+
+    assert report["failed"] == 0 and report["partial"] == 1
+    assert report["candidates"] == 2
+    assert any("配额" in gap for gap in report["gaps"])

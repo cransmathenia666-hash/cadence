@@ -9,6 +9,7 @@ import {
   Inbox,
   LineChart,
   BrainCircuit,
+  Library,
   UserCircle,
   Settings,
   X,
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
   { href: "/report", label: "报告", icon: LineChart },
   { href: "/memory", label: "记忆", icon: BrainCircuit },
   { href: "/profile", label: "档案", icon: UserCircle },
+  { href: "/library", label: "知识库", icon: Library },
   { href: "/providers", label: "设置", icon: Settings },
 ];
 

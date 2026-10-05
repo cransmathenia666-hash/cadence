@@ -343,6 +343,14 @@ CREATE TABLE IF NOT EXISTS memory_evidence (
   source_id   INTEGER NOT NULL,
   excerpt     TEXT    NOT NULL,
   source_time TEXT,
+  -- 知识库来源（2026-10-05 KB-01，五列都可空；老库由 db._ADDED_COLUMNS 追平）：
+  -- 证据引的是知识库里的哪个文件、哪个版本（content_hash 快照）、哪几行。
+  -- 冗余存路径与哈希而不只存 knowledge_file 反查：文件会改名改内容，证据要独立可考。
+  knowledge_file_id INTEGER,
+  content_hash      TEXT,
+  relative_path     TEXT,
+  line_start        INTEGER,
+  line_end          INTEGER,
   created_at  TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_evidence ON memory_evidence (scope, memory_id);
@@ -472,3 +480,64 @@ CREATE TABLE IF NOT EXISTS memory_deletion (
   affected     INTEGER NOT NULL DEFAULT 0,   -- 这次一共清掉了几处正文（记忆 + 证据 + 候选 + 来源原文）
   deleted_at   TEXT    NOT NULL
 );
+
+-- ========== 知识库（成果闭环重构 P5 / KB-01，方案 docs/ideas/成果闭环重构开发方案.md §7） ==========
+--
+-- 三张表都只存**相对路径**与哈希，绝不存绝对路径（§10.3：绝对路径只留在后端配置）。
+-- 扫描账本只记材料处理进度，不记模型结论、不与模型名称绑定（§7.1 第 6 条）——
+-- 所以这里没有 provider / model 列；覆盖记录的版本键是 相对路径+内容哈希+需求版本（§7.4）。
+
+-- 扫描时见过的知识库文件：知识库侧的文件台账。(root_id, relative_path) 定位一个文件，
+-- content_hash 用来判断「文件变没变」——变了就是新版本，旧覆盖记录自然不再适用。
+CREATE TABLE IF NOT EXISTS knowledge_file (
+  id            INTEGER PRIMARY KEY,
+  root_id       INTEGER NOT NULL,
+  relative_path TEXT    NOT NULL,   -- 相对知识库根，一律正斜杠
+  content_hash  TEXT    NOT NULL,   -- sha256 十六进制（app/knowledge_base.py）
+  size          INTEGER NOT NULL,
+  modified_at   TEXT,
+  created_at    TEXT    NOT NULL,
+  updated_at    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_file_path ON knowledge_file (root_id, relative_path);
+
+-- 一次扫描的运行账：读了多少次、多少字符、产出几个候选、为什么停。
+-- 按触发方式各记一行；失败是业务结果（status=failed），不伪装成成功。
+CREATE TABLE IF NOT EXISTS knowledge_scan (
+  id                   INTEGER PRIMARY KEY,
+  root_id              INTEGER NOT NULL,
+  trigger              TEXT    NOT NULL,   -- manual / weekly（app/knowledge_base.py 的 TRIGGERS）
+  requirements_version TEXT    NOT NULL,   -- 提炼按哪一版需求口径做（默认 profile-v1）
+  status               TEXT    NOT NULL,   -- running / ok / failed / partial
+                                       -- partial = 达到读取配额但还有文件没处理完
+  read_calls           INTEGER NOT NULL DEFAULT 0,
+  chars_read           INTEGER NOT NULL DEFAULT 0,
+  files_considered     INTEGER NOT NULL DEFAULT 0,
+  candidates_created   INTEGER NOT NULL DEFAULT 0,
+  quality_status       TEXT,               -- 模型输出质量结论（如 结构校验未通过）；可空
+  error                TEXT,               -- 人话失败原因；落库前先清理绝对路径（§10.3）
+  created_at           TEXT    NOT NULL,
+  finished_at          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_scan_root ON knowledge_scan (root_id, id);
+
+-- 单个文件在一次扫描里的处理记录：UNIQUE(scan_id, file_id) = 一个文件在一次扫描里至多一条。
+-- status 的四种取值对应 §7.4：只有整段读取完成、候选全部落库（或确认无变化）才算 covered；
+-- 中断、配额触顶、校验失败都不推进覆盖，下一次重扫。
+CREATE TABLE IF NOT EXISTS knowledge_coverage (
+  id                   INTEGER PRIMARY KEY,
+  scan_id              INTEGER NOT NULL,
+  file_id              INTEGER NOT NULL,
+  content_hash         TEXT    NOT NULL,   -- 处理时的文件版本；与 file_id 一起构成版本键
+  requirements_version TEXT    NOT NULL,
+  status               TEXT    NOT NULL,   -- covered / reviewed_no_change / partial / failed
+  read_calls           INTEGER NOT NULL DEFAULT 0,
+  chars_read           INTEGER NOT NULL DEFAULT 0,
+  candidate_count      INTEGER NOT NULL DEFAULT 0,
+  error                TEXT,               -- 人话失败原因；落库前先清理绝对路径
+  created_at           TEXT    NOT NULL,
+  finished_at          TEXT,
+  UNIQUE (scan_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_coverage_file
+  ON knowledge_coverage (file_id, content_hash, requirements_version);

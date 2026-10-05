@@ -187,6 +187,15 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("llm_provider", "supports_web_search", "INTEGER NOT NULL DEFAULT 0"),
     ("llm_provider", "supports_images", "INTEGER NOT NULL DEFAULT 0"),
     ("llm_provider", "extra_body", "TEXT"),
+    # 2026-10-05（知识库安全层 KB-01，方案 §7.3）：证据可以来自知识库文件。全部可空——
+    # 老证据的来源是六类经历记录，与知识库无关；只有扫描产出的候选批准后写的证据才带这组。
+    # relative_path / content_hash 冗余落库：知识库文件可能改名或改内容，证据要能独立
+    # 回答「当时引的是哪个文件的哪个版本」，不能只靠 knowledge_file 反查现值。
+    ("memory_evidence", "knowledge_file_id", "INTEGER"),
+    ("memory_evidence", "content_hash", "TEXT"),
+    ("memory_evidence", "relative_path", "TEXT"),
+    ("memory_evidence", "line_start", "INTEGER"),
+    ("memory_evidence", "line_end", "INTEGER"),
 )
 
 # 老表新列上的索引。**必须在 _add_missing_columns 之后建**（列不存在时 CREATE INDEX
