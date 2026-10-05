@@ -221,7 +221,9 @@ def test_status_reports_what_the_settings_page_needs(conn, tmp_path, monkeypatch
     make_plan(conn)
     monkeypatch.setenv("CADENCE_EXPORT_DIR", str(tmp_path / "exports"))
     notify.update_config(conn, to_addr="someone@example.com", enabled=True)
-    state = notify.status(conn, today=TODAY)
+    from datetime import datetime
+
+    state = notify.status(conn, today=TODAY, now=datetime(2026, 10, 5, 8, 0))
     assert state["enabled"] is True and state["to_addr"] == "someone@example.com"
     assert state["due"] is True and state["decision_reason"] == "本周还没问过"
     assert state["week"] == "2026-W41"

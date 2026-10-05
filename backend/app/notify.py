@@ -522,9 +522,19 @@ def recent(conn: sqlite3.Connection, limit: int = 5) -> list[dict[str, Any]]:
     ]
 
 
-def status(conn: sqlite3.Connection, plan_id: int | None = None, today: date | None = None) -> dict[str, Any]:
-    """设置页那一节要的全部事实：开关、发到哪、下次什么时候、本周会发什么、发过什么。"""
-    today = today or date.today()
+def status(
+    conn: sqlite3.Connection,
+    plan_id: int | None = None,
+    today: date | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """设置页那一节要的全部事实：开关、发到哪、下次什么时候、本周会发什么、发过什么。
+
+    `now` 与 `today` 一样可注入：`next_send_at` 原来直接读墙上时钟，用例只能写死当天那一刻，
+    一过点就红——把时刻收成一个可选参数，测试就能在任何日子跑。给了 `now` 就用它的日期：
+    两个时钟只留一个来源，免得 `next_send_at` 与 `due`/`week` 出自不同的时钟、互相矛盾。
+    """
+    today = now.date() if now is not None else (today or date.today())
     prefs = read_config(conn)
     channel = smtp_status()
     weekly = plan.weekly_status(conn, today=today, plan_id=plan_id)
@@ -548,7 +558,7 @@ def status(conn: sqlite3.Connection, plan_id: int | None = None, today: date | N
         "due": decision["send"],
         "decision_reason": decision["reason"],
         "missed_week": decision.get("missed_week"),
-        "next_send_at": next_send_at(),
+        "next_send_at": next_send_at(now),
         "preview": {"subject": subject, "body": body},
         "notice": notice,
         "recent": recent(conn),

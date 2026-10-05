@@ -601,9 +601,11 @@ def test_an_explicit_review_date_beats_the_default_ninety_days(conn):
         review_at=(date.today() - timedelta(days=1)).isoformat(),
     )["id"]
 
-    picked = memory.renew_memory(conn, "plan", memory_id, review_at="2026-10-05", reason="先盯一周")
+    # 用与今天无关的未来日期：写死具体某天的话，那天一到「还没到期」就成了假话
+    explicit = (date.today() + timedelta(days=7)).isoformat()
+    picked = memory.renew_memory(conn, "plan", memory_id, review_at=explicit, reason="先盯一周")
 
-    assert picked["review_at"] == "2026-10-05"
+    assert picked["review_at"] == explicit
     assert picked["review_due"] is False
     assert picked["content"] == "这学期只学一门课"
 
