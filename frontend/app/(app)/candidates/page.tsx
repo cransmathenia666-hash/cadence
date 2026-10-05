@@ -1687,7 +1687,8 @@ export default function CandidatesPage() {
         {/* 桌面评审席：候选目录与右侧主内容并置；点目录替换主内容，不覆盖对话。 */}
         {isDesktop ? (
           <div className="sticky top-24 flex h-[calc(100vh-8rem)] min-w-0 flex-col">
-            <AnimatePresence initial={false}>
+            {/* popLayout：退场的面板立刻脱离文档流，新旧同位交叉过渡；否则旧面板退场期间还占着位，新面板被顶到下面（切换瞬间错位一秒）。 */}
+            <AnimatePresence initial={false} mode="popLayout">
               {panelOpen && (
                 <motion.div
                   key={reviewRow ? `review-${reviewRow.id}` : `conversation-${chattingId ?? "find"}`}
@@ -1695,7 +1696,7 @@ export default function CandidatesPage() {
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: -12 }}
                   transition={SPRING_PANEL}
-                  className="flex h-full min-h-0 flex-col pl-8"
+                  className="absolute inset-0 flex min-h-0 flex-col pl-8"
                 >
                   {reviewRow ? (
                     <div className="flex h-full min-h-0 flex-col border-l border-white/[0.09] bg-surface-raised/40">
