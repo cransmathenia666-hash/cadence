@@ -5,7 +5,7 @@
 > 主工作树：`D:\cadence`｜`feat/frontend-a-shell`｜origin 随本轮一并推送；工作区只余用户笔记；备份 `D:/cadence-history-backup-20260923.bundle`。
 > 其他工作树：`D:\cadence-flow-closure`｜`feat/flow-closure`、`d07967b`，只读保留。
 > 当前唯一目标：**P5 知识库受限读取与档案候选已落地（E-82）**，待用户配根目录后端到端走查；蓝图增强对照、P4 走查与 P3 未完成。
-> 下一条动作：重启后端前先补跑 `app.db init`（新增三张知识库表 + `memory_evidence` 五列）→ 本机 `.env` 配 `CADENCE_KNOWLEDGE_ROOTS` → 打开 `/library` 走查 → 进 P3。
+> 下一条动作：重启后端前先补跑 `app.db init`（新增四张知识库表 + `memory_evidence` 五列）→ 打开 `/library` 点「添加」选一个本机目录 →「开始扫描」走查 → 进 P3。
 
 ## 1. 当前状态
 
@@ -32,7 +32,7 @@
 | 对话式规划与蓝图（T26；增强模式） | 通过 | E-69＋E-71＋E-74＋E-79＋E-80（取代链） | 标准兼容、增强两位审查员独立表态/一次修订/结构问题降级弃权均有假上游覆盖；`blueprint.generate_blueprint`、`_supersede_previous`、审查 payload 契约（reviewers / revision_resolution）、蓝图请求契约、候选模式选择、审查席与模式切换组件变更后需复验；真实模型与浏览器已走查（2026-10-04 报告步骤 3/4） |
 | 记忆系统：三层记忆 · 候选 · 扫描 · 删除（P3.9，T38–T45） | 通过 | E-50、E-51、E-59 | `backend/app/memory.py`、`agent_tools`、`proposals.decide`、`/api/memory*`、`frontend/app/(app)/memory/page.tsx` 或 `api.ts` 变更后失效；**真实模型没跑过，走查归用户** |
 | 每周触达与导出（P4，T15–T17） | 通过 | E-67（566 passed、冒烟 20 步、lint/tsc 0、detect `[]`） | `notify.py` / `export.py` / `jobs/weekly_checkpoint.py`、`/api/notify` 三条路由与 `app_setting` 表、`components/settings/weekly-reminder.tsx` 变更后失效；真邮件未发（空实现）、桌面观感待走查 |
-| 知识库受限读取与档案候选（P5，KB-01～06） | 通过 | E-82（施工轮复核 4 条、独立轮 14 条全修；后端 812 passed、前端 tsc/eslint 0） | 真实库实扫与浏览器观感未验（归用户）；`knowledge_base.py`、`/api/knowledge/*`、`/library` 页与 `api.ts` 知识库类型、周任务知识库步骤变更后失效 |
+| 知识库受限读取与档案候选（P5，KB-01～07） | 通过 | E-82（施工轮复核 4 条、独立轮 14 条全修；后端 822 passed、前端 tsc/eslint 0） | 真实库实扫与浏览器观感未验；`knowledge_base.py`、`/api/knowledge/*` 九条路由、`/library` 页与 `components/knowledge/`、`api.ts` 知识库类型、周任务知识库步骤变更后失效 |
 | SPEC 第 9 节真实使用验收 | 未验证 | 标准 1、5 后端部分由 E-19 与 E-38 覆盖；标准 4（周检查点三问）的代码路径由 E-67 覆盖 | 需 T18 两周试用（真邮件与任务计划未接） |
 
 ## 2. 当前目标与完成定义
@@ -40,7 +40,7 @@
 
 ## 3. 当前开放问题
 
-候选队列那边还有一件事：`start_reason` 未落库（加列 = Ask first），重看旧候选要重问一轮。**触达那侧（E-67）还差三步**：真邮件要 SMTP 授权码（环境变量 `CADENCE_SMTP_*`，只填本机 `.env`，空实现）、Windows 任务计划每周一 09:00 调一次（用户自己配）、开关与收件邮箱在设置页拧。**知识库那侧（E-82）待用户两步**：本机 `.env` 配 `CADENCE_KNOWLEDGE_ROOTS`，再打开 `/library` 做真实库实扫走查。
+候选队列那边还有一件事：`start_reason` 未落库（加列 = Ask first），重看旧候选要重问一轮。**触达那侧（E-67）还差三步**：真邮件要 SMTP 授权码（环境变量 `CADENCE_SMTP_*`，只填本机 `.env`，空实现）、Windows 任务计划每周一 09:00 调一次（用户自己配）、开关与收件邮箱在设置页拧。**知识库那侧（E-82）待用户一步**：打开 `/library` 点「添加」选一个本机目录（不用改 `.env`），再点「开始扫描」做一次真实库实扫走查。
 
 **蓝图增强模式已实现（E-69/E-71/E-79）**：口径见 `docs/ideas/蓝图多Agent审查增强模式.md` 与 SPEC 决策 45；真实模型已走查（报告步骤 4）。**P2 后端/前端已落地（E-74/E-75）**，SPEC 决策 27/33/36 与 OC-05～07 已同步；expired 定时未接（懒过期）。
 
@@ -86,13 +86,13 @@
 | E-69＋E-71 / 2026-09-29–30 | 蓝图标准／增强模式及其多审查员化（水平/结构两位独立表态＋系统防冲突补位）；后端 577 passed（蓝图专项 55）、冒烟 20 步；前端 lint 0 错（9 旧警告）、tsc、detector `[]` | `test_blueprint.py` 等可复跑 | 通过：标准兼容、两审查员互不见结论、反对必带调整、修订回执逐条对账、失败不落提案；真实模型与浏览器见 E-80 | `blueprint.generate_blueprint`、审查 payload 与蓝图请求契约、审查席组件变更后失效 |
 | E-73～E-79 / 2026-10-01–04 | **成果闭环 P1**（契约/证据/收尾/升级＋/new）与 **P2**（会话、蓝图 v2、原子批准、提案页回规划入口）＋E-77/E-79；后端 736 passed、冒烟 33 步 | 专项测试可复跑 | 通过：必需条件、改标准失效、批准回滚、legacy 闸；v2 可退回同会话；审查坏条能救/弃权，不再中止 | 契约/会话/蓝图 v2 函数、候选/提案组件或新表变更后失效；桌面走查见 E-80 |
 | E-78＋E-80＋E-81 / 2026-10-04 | 模型设置六项＋服务商预填与拉模型列表；走查报告修复 D1–D6；744 passed、冒烟 33 步、lint/tsc 0 | `test_llm.py` 等可复跑 | 留空不进请求、settings 整块替换、坏值报人话错、无密钥不发鉴权头；D1–D4 各配用例 | 设置/拉模型、provider CRUD 与路由、api.ts 与 providers 页、`dialogue._normalize_reply_data`、`blueprint._supersede_previous`、候选/工作台组件变更后失效 |
-| E-82 / 2026-10-05 | **P5 知识库接入（KB-01～06）**：`knowledge_base.py`（路径安全、受限读取、扫描覆盖账、出处校验）＋三张表＋四条 `/api/knowledge/*` 路由＋批准侧原子落档案与出处＋`/library` 页；施工轮复核 4 条、独立轮（deepseek-v4.1-flash）14 条全修；后端 812 passed、前端 tsc/eslint 0 | `test_knowledge_*` 可复跑 | 通过：路径越界与符号链接/junction 别名/禁扩展名、三项配额、中断与文件变化不写 covered、摘录逐字校验、uncertain 不可批准、批准与证据同事务 | 失效条件见第 1 节 P5 行。真实库实扫归用户 |
+| E-82 / 2026-10-05 | **P5 知识库接入（KB-01～07）**：`knowledge_base.py`（路径安全、受限读取、扫描覆盖账、出处校验、根目录增删改与目录浏览）＋四张表＋九条 `/api/knowledge/*` 路由＋批准侧原子落档案与出处＋`/library` 页与 `components/knowledge/` 配置面；施工轮复核 4 条、独立轮（deepseek-v4.1-flash）14 条全修；后端 822 passed、前端 tsc/eslint 0 | `test_knowledge_*` 可复跑 | 通过：路径越界与符号链接/junction 别名/禁扩展名、三项配额、中断与文件变化不写 covered、摘录逐字校验、uncertain 不可批准、批准与证据同事务；**根目录在界面里配，环境变量作兜底** | 失效条件见第 1 节 P5 行。真实库实扫归用户 |
 
 ## 6. 启动、验收与上下文
 
 ```powershell
 cd D:\cadence\backend
-.\.venv\Scripts\python.exe -m app.db init         # 建库；加表/加列都走它（P5 起还建三张知识库表 + memory_evidence 五列）
+.\.venv\Scripts\python.exe -m app.db init         # 建库；加表/加列都走它（P5 起建四张知识库表 + memory_evidence 五列）
 .\.venv\Scripts\python.exe -m pytest -q           # 全绿
 .\.venv\Scripts\python.exe tools\show_db.py       # 只读看库：树 / 报告 / 台账 / 提案
 .\.venv\Scripts\python.exe -c "import pathlib,tempfile; from tools import smoke_p1; smoke_p1.TEMP_DB=pathlib.Path(tempfile.mkdtemp(prefix='cadence-merge-smoke-'))/'smoke.db'; raise SystemExit(smoke_p1.main())"
@@ -105,7 +105,7 @@ npm run dev        # 开发服务，默认 http://localhost:3000（用 localhost
 npm run lint; npx tsc --noEmit  # 静态检查（typegen/build 需要时再跑）
 ```
 
-**端口与服务**：后端 8000、前端 3000。停服务按端口用 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端改 3000）找 PID 再 `Stop-Process`；后端 worker 名字不含 uvicorn，别只杀父进程。**热重启只用 `tools\dev_server.py`**（本机 Python 3.14 下 `uvicorn --reload` 首次保存必卡在 `Reloading...`）。全新克隆先装后端依赖；前端 `npm ci` + `build` 后再 `tsc`。**知识库根目录只从本机环境变量 `CADENCE_KNOWLEDGE_ROOTS` 读（「别名=绝对路径」，多根分号或换行分隔）**，绝对路径不进仓库、不进响应与台账。
+**端口与服务**：后端 8000、前端 3000。停服务按端口用 `Get-NetTCPConnection -LocalPort 8000 -State Listen`（前端改 3000）找 PID 再 `Stop-Process`；后端 worker 名字不含 uvicorn，别只杀父进程。**热重启只用 `tools\dev_server.py`**（本机 Python 3.14 下 `uvicorn --reload` 首次保存必卡在 `Reloading...`）。全新克隆先装后端依赖；前端 `npm ci` + `build` 后再 `tsc`。**知识库根目录在 `/library` 里配**（可浏览本机目录直接选）；环境变量 `CADENCE_KNOWLEDGE_ROOTS` 只在库里一条都没有时兜底。
 
 | 任务类型 | 必读文件 |
 | --- | --- |
