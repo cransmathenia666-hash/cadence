@@ -331,7 +331,8 @@ export default function LibraryPage() {
                   />
                 </div>
                 <p className="mt-2.5 text-[11px] leading-5 text-white/45">
-                  逐篇读原文并提炼，可能要等几分钟。完成后下方会给出这次扫描的账与缺口。
+                  逐篇读原文并提炼，整库一次扫完可能要等十几分钟——
+                  <span className="text-white/70">别关页面</span>，完成后下方会给出这次的账与缺口。
                 </p>
                 {lastReport !== null && limits !== null && (
                   <div className="mt-3 space-y-2.5 border-t border-white/[0.08] pt-3">

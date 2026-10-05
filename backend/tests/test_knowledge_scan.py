@@ -174,22 +174,23 @@ def test_forbidden_args_are_refused_to_the_model(conn, vault):
 
 
 def test_read_call_quota_is_enforced(conn, vault):
-    """12 次读调用上限：一次批量要 13 次，第 13 次被如实拒绝，账上只有 12 次。"""
+    """读调用次数上限：一次批量多要一次，最后一次被如实拒绝，账上只有上限次。"""
     make_provider(conn)
     _write(vault / "a.md", "# 笔记\n晚上十点以后不学习。\n")
-    reads = [{"name": "knowledge_read_file", "args": {"path": "a.md"}} for _ in range(13)]
+    cap = kb.MAX_READ_CALLS
+    reads = [{"name": "knowledge_read_file", "args": {"path": "a.md"}} for _ in range(cap + 1)]
     transport = ScriptedTransport(json.dumps({"tool_calls": reads}, ensure_ascii=False), _final())
 
     report = kb.scan(conn, 1, transport=transport)
 
     assert report["status"] == "ok"  # 第一次读就读完了全文，配额触顶不影响这个文件
-    assert report["read_calls"] == 12
+    assert report["read_calls"] == cap
     row = conn.execute(
         "SELECT read_calls FROM knowledge_scan WHERE id = ?", (report["scan_id"],)
     ).fetchone()
-    assert int(row["read_calls"]) == 12
+    assert int(row["read_calls"]) == cap
     tool_result = _tool_results(transport.seen[1])
-    assert tool_result.count("【knowledge_read_file】") == 12
+    assert tool_result.count("【knowledge_read_file】") == cap
     assert "次数额度" in tool_result
 
 
@@ -210,20 +211,21 @@ def test_single_file_truncation(conn, vault):
 
 
 def test_total_char_quota_is_enforced(conn, vault):
-    """总字符 120000：五段各 30000 的读法，第 5 段被拒，账上正好 120000。"""
+    """总字符额度用完就不再给读：账上正好卡在额度，剩下的如实记成缺口（数目跟着常量走）。"""
     make_provider(conn)
-    _write(vault / "big.md", "a" * 130_000)
+    per = kb.MAX_FILE_CHARS
+    segments = kb.MAX_TOTAL_CHARS // per  # 用满额度要几段
+    _write(vault / "big.md", "a" * (per * (segments + 2) + 10))
     reads = [
-        {"name": "knowledge_read_file", "args": {"path": "big.md", "offset": offset}}
-        for offset in (0, 30_000, 60_000, 90_000, 120_000)
+        {"name": "knowledge_read_file", "args": {"path": "big.md", "offset": index * per}}
+        for index in range(segments + 2)  # 多要两段：一段把余额切成 0，再一段被拒
     ]
     transport = ScriptedTransport(json.dumps({"tool_calls": reads}, ensure_ascii=False), _final())
 
     report = kb.scan(conn, 1, transport=transport)
 
-    assert report["read_calls"] == 4
     assert report["chars_read"] == kb.MAX_TOTAL_CHARS
-    assert report["status"] == "partial"  # 还有 10000 字符没读到，不假装看完
+    assert report["status"] == "partial"  # 还有没读到的，不假装看完
     tool_result = _tool_results(transport.seen[1])
     assert "总字符额度" in tool_result
     assert any("big.md" in gap for gap in report["unread_gaps"])
