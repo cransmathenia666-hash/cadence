@@ -271,14 +271,18 @@ export function KnowledgeRootPanel({
 
       <div className="space-y-6">
         <label className="block">
-          <span className="text-[12px] font-medium text-white/80">名字</span>
-          <span className="ml-2 text-[11px] text-white/40">显示在清单与候选出处上，不能与别的库重名</span>
+          <span className="block text-[12px] font-medium text-white/80">
+            名字
+            <span className="ml-2 text-[11px] font-normal text-white/40">
+              显示在清单与候选出处上，不能与别的库重名
+            </span>
+          </span>
           <input
             value={draft.alias}
             onChange={(event) => onChange({ alias: event.target.value })}
             placeholder="比如：个人知识库"
             maxLength={40}
-            className="mt-2 w-full max-w-[420px] rounded-md border border-white/[0.14] bg-white/[0.03] px-3 py-2 text-[13px] text-white placeholder:text-white/30 transition-colors focus:border-white/30 focus:outline-none"
+            className="mt-2 block w-full max-w-[420px] rounded-md border border-white/[0.14] bg-white/[0.03] px-3 py-2 text-[13px] text-white placeholder:text-white/30 transition-colors focus:border-white/30 focus:outline-none"
           />
         </label>
 
