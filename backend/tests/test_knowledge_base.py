@@ -157,8 +157,10 @@ def test_public_roots_have_no_absolute_paths(tmp_path, monkeypatch):
     public = kb.public_roots()
 
     assert [item["id"] for item in public] == [1, 2, 3]  # 编号按配置顺序从 1 起
-    assert set(public[0]) == {"id", "alias", "enabled", "error"}
-    assert public[0] == {"id": 1, "alias": "笔记", "enabled": True, "error": None}
+    assert set(public[0]) == {"id", "alias", "enabled", "error", "source"}
+    assert public[0] == {
+        "id": 1, "alias": "笔记", "enabled": True, "error": None, "source": "env",
+    }  # 环境变量来的根不给路径：那一份不在界面里改
     assert public[1]["enabled"] is False
     assert public[1]["error"]  # 一句人话 error
     assert public[2]["enabled"] is False
@@ -357,3 +359,110 @@ def test_junction_alias_into_a_denied_dir_is_denied(vault):
     assert "alias/evil.md" not in listed
     with pytest.raises(kb.KnowledgeDenied, match=r"\.git"):
         kb.safe_relative_path(1, "alias/evil.md")
+
+
+# ---------- 在界面里配根目录（2026-10-05：不再让人去改 .env） ----------
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    path = tmp_path / "test.db"
+    db.init(path)
+    connection = db.connect(path)
+    yield connection
+    connection.close()
+
+
+def _dir(base, name: str):
+    folder = base / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def test_roots_configured_in_the_ui_win_over_the_env(conn, tmp_path, monkeypatch):
+    """界面配过就以库为准：环境变量只是「库里一条都没有时」的兜底。"""
+    monkeypatch.setenv("CADENCE_KNOWLEDGE_ROOTS", f"旧的={_dir(tmp_path, 'old')}")
+
+    added = kb.add_root(conn, alias="笔记", path=_dir(tmp_path, "vault"))
+
+    roots = kb.configured_roots(conn)
+    assert [root.alias for root in roots] == ["笔记"]
+    assert roots[0].source == "ui" and roots[0].enabled
+    assert added.id == roots[0].id
+
+    public = kb.public_roots(conn)
+    assert public[0]["source"] == "ui"
+    assert public[0]["path"] == str((tmp_path / "vault").resolve())  # 界面能看到自己配的目录
+
+
+def test_duplicate_alias_and_bad_paths_are_refused_with_plain_words(conn, tmp_path):
+    from pathlib import Path
+
+    kb.add_root(conn, alias="笔记", path=_dir(tmp_path, "a"))
+
+    with pytest.raises(kb.KnowledgeConflict, match="已经有一个叫"):
+        kb.add_root(conn, alias="笔记", path=_dir(tmp_path, "b"))
+    with pytest.raises(kb.KnowledgeError, match="绝对路径"):
+        kb.add_root(conn, alias="相对", path="some/relative/path")
+    with pytest.raises(kb.KnowledgeError, match="现成的目录"):
+        kb.add_root(conn, alias="没有", path=str(tmp_path / "不存在"))
+    _write(tmp_path / "a" / "note.md")
+    with pytest.raises(kb.KnowledgeError, match="指向的是文件"):
+        kb.add_root(conn, alias="文件", path=str(tmp_path / "a" / "note.md"))
+    with pytest.raises(kb.KnowledgeError, match="系统目录"):
+        kb.check_root_path("C:/Windows")
+    with pytest.raises(kb.KnowledgeError, match="cadence 自己"):
+        kb.check_root_path(str(Path(kb.__file__).resolve().parents[2]))
+    with pytest.raises(kb.KnowledgeError, match="整盘"):
+        kb.check_root_path(tmp_path.anchor)
+
+
+def test_update_and_delete_a_ui_root(conn, tmp_path):
+    root = kb.add_root(conn, alias="笔记", path=_dir(tmp_path, "a"))
+
+    renamed = kb.update_root(conn, root.id, alias="资料", enabled=False)
+    assert renamed.alias == "资料" and renamed.enabled is False
+    assert kb.configured_roots(conn)[0].enabled is False
+
+    kb.delete_root(conn, root.id)
+    assert kb.configured_roots(conn) == []
+    with pytest.raises(kb.KnowledgeNotFound):
+        kb.delete_root(conn, root.id)
+
+
+def test_a_ui_root_whose_folder_is_gone_is_disabled_not_fatal(conn, tmp_path):
+    folder = _dir(tmp_path, "临时")
+    kb.add_root(conn, alias="会消失", path=folder)
+    folder.rmdir()
+
+    (only,) = kb.configured_roots(conn)
+    assert only.enabled is False and "不存在" in (only.error or "")
+
+
+def test_import_env_roots_moves_them_into_the_ui(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "CADENCE_KNOWLEDGE_ROOTS", f"笔记={_dir(tmp_path, 'a')};缺的={tmp_path / '没有'}"
+    )
+
+    report = kb.import_env_roots(conn)
+
+    assert report["imported"] == ["笔记"]
+    assert any("缺的" in str(item) for item in report["skipped"])
+    assert [root.alias for root in kb.configured_roots(conn)] == ["笔记"]
+
+
+def test_browse_lists_subdirectories_and_says_why_unusable(tmp_path):
+    parent = _dir(tmp_path, "父目录")
+    _dir(parent, "子目录")
+    _write(parent / "note.md")  # 文件不列
+
+    listing = kb.browse(str(parent))
+
+    assert [item["name"] for item in listing["entries"]] == ["子目录"]
+    assert listing["problem"] is None  # 这个目录可以选
+    assert listing["parent"] == str(tmp_path.resolve())
+
+    start = kb.browse(None)
+    assert start["path"] is None
+    assert start["entries"]
+    assert all(item["problem"] for item in start["entries"])  # 盘符与主目录：看得见、选不了

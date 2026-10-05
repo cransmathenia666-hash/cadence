@@ -266,7 +266,7 @@ def decide(
                 )
             try:
                 knowledge_evidence = [
-                    knowledge_base.verify_evidence(item) for item in evidence_items
+                    knowledge_base.verify_evidence(item, conn) for item in evidence_items
                 ]
             except knowledge_base.KnowledgeError as error:
                 raise ProposalConflict(str(error)) from error

@@ -2459,6 +2459,10 @@ export type KnowledgeRoot = {
   alias: string;
   enabled: boolean;
   error: string | null;
+  /** `ui` = 在界面里配的（可增删改）；`env` = 从本机环境变量读来的（只读，可一键搬进来）。 */
+  source: "ui" | "env";
+  /** 绝对路径：**只有界面里配的根才有**，而且只在这一处出现（后端的扫描账与文件清单从不带它）。 */
+  path?: string;
 };
 
 /** 读取配额的公开上限：由后端给，界面只按它画比例，不自己抄一份数字。 */
@@ -2573,6 +2577,76 @@ export async function getKnowledgeScans(
   const params = new URLSearchParams({ limit: String(limit) });
   if (rootId !== undefined) params.set("root_id", String(rootId));
   return request<{ scans: KnowledgeScanRecord[] }>(`/api/knowledge/scans?${params.toString()}`);
+}
+
+// ---------- 知识库根目录的配置（界面里加库，不用去改 .env） ----------
+
+/** 加一个知识库根。路径要是**现成的目录**：后端会校验存在、规范化与逃逸，不合规给人话原因。 */
+export async function createKnowledgeRoot(input: {
+  alias: string;
+  path: string;
+  enabled?: boolean;
+}): Promise<KnowledgeRoot> {
+  const data = await request<{ root: KnowledgeRoot }>("/api/knowledge/roots", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      alias: input.alias,
+      path: input.path,
+      enabled: input.enabled ?? true,
+    }),
+  });
+  return data.root;
+}
+
+/** 改一个根：只传要改的字段（没传的不动）。换路径就是换了一个资料库。 */
+export async function updateKnowledgeRoot(
+  rootId: number,
+  patch: { alias?: string; path?: string; enabled?: boolean },
+): Promise<KnowledgeRoot> {
+  const body: Record<string, unknown> = {};
+  if (patch.alias !== undefined) body.alias = patch.alias;
+  if (patch.path !== undefined) body.path = patch.path;
+  // 布尔值只看「传没传」：`false`（停用）也是有效意图
+  if (patch.enabled !== undefined) body.enabled = patch.enabled;
+  const data = await request<{ root: KnowledgeRoot }>(`/api/knowledge/roots/${rootId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return data.root;
+}
+
+/** 删一个根：只删配置，**一个文件都不动**；文件台账与扫描历史留着（那是审计）。 */
+export async function deleteKnowledgeRoot(rootId: number): Promise<{ deleted: number }> {
+  return request<{ deleted: number }>(`/api/knowledge/roots/${rootId}`, { method: "DELETE" });
+}
+
+/** 把本机环境变量里的根搬进界面（只在库里一条都没有、正靠环境变量生效时用得上）。 */
+export async function importEnvKnowledgeRoots(): Promise<{ imported: string[]; skipped: string[] }> {
+  return request<{ imported: string[]; skipped: string[] }>("/api/knowledge/roots/import-env", {
+    method: "POST",
+  });
+}
+
+/** 目录浏览里的一项。`problem` 是「不适合作根」的理由，空就是能选。 */
+export type KnowledgeBrowseEntry = { name: string; path: string; problem: string | null };
+
+/** 一层目录的浏览结果：当前位置、上一级、当前位置适不适合，以及子目录。 */
+export type KnowledgeBrowse = {
+  path: string | null;
+  parent: string | null;
+  problem: string | null;
+  entries: KnowledgeBrowseEntry[];
+};
+
+/**
+ * 列本机目录（只服务「选知识库根」这一个界面）：只列子目录、不递归、不列文件。
+ * 不传 `path` 就从盘符与用户主目录开始。
+ */
+export async function browseKnowledge(path?: string): Promise<KnowledgeBrowse> {
+  const query = path === undefined ? "" : `?path=${encodeURIComponent(path)}`;
+  return request<KnowledgeBrowse>(`/api/knowledge/browse${query}`);
 }
 
 // ---------- 每周提醒与导出（P4 触达：T15–T17） ----------

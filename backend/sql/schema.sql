@@ -487,6 +487,22 @@ CREATE TABLE IF NOT EXISTS memory_deletion (
 -- 扫描账本只记材料处理进度，不记模型结论、不与模型名称绑定（§7.1 第 6 条）——
 -- 所以这里没有 provider / model 列；覆盖记录的版本键是 相对路径+内容哈希+需求版本（§7.4）。
 
+-- 知识库根目录（2026-10-05 起可在界面里配）：**这是根目录的唯一可写来源**。
+-- 本机环境变量 `CADENCE_KNOWLEDGE_ROOTS` 仍然认，但只在库里一条都没有时作为兜底
+-- （界面里能一键把它们搬进来）；一旦界面配过，就以这张表为准。
+-- path 存**绝对路径**：它只在本机跑，且读取本身就发生在同一台机器上；但这条绝对路径
+-- **只回给「知识库配置」这一个界面**，扫描响应、文件清单、扫描账、候选 payload 与日志
+-- 一律只有别名与相对路径（§10.3）。
+CREATE TABLE IF NOT EXISTS knowledge_root (
+  id         INTEGER PRIMARY KEY,
+  alias      TEXT    NOT NULL,   -- 对外显示的名字，唯一（重名会让出处核到别的根上）
+  path       TEXT    NOT NULL,   -- 绝对路径，写入前经 app/knowledge_base.py 校验与规范化
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_root_alias ON knowledge_root (alias);
+
 -- 扫描时见过的知识库文件：知识库侧的文件台账。(root_id, relative_path) 定位一个文件，
 -- content_hash 用来判断「文件变没变」——变了就是新版本，旧覆盖记录自然不再适用。
 CREATE TABLE IF NOT EXISTS knowledge_file (

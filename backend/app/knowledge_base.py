@@ -67,6 +67,10 @@ DENIED_SUFFIXES = (
 # 这些**目录**里的文件一律不读也不列（§10.3：仓库 .git 目录）。比较不分大小写。
 DENIED_DIRS = frozenset({".git", "node_modules"})
 
+# 这些名字的目录不许当知识库根（系统目录；整盘根、用户主目录与 cadence 仓库另见
+# `_root_path_error`，那几条按路径判，不按名字）。
+DENIED_ROOT_NAMES = frozenset({"windows", "program files", "program files (x86)", "programdata"})
+
 # 「看起来像本机绝对路径」的片段：盘符路径（C:\… / C:/…）与 UNC（\\server\share\…）。
 # 落台账 / 回响应前用它兜底脱敏——只替换自己的根挡不住别处的绝对路径。
 _ABSOLUTE_PATH_RE = re.compile(
@@ -102,11 +106,17 @@ class KnowledgeConflict(KnowledgeError):
 # ---- 根目录：配置解析与对外视图 ----
 
 
+# 根目录的两个来源：`ui` = 在知识库设置界面里配的（可增删改）；`env` = 从本机环境变量读来的
+# （只读，可在界面里一键搬进库）。两者不会同时生效——见 `configured_roots`。
+SOURCE_UI = "ui"
+SOURCE_ENV = "env"
+
+
 @dataclass(frozen=True)
 class Root:
     """一个知识库根目录。
 
-    `path` 是绝对路径，只留在后端内部；对外一律经 `public_roots()` 脱敏。
+    `path` 是绝对路径，只留在后端内部；对外只有「知识库设置界面」能看见它（`public_roots`）。
     """
 
     id: int
@@ -114,6 +124,7 @@ class Root:
     path: Path
     enabled: bool
     error: str | None = None
+    source: str = SOURCE_ENV
 
 
 @dataclass(frozen=True)
@@ -181,8 +192,22 @@ def parse_roots(config: str) -> list[Root]:
     return roots
 
 
-def configured_roots() -> list[Root]:
-    """从环境变量读当前配置。每次现读，不做缓存——配置改了立即生效。"""
+def configured_roots(conn: sqlite3.Connection | None = None) -> list[Root]:
+    """当前生效的根目录。
+
+    库里配过（`knowledge_root` 有行）就以库为准；一条都没有时回落到本机环境变量
+    `CADENCE_KNOWLEDGE_ROOTS`——没碰过界面的老配置照旧能用，而界面一旦配过就只有一个
+    真相源，不会出现「界面里删了、环境变量里还生效」。
+    """
+    if conn is not None:
+        try:
+            rows = conn.execute(
+                "SELECT id, alias, path, enabled FROM knowledge_root ORDER BY id"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []  # 老库还没建这张表（没跑过 db init）：退回环境变量，不炸
+        if rows:
+            return [_row_to_root(row) for row in rows]
     return parse_roots(os.environ.get(ROOTS_ENV, ""))
 
 
@@ -197,18 +222,36 @@ def quota_limits() -> dict[str, int]:
     }
 
 
-def public_roots(roots: Sequence[Root] | None = None) -> list[dict[str, object]]:
-    """根目录的对外视图：只有 id、别名、可用状态和脱敏过的错误，**绝不含绝对路径**。"""
-    resolved = configured_roots() if roots is None else list(roots)
-    return [
-        {"id": root.id, "alias": root.alias, "enabled": root.enabled, "error": root.error}
-        for root in resolved
-    ]
+def public_roots(
+    conn: sqlite3.Connection | None = None, roots: Sequence[Root] | None = None
+) -> list[dict[str, object]]:
+    """根目录的对外视图。
+
+    `path` 只给**界面里配的**根：知识库设置界面是唯一能看到绝对路径的地方（不然你没法
+    确认自己配的是哪个目录）。来源是环境变量时只给别名——那一份不在界面里改。扫描响应、
+    文件清单、扫描账与候选 payload 一律只有别名与相对路径（§10.3）。
+    """
+    resolved = configured_roots(conn) if roots is None else list(roots)
+    items: list[dict[str, object]] = []
+    for root in resolved:
+        item: dict[str, object] = {
+            "id": root.id,
+            "alias": root.alias,
+            "enabled": root.enabled,
+            "error": root.error,
+            "source": root.source,
+        }
+        if root.source == SOURCE_UI:
+            item["path"] = str(root.path)
+        items.append(item)
+    return items
 
 
-def find_root(root_id: int, roots: Sequence[Root] | None = None) -> Root:
+def find_root(
+    root_id: int, roots: Sequence[Root] | None = None, conn: sqlite3.Connection | None = None
+) -> Root:
     """按编号找根；找不到明确报错，不静默回落到别的根。"""
-    resolved = configured_roots() if roots is None else list(roots)
+    resolved = configured_roots(conn) if roots is None else list(roots)
     for root in resolved:
         if root.id == root_id:
             return root
@@ -219,12 +262,246 @@ def _no_such_root(root_id: int, roots: Sequence[Root]) -> Root:
     raise KnowledgeNotFound(f"编号 {root_id} 的知识库根不存在（当前配置了 {len(roots)} 个根）")
 
 
-def _usable_root(root_id: int, roots: Sequence[Root] | None) -> Root:
+def _usable_root(
+    root_id: int, roots: Sequence[Root] | None, conn: sqlite3.Connection | None = None
+) -> Root:
     """取一个**可用**的根：不存在的报 NotFound，存在但被停用的报它自己的原因。"""
-    root = find_root(root_id, roots)
+    root = find_root(root_id, roots, conn)
     if not root.enabled:
         raise KnowledgeError(root.error or "这个知识库根当前不可用")
     return root
+
+
+# ---- 根目录的增删改（界面那一侧的唯一写入口） ----
+
+
+def _repo_root() -> Path:
+    """本仓库根（backend/app/knowledge_base.py 往上三级）。"""
+    return Path(__file__).resolve().parents[2]
+
+
+def _root_path_error(resolved: Path) -> str | None:
+    """这个目录能不能当知识库根：不能就给一句人话，能就给 None。
+
+    规则：不能是整盘根、不能是系统目录、不能是整个用户主目录、不能是 cadence 仓库自己
+    （里面是代码、`.env` 与数据库）——把这些当资料库扫，等于把配置和源码一起喂给提炼。
+    """
+    if resolved.parent == resolved:
+        return "整盘当知识库太大、也不安全：请选一个具体目录"
+    if resolved.name.lower() in DENIED_ROOT_NAMES:
+        return f"「{resolved.name}」是系统目录，不适合作知识库"
+    repo = _repo_root()
+    if resolved == repo or repo in resolved.parents:
+        return "cadence 自己所在的目录不能当知识库（里面是代码与配置）"
+    if resolved == Path.home():
+        return "整个用户主目录太大：请选里面具体的一个目录"
+    return None
+
+
+def check_root_path(raw: object) -> Path:
+    """校验一个**要当知识库根**的目录，返回规范化后的绝对路径；不行抛 KnowledgeError。"""
+    text = str(raw or "").strip().strip("\"'")
+    if not text:
+        raise KnowledgeError("路径不能为空：填一个目录（从盘符写起）")
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        raise KnowledgeError("路径必须是绝对路径：从盘符或共享名写起")
+    try:
+        resolved = candidate.resolve()
+    except OSError as error:
+        raise KnowledgeError(f"这个路径读不了：{error}") from None
+    if not resolved.is_dir():
+        raise KnowledgeError("这个路径不是一个现成的目录（不存在，或者指向的是文件）")
+    problem = _root_path_error(resolved)
+    if problem is not None:
+        raise KnowledgeError(problem)
+    return resolved
+
+
+def check_alias(raw: object) -> str:
+    """别名：1–40 字，不能带分隔符（它同时是配置写法的分隔符与出处核对时的查找键）。"""
+    alias = str(raw or "").strip()
+    if not alias:
+        raise KnowledgeError("名字不能为空：它会显示在界面与候选出处上")
+    if len(alias) > 40:
+        raise KnowledgeError("名字太长了（最多 40 个字）")
+    if any(ch in alias for ch in "=;\r\n"):
+        raise KnowledgeError("名字里不能有「=」「;」或换行")
+    return alias
+
+
+def _row_to_root(row: sqlite3.Row) -> Root:
+    """一行配置 → Root。目录现在不在（被移走或改名）就地标不可用，不抛异常。"""
+    path = Path(str(row["path"]))
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    enabled = bool(row["enabled"])
+    error: str | None = None
+    if enabled and not resolved.is_dir():
+        enabled = False
+        error = "这个根指向的目录不存在或不是目录，已停用"
+    return Root(
+        id=int(row["id"]),
+        alias=str(row["alias"]),
+        path=resolved,
+        enabled=enabled,
+        error=error,
+        source=SOURCE_UI,
+    )
+
+
+def add_root(
+    conn: sqlite3.Connection, *, alias: object, path: object, enabled: bool = True
+) -> Root:
+    """加一个知识库根：先校验别名与路径，再落库。重名给冲突错误，不静默改名。"""
+    name = check_alias(alias)
+    resolved = check_root_path(path)
+    if conn.execute("SELECT id FROM knowledge_root WHERE alias = ?", (name,)).fetchone():
+        raise KnowledgeConflict(f"已经有一个叫「{name}」的根了——换个名字，或者改那一个")
+    stamp = now_iso()
+    cursor = conn.execute(
+        "INSERT INTO knowledge_root (alias, path, enabled, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (name, str(resolved), 1 if enabled else 0, stamp, stamp),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM knowledge_root WHERE id = ?", (int(cursor.lastrowid),)
+    ).fetchone()
+    return _row_to_root(row)
+
+
+def update_root(
+    conn: sqlite3.Connection,
+    root_id: int,
+    *,
+    alias: object = None,
+    path: object = None,
+    enabled: bool | None = None,
+) -> Root:
+    """改一个根：只动传了的字段（别名 / 路径 / 启用）。换了路径就是换了一个资料库。"""
+    row = conn.execute("SELECT id FROM knowledge_root WHERE id = ?", (int(root_id),)).fetchone()
+    if row is None:
+        raise KnowledgeNotFound(f"编号 {root_id} 的知识库根不存在，或者它不是界面里配的")
+    fields: dict[str, object] = {}
+    if alias is not None:
+        name = check_alias(alias)
+        clash = conn.execute(
+            "SELECT id FROM knowledge_root WHERE alias = ? AND id != ?", (name, int(root_id))
+        ).fetchone()
+        if clash:
+            raise KnowledgeConflict(f"已经有一个叫「{name}」的根了——换个名字")
+        fields["alias"] = name
+    if path is not None:
+        fields["path"] = str(check_root_path(path))
+    if enabled is not None:
+        fields["enabled"] = 1 if enabled else 0
+    if not fields:
+        raise KnowledgeError("没有要改的东西：别名、路径、启用状态至少传一个")
+    fields["updated_at"] = now_iso()
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    conn.execute(
+        f"UPDATE knowledge_root SET {assignments} WHERE id = ?",
+        (*fields.values(), int(root_id)),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM knowledge_root WHERE id = ?", (int(root_id),)).fetchone()
+    return _row_to_root(updated)
+
+
+def delete_root(conn: sqlite3.Connection, root_id: int) -> None:
+    """删一个根：只删这条配置，**一个文件都不动**；文件台账与扫描历史留着（那是审计）。"""
+    row = conn.execute("SELECT id FROM knowledge_root WHERE id = ?", (int(root_id),)).fetchone()
+    if row is None:
+        raise KnowledgeNotFound(f"编号 {root_id} 的知识库根不存在，或者它不是界面里配的")
+    conn.execute("DELETE FROM knowledge_root WHERE id = ?", (int(root_id),))
+    conn.commit()
+
+
+def import_env_roots(conn: sqlite3.Connection) -> dict[str, object]:
+    """把本机环境变量里的根搬进库里（界面上的「搬进来」按钮）。
+
+    只搬库里还没有、且当下可用的条目；搬完就是库里的配置说了算，环境变量从此只是历史。
+    返回搬了哪些、跳过了哪些（重名或目录不在）。
+    """
+    imported: list[str] = []
+    skipped: list[str] = []
+    for root in parse_roots(os.environ.get(ROOTS_ENV, "")):
+        if conn.execute("SELECT id FROM knowledge_root WHERE alias = ?", (root.alias,)).fetchone():
+            skipped.append(f"{root.alias}（界面里已经有了）")
+            continue
+        if not root.enabled:
+            skipped.append(f"{root.alias}（{root.error or '目录不可用'}）")
+            continue
+        add_root(conn, alias=root.alias, path=root.path, enabled=True)
+        imported.append(root.alias)
+    return {"imported": imported, "skipped": skipped}
+
+
+# ---- 本机目录浏览（只服务「选知识库根」这一个界面） ----
+
+
+def _is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _browse_entry(path: Path) -> dict[str, object]:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    return {
+        "name": path.name or str(path),
+        "path": str(resolved),
+        "problem": _root_path_error(resolved),
+    }
+
+
+def browse(path: object = None) -> dict[str, object]:
+    """列本机目录：只列子目录、不递归、不列文件。
+
+    `path` 为空时给盘符与用户主目录当起点。每一项带 `problem`：不适合作根的理由（空串
+    就是能选）——你照样能点进去，但「就选这个」会被禁用并说明为什么。
+    """
+    text = str(path or "").strip().strip("\"'")
+    if not text:
+        entries: list[dict[str, object]] = []
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = Path(f"{letter}:\\")
+            if drive.exists():
+                entries.append(_browse_entry(drive))
+        home = Path.home()
+        if _is_dir(home) and not any(str(item["path"]) == str(home) for item in entries):
+            entries.append(_browse_entry(home))
+        return {"path": None, "parent": None, "problem": None, "entries": entries}
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        raise KnowledgeError("浏览的路径必须是绝对路径")
+    try:
+        resolved = candidate.resolve()
+    except OSError as error:
+        raise KnowledgeError(f"这个路径读不了：{error}") from None
+    if not resolved.is_dir():
+        raise KnowledgeError("这个路径不是一个现成的目录")
+    try:
+        children = sorted(
+            (child for child in resolved.iterdir() if _is_dir(child)),
+            key=lambda item: item.name.lower(),
+        )
+    except OSError as error:
+        raise KnowledgeError(f"这个目录打不开（可能没有权限）：{error}") from None
+    parent = resolved.parent if resolved.parent != resolved else None
+    return {
+        "path": str(resolved),
+        "parent": str(parent) if parent is not None else None,
+        "problem": _root_path_error(resolved),
+        "entries": [_browse_entry(child) for child in children],
+    }
 
 
 # ---- 路径安全检查 ----
@@ -286,14 +563,17 @@ def _check_resolved_dirs(absolute: Path, base: Path) -> None:
 
 
 def safe_relative_path(
-    root_id: int, rel: str, roots: Sequence[Root] | None = None
+    root_id: int,
+    rel: str,
+    roots: Sequence[Root] | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> ResolvedPath:
     """把「根编号 + 相对路径」解析成根内的绝对路径；任何越界企图抛 KnowledgeDenied。
 
     检查顺序：形状（绝对路径 / 盘符 / `..`）→ 解析后仍在根内（符号链接一起 resolve，
     逃逸当场现形）→ 目录黑名单 → 后缀黑名单 → 扩展名白名单。
     """
-    root = _usable_root(root_id, roots)
+    root = _usable_root(root_id, roots, conn)
     parts = _check_shape(rel)
     base = root.path.resolve()
     candidate = base.joinpath(*parts).resolve()
@@ -308,7 +588,10 @@ def safe_relative_path(
 
 
 def list_files(
-    root_id: int, prefix: str = "", roots: Sequence[Root] | None = None
+    root_id: int,
+    prefix: str = "",
+    roots: Sequence[Root] | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> list[dict[str, object]]:
     """列出根内**可读**文件的相对路径清单，按相对路径排序，一律正斜杠。
 
@@ -316,7 +599,7 @@ def list_files(
     让模型去读却注定被拒的路径。prefix 按目录前缀过滤（"notes" 匹配 notes/
     整棵子树，不会误伤 notes-extra/）。
     """
-    root = _usable_root(root_id, roots)
+    root = _usable_root(root_id, roots, conn)
     prefix_norm = ""
     if (prefix or "").strip():
         prefix_norm = "/".join(_check_shape(prefix))
@@ -362,6 +645,7 @@ def read_text(
     offset: int = 0,
     limit: int = MAX_FILE_CHARS,
     roots: Sequence[Root] | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, object]:
     """以 UTF-8 读取一个通过安全检查的文本文件，按单篇上限截断。
 
@@ -370,7 +654,7 @@ def read_text(
     当作已看完（§7.1 第 8 条）。content_hash / size 始终是**整个文件**的值，
     不随截断变化，供「文件变没变」的比对。
     """
-    resolved = safe_relative_path(root_id, rel, roots)
+    resolved = safe_relative_path(root_id, rel, roots, conn)
     if offset < 0:
         raise KnowledgeError("起始位置 offset 不能是负数")
     limit = MAX_FILE_CHARS if limit is None else int(limit)
@@ -719,7 +1003,9 @@ def _tool_read_file(state: ScanState, progress: FileProgress, args: Any) -> str:
             "把已经读到的内容提炼成 cards 输出，读不完的部分写进 unread_gaps"
         )
 
-    result = read_text(state.root.id, normalized, offset=offset, limit=min(limit, remaining))
+    result = read_text(
+        state.root.id, normalized, offset=offset, limit=min(limit, remaining), conn=state.conn
+    )
     if str(result["content_hash"]) != progress.baseline_hash:
         # 列目录之后文件被改过：这次读到的已经不是账本记的那个版本，立即放弃（§10.2）。
         raise _FileChanged()
@@ -1066,10 +1352,12 @@ def _scrub(text: str, root: Root) -> str:
     return redact_paths(cleaned)
 
 
-def _file_meta(root_id: int, rel: str) -> dict[str, Any] | None:
+def _file_meta(
+    root_id: int, rel: str, conn: sqlite3.Connection | None = None
+) -> dict[str, Any] | None:
     """列目录之后的文件基线：整个文件的内容哈希与大小。读不了（没了/权限）给 None。"""
     try:
-        resolved = safe_relative_path(root_id, rel)
+        resolved = safe_relative_path(root_id, rel, None, conn)
         data = resolved.absolute.read_bytes()
         stat = resolved.absolute.stat()
     except (KnowledgeError, OSError):
@@ -1239,7 +1527,7 @@ def _process_file(
     outcome.model_gaps = list(output.unread_gaps)
 
     # 提交前再核一次内容哈希：列目录之后文件被改（含读到一半才改）都不推进覆盖账。
-    fresh = _file_meta(state.root.id, progress.relative_path)
+    fresh = _file_meta(state.root.id, progress.relative_path, state.conn)
     if fresh is None or str(fresh["content_hash"]) != progress.baseline_hash:
         outcome.error = _CHANGED_MESSAGE
         _commit_file(
@@ -1316,18 +1604,18 @@ def _plan_files(
     if scope == "paths":
         wanted: list[str] = []
         for raw in paths or []:
-            resolved = safe_relative_path(root.id, str(raw))  # 越界 / 绝对路径：当场报错
+            resolved = safe_relative_path(root.id, str(raw), None, conn)  # 越界 / 绝对路径：当场报错
             if resolved.relative_path not in wanted:
                 wanted.append(resolved.relative_path)
         wanted.sort()
     else:
-        wanted = [str(item["relative_path"]) for item in list_files(root.id)]
+        wanted = [str(item["relative_path"]) for item in list_files(root.id, conn=conn)]
 
     entries: list[dict[str, Any]] = []
     skipped: list[str] = []
     gaps: list[str] = []
     for rel in wanted:
-        meta = _file_meta(root.id, rel)
+        meta = _file_meta(root.id, rel, conn)
         if meta is None:
             if scope == "paths":
                 raise KnowledgeNotFound(f"点名的文件不存在或读不了：{rel}")
@@ -1391,7 +1679,7 @@ def scan(
     else:
         named = None
     version = str(requirements_version or "").strip() or REQUIREMENTS_VERSION_DEFAULT
-    root = _usable_root(root_id, None)
+    root = _usable_root(root_id, None, conn)
     state = ScanState(conn=conn, root=root, scan_id=0, requirements_version=version)
 
     # 列目录与点名文件的校验放在扫描行落库**之前**：参数错误当场报，不留一条假 running。
@@ -1538,12 +1826,12 @@ def file_listing(
     `covered` 按**当前最新覆盖账**算：文件的当前内容（现算哈希）在这个需求口径版本下
     已有 covered / reviewed_no_change 的覆盖行才算数——文件改过就不算，重扫会重新处理它。
     """
-    root = _usable_root(root_id, roots)
+    root = _usable_root(root_id, roots, conn)
     files: list[dict[str, Any]] = []
-    for item in list_files(root_id, prefix, roots):
+    for item in list_files(root_id, prefix, roots, conn):
         rel = str(item["relative_path"])
         try:
-            current_hash = hash_file(safe_relative_path(root_id, rel, roots).absolute)
+            current_hash = hash_file(safe_relative_path(root_id, rel, roots, conn).absolute)
         except (KnowledgeError, OSError):
             current_hash = ""  # 列目录之后读不了了：按没覆盖算，重扫见分晓
         files.append(
@@ -1567,7 +1855,9 @@ def file_listing(
 # 档案写入、证据写入、提案终态三件事同一事务完成。原文件本身只读，永不改写。
 
 
-def verify_evidence(item: dict[str, Any]) -> dict[str, Any]:
+def verify_evidence(
+    item: dict[str, Any], conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
     """批准前再验一条知识库出处（**纯只读**，不碰库）：文件还在、摘录还能逐字找到。
 
     从落候选到批准之间文件完全可能已经改过——摘录找不到了就抛 `KnowledgeConflict`，
@@ -1579,14 +1869,14 @@ def verify_evidence(item: dict[str, Any]) -> dict[str, Any]:
     if not relative_path or not excerpt:
         raise KnowledgeConflict("这条出处缺了相对路径或摘录，没法核对原文")
     root_alias = str(item.get("root_alias") or "").strip()
-    roots = configured_roots()
+    roots = configured_roots(conn)
     root = next((r for r in roots if r.enabled and r.alias == root_alias), None)
     if root is None:
         raise KnowledgeConflict(
             f"知识库根目录「{root_alias}」不在当前配置里（或已停用），摘录无从核对——"
             "先把根目录配回来，或重新扫描产出新候选"
         )
-    resolved = safe_relative_path(root.id, relative_path, roots)
+    resolved = safe_relative_path(root.id, relative_path, roots, conn)
     path = resolved.absolute
     if not path.exists():
         raise KnowledgeConflict(f"文件已经不在了：{resolved.relative_path}")

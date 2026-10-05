@@ -2169,8 +2169,10 @@ def post_memory_purge(
 
 # ---------- 知识库（KB-04，方案 §6.7） ----------
 #
-# 根目录来自本地配置（环境变量 CADENCE_KNOWLEDGE_ROOTS，§10.3），接口只读、不提供任何
-# 写配置的口子：对外只有编号、别名与脱敏过的错误，绝对路径与盘符在任何响应里都不出现。
+# 根目录可以从**界面里配**（存在本机库的 knowledge_root 表），本机环境变量
+# `CADENCE_KNOWLEDGE_ROOTS` 只在库里一条都没有时作为兜底（§10.3）。
+# 绝对路径只在「知识库设置」这一个界面上回显（界面要能看见自己配的是哪个目录），
+# 扫描响应、文件清单、扫描账与候选 payload 一律只有别名与相对路径；盘符不出现在别处。
 # 扫描失败是**业务结果**：模型不通、输出不合格、文件被动过都会让状态落在 failed / partial
 # 并带人话原因与缺口，照常 200 返回——不伪装成功，也不炸 500。
 
@@ -2180,29 +2182,117 @@ class KnowledgeScanIn(BaseModel):
     root_id: int | None = Field(
         default=None, description="扫哪个根（GET /api/knowledge/roots 里的编号）；不给就用编号最小的可用根"
     )
-    mode: Literal["incremental", "full"] = Field(
+    mode: Literal["incremental", "full", "rescan"] = Field(
         default="incremental",
-        description="incremental=跳过当前版本已覆盖的文件；full=全部重扫",
+        description="incremental=跳过当前版本已覆盖的文件；rescan（旧写法 full）=全部重扫",
     )
-    scope: Literal["all", "paths"] = Field(
-        default="all", description="all=整个根；paths=只扫 paths 点名的文件"
+    scope: Literal["all", "paths", "changed", "selected"] = Field(
+        default="all",
+        description="all / changed=整个根；selected（旧写法 paths）=只扫 paths 点名的文件",
     )
     paths: list[str] = Field(
-        default_factory=list, description="scope=paths 时点名的文件（相对路径，越界 / 绝对路径 400）"
+        default_factory=list, description="scope=selected 时点名的文件（相对路径，越界 / 绝对路径 400）"
     )
     requirements_version: str = Field(
         default=knowledge_base.REQUIREMENTS_VERSION_DEFAULT, description="按哪一版需求口径提炼"
     )
 
 
-@app.get("/api/knowledge/roots")
-def get_knowledge_roots() -> dict:
-    """已配置的知识库根目录：编号、别名、可用状态与脱敏过的不可用原因。绝不含绝对路径。
+class KnowledgeRootIn(BaseModel):
+    """加一个知识库根。路径必须是**现成的目录**：后端会校验存在、规范化与逃逸，不合规给人话原因。"""
 
-    顺带给出读取配额的公开上限：界面按它画比例条，不用把数字抄一份在前端
+    alias: str = Field(min_length=1, max_length=40, description="显示名，不能与已有的重名")
+    path: str = Field(min_length=1, description="目录的绝对路径（从盘符或共享名写起）")
+    enabled: bool = Field(default=True, description="可以先停用着：加了不扫")
+
+
+class KnowledgeRootPatch(BaseModel):
+    """改一个根：只传要改的字段（没传的不动）。"""
+
+    alias: str | None = Field(default=None, min_length=1, max_length=40)
+    path: str | None = Field(default=None, min_length=1)
+    enabled: bool | None = None
+
+
+@app.get("/api/knowledge/roots")
+def get_knowledge_roots(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """已配置的知识库根目录：编号、别名、可用状态、来源（界面配的 / 环境变量）与脱敏错误。
+
+    **绝对路径只在这一处回**，而且只回「界面里配的」那些——不然你没法确认自己配的是哪个
+    目录。顺带给出读取配额的公开上限：界面按它画比例，不用把数字抄一份在前端
     （SPEC 第 14 节：组件不内联业务规则）。
     """
-    return {"roots": knowledge_base.public_roots(), "limits": knowledge_base.quota_limits()}
+    return {
+        "roots": knowledge_base.public_roots(conn),
+        "limits": knowledge_base.quota_limits(),
+    }
+
+
+@app.post("/api/knowledge/roots", status_code=201)
+def post_knowledge_root(
+    payload: KnowledgeRootIn, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """加一个知识库根。重名 409；路径不合格（不存在、不是目录、整盘、系统目录）400。"""
+    try:
+        root = knowledge_base.add_root(
+            conn, alias=payload.alias, path=payload.path, enabled=payload.enabled
+        )
+    except knowledge_base.KnowledgeConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except knowledge_base.KnowledgeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"root": knowledge_base.public_roots(conn, [root])[0]}
+
+
+@app.put("/api/knowledge/roots/{root_id}")
+def put_knowledge_root(
+    root_id: int, payload: KnowledgeRootPatch, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """改一个根（改名 / 换目录 / 启用停用）。只动传了的字段。"""
+    try:
+        root = knowledge_base.update_root(
+            conn, root_id, alias=payload.alias, path=payload.path, enabled=payload.enabled
+        )
+    except knowledge_base.KnowledgeNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except knowledge_base.KnowledgeConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except knowledge_base.KnowledgeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"root": knowledge_base.public_roots(conn, [root])[0]}
+
+
+@app.delete("/api/knowledge/roots/{root_id}")
+def delete_knowledge_root(
+    root_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """删一个根：只删这条配置，**一个文件都不动**；文件台账与扫描历史留着（那是审计）。"""
+    try:
+        knowledge_base.delete_root(conn, root_id)
+    except knowledge_base.KnowledgeNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"deleted": root_id}
+
+
+@app.post("/api/knowledge/roots/import-env", status_code=201)
+def post_knowledge_roots_import(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """把本机环境变量 `CADENCE_KNOWLEDGE_ROOTS` 里的根搬进库里。
+
+    只在「库里一条都没有、当前正靠环境变量生效」时有意义；搬完就由界面说了算。
+    """
+    return knowledge_base.import_env_roots(conn)
+
+
+@app.get("/api/knowledge/browse")
+def get_knowledge_browse(path: str | None = None) -> dict:
+    """列本机目录，只服务「选知识库根」这一个界面：只列子目录、不递归、不列文件。
+
+    每一项带 `problem`：不适合作根的理由（空就是能选）。不写 `path` 就从盘符与用户主目录开始。
+    """
+    try:
+        return knowledge_base.browse(path)
+    except knowledge_base.KnowledgeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.get("/api/knowledge/files")
@@ -2233,7 +2323,7 @@ def post_knowledge_scan(
     """
     root_id = payload.root_id
     if root_id is None:
-        usable = [root for root in knowledge_base.configured_roots() if root.enabled]
+        usable = [root for root in knowledge_base.configured_roots(conn) if root.enabled]
         if not usable:
             raise HTTPException(
                 status_code=400,

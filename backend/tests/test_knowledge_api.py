@@ -95,12 +95,14 @@ def _scan_row_count(conn) -> int:
 # ---------- GET /api/knowledge/roots ----------
 
 
-def test_roots_shape_and_a_disabled_root_never_leaks_its_path(vault, tmp_path):
-    payload = main.get_knowledge_roots()
+def test_roots_shape_and_a_disabled_root_never_leaks_its_path(conn, vault, tmp_path):
+    payload = main.get_knowledge_roots(conn)
 
     assert [root["id"] for root in payload["roots"]] == [1, 2]
     first, second = payload["roots"]
-    assert first == {"id": 1, "alias": "笔记", "enabled": True, "error": None}
+    assert first == {
+        "id": 1, "alias": "笔记", "enabled": True, "error": None, "source": "env",
+    }
     assert second["enabled"] is False and "不存在" in str(second["error"])
     rendered = json.dumps(payload, ensure_ascii=False)
     assert str(vault) not in rendered
@@ -275,11 +277,11 @@ def test_scan_history_has_only_ledger_fields_and_supports_root_filter(conn, vaul
     assert main.get_knowledge_scans(root_id=2, conn=conn) == {"scans": []}
 
 
-def test_roots_route_publishes_the_quota_limits(vault):
+def test_roots_route_publishes_the_quota_limits(conn, vault):
     """配额上限由后端给，界面不抄数字（SPEC 第 14 节：组件不内联业务规则）。"""
     from app import knowledge_base as kb
 
-    payload = main.get_knowledge_roots()
+    payload = main.get_knowledge_roots(conn)
 
     assert payload["limits"] == {
         "max_read_calls": kb.MAX_READ_CALLS,
@@ -287,3 +289,56 @@ def test_roots_route_publishes_the_quota_limits(vault):
         "max_total_chars": kb.MAX_TOTAL_CHARS,
     }
     assert all("limits" not in root for root in payload["roots"])  # 上限不混进每个根
+
+
+def test_ui_roots_can_be_added_changed_and_removed_through_the_api(conn, tmp_path, vault):
+    """界面里配根目录：加 / 改名停用 / 删；环境变量那份仍照旧只读。"""
+    folder = tmp_path / "资料库"
+    folder.mkdir()
+
+    created = main.post_knowledge_root(
+        main.KnowledgeRootIn(alias="资料", path=str(folder)), conn
+    )["root"]
+    assert created["alias"] == "资料" and created["source"] == "ui"
+    assert created["path"] == str(folder.resolve())  # 配置界面能看到自己配的目录
+
+    renamed = main.put_knowledge_root(
+        created["id"], main.KnowledgeRootPatch(alias="资料库", enabled=False), conn
+    )["root"]
+    assert renamed["alias"] == "资料库" and renamed["enabled"] is False
+
+    assert main.delete_knowledge_root(created["id"], conn) == {"deleted": created["id"]}
+    # 删完回到环境变量兜底：那两个 env 根还在，界面那份没了
+    aliases = [root["alias"] for root in main.get_knowledge_roots(conn)["roots"]]
+    assert aliases == ["笔记", "空壳"]
+
+
+def test_adding_a_bad_root_gives_400_and_a_duplicate_gives_409(conn, tmp_path, vault):
+    folder = tmp_path / "资料库"
+    folder.mkdir()
+    main.post_knowledge_root(main.KnowledgeRootIn(alias="资料", path=str(folder)), conn)
+
+    with pytest.raises(HTTPException) as dup:
+        main.post_knowledge_root(main.KnowledgeRootIn(alias="资料", path=str(folder)), conn)
+    assert dup.value.status_code == 409
+
+    with pytest.raises(HTTPException) as bad:
+        main.post_knowledge_root(
+            main.KnowledgeRootIn(alias="别处", path=str(tmp_path / "不存在")), conn
+        )
+    assert bad.value.status_code == 400
+
+
+def test_browse_route_lists_directories(conn, tmp_path, vault):
+    sub = tmp_path / "父目录"
+    sub.mkdir()
+    (sub / "子目录").mkdir()
+
+    listing = main.get_knowledge_browse(str(sub))
+
+    assert [item["name"] for item in listing["entries"]] == ["子目录"]
+    assert listing["problem"] is None
+
+    with pytest.raises(HTTPException) as bad:
+        main.get_knowledge_browse("相对/路径")
+    assert bad.value.status_code == 400

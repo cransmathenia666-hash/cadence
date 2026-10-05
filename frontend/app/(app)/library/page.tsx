@@ -28,10 +28,12 @@ import {
 
 import {
   ApiError,
+  createKnowledgeRoot,
   getKnowledgeFiles,
   getKnowledgeRoots,
   getKnowledgeScans,
   startKnowledgeScan,
+  updateKnowledgeRoot,
   type KnowledgeFileListing,
   type KnowledgeLimits,
   type KnowledgeRoot,
@@ -39,6 +41,11 @@ import {
   type KnowledgeScanReport,
 } from "@/lib/api";
 import { ActionSwapButton } from "@/components/motion/action-swap";
+import {
+  KnowledgeRootPanel,
+  KnowledgeRootsRail,
+  type RootDraft,
+} from "@/components/knowledge/root-config";
 
 const LOAD_ROOTS_FAILED = "取知识库配置时出了意外错误";
 const LOAD_FILES_FAILED = "取文件清单时出了意外错误";
@@ -101,8 +108,58 @@ export default function LibraryPage() {
   const [scanPending, setScanPending] = useState(false);
   const [lastReport, setLastReport] = useState<KnowledgeScanReport | null>(null);
 
+  // 配置面：null = 在看台账；有值 = 正在添加 / 编辑某个根，主栏让给它。
+  const [draft, setDraft] = useState<RootDraft | null>(null);
+  const [configBusy, setConfigBusy] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+
   // 异步切换根目录的竞态闸：只有最后一次请求有权落视图（页面重做模板的老规矩）。
   const filesSeq = useRef(0);
+
+  /** 配置动过之后重取根目录：优先选中刚动过的那个，否则退回第一个可用的。 */
+  async function reloadAfterConfig(preferId: number | null) {
+    const data = await getKnowledgeRoots();
+    setRoots(data.roots);
+    setLimits(data.limits);
+    const usable = data.roots.filter((root) => root.enabled);
+    const pick =
+      (preferId === null ? undefined : usable.find((root) => root.id === preferId)) ??
+      usable[0] ??
+      null;
+    setSelectedRootId(pick ? pick.id : null);
+    setLastReport(null);
+    setActionError(null);
+  }
+
+  function openAdd() {
+    setConfigError(null);
+    setDraft({ id: null, alias: "", path: "", enabled: true });
+  }
+
+  function openEdit(root: KnowledgeRoot) {
+    setConfigError(null);
+    setDraft({ id: root.id, alias: root.alias, path: root.path ?? "", enabled: root.enabled });
+  }
+
+  async function saveDraft() {
+    if (draft === null) return;
+    const alias = draft.alias.trim();
+    const path = draft.path.trim();
+    setConfigBusy(true);
+    setConfigError(null);
+    try {
+      const saved =
+        draft.id === null
+          ? await createKnowledgeRoot({ alias, path, enabled: draft.enabled })
+          : await updateKnowledgeRoot(draft.id, { alias, path, enabled: draft.enabled });
+      setDraft(null);
+      await reloadAfterConfig(saved.id);
+    } catch (cause) {
+      setConfigError(messageOf(cause, "保存时出了意外错误"));
+    } finally {
+      setConfigBusy(false);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -215,57 +272,20 @@ export default function LibraryPage() {
         <div className="grid gap-10 lg:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="min-w-0 border-b border-white/[0.1] pb-8 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-8">
             <div className="space-y-8">
-              <RailBlock title="根目录" hint="来自本地配置（别名=绝对路径），界面只见别名与相对路径">
-                {roots === null ? (
-                  <p className="text-[11px] leading-5 text-white/40">正在读取配置…</p>
-                ) : roots.length === 0 ? (
-                  <p className="text-[11px] leading-5 text-white/40">
-                    还没有配置任何根目录。
-                  </p>
-                ) : (
-                  <ul className="space-y-1">
-                    {roots.map((root) => {
-                      const selectable = root.enabled && !scanPending;
-                      const selected = root.enabled && root.id === selectedRootId;
-                      return (
-                        <li key={root.id}>
-                          <button
-                            type="button"
-                            disabled={!selectable}
-                            onClick={() => {
-                              setSelectedRootId(root.id);
-                              setLastReport(null);
-                              setActionError(null);
-                            }}
-                            aria-current={selected ? "true" : undefined}
-                            className={`w-full rounded-lg px-3 py-2.5 text-left transition-colors disabled:cursor-not-allowed ${
-                              selected
-                                ? "bg-white/[0.05] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]"
-                                : selectable
-                                  ? "text-white/60 hover:bg-white/[0.02] hover:text-white/90"
-                                  : "text-white/35"
-                            }`}
-                          >
-                            <span className="flex items-center justify-between gap-3">
-                              <span className="truncate text-[13px] font-medium">{root.alias}</span>
-                              {root.enabled ? (
-                                <span className={`shrink-0 text-[11px] ${selected ? "text-white/70" : "text-white/40"}`}>
-                                  {currentListing !== null && currentListing.root.id === root.id ? `${currentListing.files.length} 篇` : "可用"}
-                                </span>
-                              ) : (
-                                <span className="shrink-0 text-[11px] text-amber-200/70">停用</span>
-                              )}
-                            </span>
-                            {root.error && (
-                              <span className="mt-1 block text-[11px] leading-4 text-amber-200/65">{root.error}</span>
-                            )}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </RailBlock>
+              <KnowledgeRootsRail
+                roots={roots}
+                selectedRootId={selectedRootId}
+                locked={scanPending}
+                onSelect={(root) => {
+                  setDraft(null);
+                  setSelectedRootId(root.id);
+                  setLastReport(null);
+                  setActionError(null);
+                }}
+                onAdd={openAdd}
+                onEdit={openEdit}
+                onImported={() => void reloadAfterConfig(null)}
+              />
 
               <RailBlock title="扫描" hint="只产候选提案，不直接改档案；改过的文件会重新处理">
                 <div className="flex gap-1" role="group" aria-label="扫描模式">
@@ -351,10 +371,28 @@ export default function LibraryPage() {
           </aside>
 
           <main className="min-w-0">
-            {roots !== null && roots.length === 0 ? (
-              <EmptyLibrary />
+            {draft !== null ? (
+              <KnowledgeRootPanel
+                draft={draft}
+                busy={configBusy}
+                error={configError}
+                onChange={(patch) =>
+                  setDraft((current) => (current === null ? current : { ...current, ...patch }))
+                }
+                onSave={() => void saveDraft()}
+                onCancel={() => {
+                  setDraft(null);
+                  setConfigError(null);
+                }}
+                onDeleted={() => {
+                  setDraft(null);
+                  void reloadAfterConfig(null);
+                }}
+              />
+            ) : roots !== null && roots.length === 0 ? (
+              <EmptyLibrary onAdd={openAdd} />
             ) : roots !== null && selectedRootId === null ? (
-              <DisabledLibrary roots={roots} />
+              <DisabledLibrary roots={roots} onAdd={openAdd} />
             ) : (
               <section className="space-y-9" aria-busy={scanPending}>
                 {lastReport !== null && <ScanReceipt report={lastReport} limits={limits} />}
@@ -428,38 +466,60 @@ export default function LibraryPage() {
   );
 }
 
-/** 还没配任何根时的空态：说清怎么配，不假装页面坏了。 */
-function EmptyLibrary() {
+/** 还没配任何根时的空态：说清怎么加，不假装页面坏了。 */
+function EmptyLibrary({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="flex min-h-[52vh] flex-col items-start justify-center border-b border-white/10 py-16">
       <Library className="mb-8 size-9 stroke-[1.4] text-white/45" aria-hidden="true" />
-      <h2 className="text-[clamp(1.75rem,3vw,2.5rem)] font-medium tracking-[-0.025em]">还没有配置知识库根目录</h2>
+      <h2 className="text-[clamp(1.75rem,3vw,2.5rem)] font-medium tracking-[-0.025em]">还没有知识库</h2>
       <p className="mt-4 max-w-[52ch] text-[14px] leading-7 text-white/65">
-        在本地配置里设置环境变量 <span className="font-mono text-[13px] text-white/80">CADENCE_KNOWLEDGE_ROOTS</span>
-        （写法「别名=绝对路径」，多根用分号分隔），重启后端后回到这一页——
-        这里会列出每个根下可读的 Markdown 与文本文件，扫描只读它们。
+        选一个本机目录加进来（笔记、资料都行）。扫描只读它里面的 Markdown 与纯文本，
+        逐篇读原文、只产带出处的档案候选——写不写由你在提案页裁定，它一个文件都不会改。
       </p>
+      <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-3">
+        <button
+          type="button"
+          onClick={onAdd}
+          className="rounded-md bg-white px-4 py-2 text-[13px] text-black transition-colors hover:bg-white/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/70"
+        >
+          添加知识库
+        </button>
+        <span className="max-w-[40ch] text-[12px] leading-5 text-white/40">
+          也可以继续用本机环境变量
+          <span className="mx-1 font-mono text-[11.5px] text-white/60">CADENCE_KNOWLEDGE_ROOTS</span>
+          配「别名=绝对路径」——加进来之后能一键搬到界面里管。
+        </span>
+      </div>
     </div>
   );
 }
 
 /** 根都配了但没有一个可用：把后端写好的原因逐个摆出来。 */
-function DisabledLibrary({ roots }: { roots: KnowledgeRoot[] }) {
+function DisabledLibrary({ roots, onAdd }: { roots: KnowledgeRoot[]; onAdd: () => void }) {
   return (
     <div className="flex min-h-[52vh] flex-col items-start justify-center border-b border-white/10 py-16">
       <ShieldAlert className="mb-8 size-9 stroke-[1.4] text-white/45" aria-hidden="true" />
-      <h2 className="text-[clamp(1.75rem,3vw,2.5rem)] font-medium tracking-[-0.025em]">当前没有可用的知识库根目录</h2>
+      <h2 className="text-[clamp(1.75rem,3vw,2.5rem)] font-medium tracking-[-0.025em]">当前没有可用的知识库</h2>
       <ul className="mt-5 space-y-2">
         {roots.map((root) => (
-          <li key={root.id} className="max-w-[60ch] text-[13px] leading-6 text-white/60">
+          <li key={`${root.source}-${root.id}`} className="max-w-[60ch] text-[13px] leading-6 text-white/60">
             <span className="text-white/85">{root.alias}</span>
             {root.error && <span className="text-amber-200/75"> · {root.error}</span>}
           </li>
         ))}
       </ul>
-      <p className="mt-6 max-w-[52ch] text-[13px] leading-6 text-white/45">
-        修好本地配置（别名=绝对路径，指向存在的目录）后，这一页会自己恢复。
-      </p>
+      <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-3">
+        <button
+          type="button"
+          onClick={onAdd}
+          className="rounded-md bg-white px-4 py-2 text-[13px] text-black transition-colors hover:bg-white/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/70"
+        >
+          换个目录加一个
+        </button>
+        <span className="max-w-[44ch] text-[12px] leading-5 text-white/40">
+          停用的那些可以在左栏点开改名或换目录，改好就恢复。
+        </span>
+      </div>
     </div>
   );
 }

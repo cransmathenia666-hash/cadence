@@ -418,6 +418,11 @@
   - Verify：job dry-run 与临时库测试。
   - Files：`backend/app/jobs/weekly_checkpoint.py`、`backend/tests/test_weekly.py`
 
+- [x] **KB-07 根目录在界面里配（2026-10-05 用户加的口径：不该让人去改 .env）**
+  - Acceptance：知识库页能添加 / 改名 / 换目录 / 停用 / 删除根目录，并能**浏览本机目录直接选**；配置存本机库（`knowledge_root`），环境变量只在库里一条都没有时作兜底且可一键搬进来；绝对路径只在该界面回显，扫描账 / 文件清单 / 候选出处 / 日志里仍只有别名与相对路径。
+  - Verify：临时目录单测（越界、整盘根、系统目录、仓库自己、重名、目录消失）+ 路由契约 + lint/tsc + 用户走查。
+  - Files：`backend/app/knowledge_base.py`、`backend/app/main.py`、`backend/sql/schema.sql`、`frontend/components/knowledge/root-config.tsx`、`frontend/app/(app)/library/page.tsx`
+
 ## P6 真实使用与质量调参
 
 - [ ] **T18 两周试用与成果闭环走查**

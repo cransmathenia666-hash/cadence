@@ -62,7 +62,7 @@ def run(
         # 干跑一行都不写：不落通知记录、不导出、不扫记忆、不碰知识库——
         # 知识库这步只预告会对哪些根跑，一个模型都不调、不写覆盖账。
         if with_knowledge:
-            report["knowledge"] = {"planned_roots": [root.alias for root in _knowledge_targets()]}
+            report["knowledge"] = {"planned_roots": [root.alias for root in _knowledge_targets(conn)]}
         return report
 
     if decision["send"]:
@@ -86,9 +86,9 @@ def run(
     return report
 
 
-def _knowledge_targets() -> list[knowledge_base.Root]:
+def _knowledge_targets(conn: sqlite3.Connection) -> list[knowledge_base.Root]:
     """每周知识库这一步的目标根：当前配置里**可用**的那些（dry-run 预告也用它）。"""
-    return [root for root in knowledge_base.configured_roots() if root.enabled]
+    return [root for root in knowledge_base.configured_roots(conn) if root.enabled]
 
 
 def _run_knowledge_scans(conn: sqlite3.Connection) -> dict:
@@ -98,7 +98,7 @@ def _run_knowledge_scans(conn: sqlite3.Connection) -> dict:
     单个根的异常收成一行 failed，让报告如实说「这个根这轮没扫成」。
     没配可用的根不算失败，只是如实说一声跳过了。
     """
-    targets = _knowledge_targets()
+    targets = _knowledge_targets(conn)
     if not targets:
         return {
             "roots": 0,
